@@ -319,6 +319,98 @@ async function queryLambdaModel(input, rag_flag) {
 }
 
 // ========================================
+// Streaming Utility (SSE-style)
+// ========================================
+
+/**
+ * Stream a JSON POST request and invoke a callback for each text chunk.
+ * This helper is designed for LLM endpoints that return Server-Sent-Events
+ * (e.g. lines beginning with "data: ") similar to the OpenAI streaming API.
+ *
+ * @param {string} url        – Endpoint to POST to
+ * @param {object} data       – JSON payload
+ * @param {function(string)} onChunk – Callback invoked with each text chunk
+ * @param {string|null} apiKey – Optional Bearer token
+ */
+async function postJsonStream(url, data, onChunk, apiKey = null) {
+    try {
+        if (!url || !data || !onChunk) {
+            throw new LLMServiceError('Missing required parameters for postJsonStream');
+        }
+
+        const headers = { 'Content-Type': 'application/json' };
+        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+        const res = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(data)
+        });
+
+        if (!res.ok) {
+            throw new LLMServiceError(`HTTP error: ${res.status} ${res.statusText}`);
+        }
+
+        return new Promise((resolve, reject) => {
+            let buffer = '';
+
+            // node-fetch returns a Node.js Readable stream
+            res.body.on('data', (chunk) => {
+                buffer += chunk.toString();
+
+                // Split on newlines – each SSE event is separated by a blank line
+                const parts = buffer.split(/\n/);
+                // Keep the last partial line in the buffer
+                buffer = parts.pop();
+
+                for (let part of parts) {
+                    part = part.trim();
+                    if (!part) continue;
+
+                    // Remove the SSE prefix if present (e.g., "data: ...")
+                    if (part.startsWith('data:')) {
+                        part = part.slice(5).trim();
+                    }
+
+                    // Handle stream terminator
+                    if (part === '[DONE]') {
+                        return; // Ignore – end will be handled by 'end' event
+                    }
+
+                    // Try to parse JSON – fallback to raw text if parsing fails
+                    let textChunk = '';
+                    try {
+                        const parsed = JSON.parse(part);
+                        // Attempt to extract the assistant text following the OpenAI spec
+                        textChunk = parsed.choices?.[0]?.delta?.content || parsed.response || '';
+                    } catch (_) {
+                        textChunk = part; // raw text
+                    }
+
+                    if (textChunk) {
+                        try {
+                            onChunk(textChunk);
+                        } catch (cbErr) {
+                            // If the consumer throws, stop streaming
+                            res.body.destroy();
+                            reject(cbErr);
+                        }
+                    }
+                }
+            });
+
+            res.body.on('end', () => resolve());
+            res.body.on('error', (err) => reject(new LLMServiceError('Stream read error', err)));
+        });
+    } catch (error) {
+        if (error instanceof LLMServiceError) {
+            throw error;
+        }
+        throw new LLMServiceError('Failed to perform streaming POST request', error);
+    }
+}
+
+// ========================================
 // Module Exports
 // ========================================
 
@@ -331,6 +423,7 @@ module.exports = {
     // Utility functions
     count_tokens,
     safe_count_tokens,
+    postJsonStream,
     
     // OpenAI client functions
     setupOpenaiClient,

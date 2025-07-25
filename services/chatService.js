@@ -13,6 +13,7 @@ const {
   queryChatImage,
   queryRag,
   postJson,
+  postJsonStream,
   LLMServiceError
 } = require('./llmServices');
 const {
@@ -717,18 +718,287 @@ async function enhanceQuery(originalQuery, systemPrompt = '', image = null, mode
   }
 }
 
+// ========================================
+// Streaming Helpers
+// ========================================
+
+/**
+ * Stream responses from the underlying model. This mirrors `runModel` but
+ * delivers chunks through the provided `onChunk` callback rather than returning
+ * the full string.
+ *
+ * @param {object} ctx        – Same context object used by runModel
+ * @param {object} modelData  – Metadata from getModelData()
+ * @param {function(string)} onChunk – Callback for each text chunk
+ */
+async function runModelStream(ctx, modelData, onChunk) {
+  if (ctx.image) {
+    // Current image endpoints do not support streaming; fall back to a single shot
+    const full = await runModel(ctx, modelData);
+    onChunk(full);
+    return;
+  }
+
+  // ---------------------- client-based models ----------------------
+  if (modelData.queryType === 'client') {
+    const client = setupOpenaiClient(modelData.apiKey, modelData.endpoint);
+    const stream = await client.chat.completions.create({
+      model: ctx.model,
+      messages: [
+        { role: 'system', content: ctx.systemPrompt },
+        { role: 'user', content: ctx.prompt }
+      ],
+      stream: true
+    });
+
+    for await (const part of stream) {
+      const text = part.choices?.[0]?.delta?.content;
+      if (text) onChunk(text);
+    }
+    return;
+  }
+
+  // ---------------------- request-based models ----------------------
+  if (modelData.queryType === 'request') {
+    // Build the same payload used in runModel
+    const payload = {
+      model: ctx.model,
+      temperature: 1.0,
+      messages: [
+        { role: 'system', content: ctx.systemPrompt },
+        { role: 'user', content: ctx.prompt }
+      ],
+      stream: true
+    };
+
+    // Utilize streaming POST helper
+    await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+    return;
+  }
+
+  throw new LLMServiceError(`Invalid queryType for streaming: ${modelData.queryType}`);
+}
+
+/**
+ * SSE-enabled version of handleCopilotRequest. Writes chunks directly to `res`.
+ */
+async function handleCopilotStreamRequest(opts, res) {
+  // Early exit helper for SSE error delivery
+  const sendSseError = (errorMsg) => {
+    try {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: errorMsg })}\n\n`);
+      res.end();
+    } catch (_) { /* noop */ }
+  };
+
+  try {
+    const {
+      query = '',
+      model,
+      session_id,
+      user_id,
+      system_prompt = '',
+      save_chat = true,
+      include_history = true,
+      rag_db = null,
+      num_docs,
+      image = null,
+      enhanced_prompt = null,
+      ...rest
+    } = opts;
+
+    const modelData = await getModelData(model);
+
+    // --------------------------------------------------------------
+    // (1) Determine whether to enhance the query / route to RAG
+    // --------------------------------------------------------------
+
+    const chatSession = await getChatSession(session_id);
+    const history = chatSession?.messages || [];
+
+    const defaultInstructionPrompt =
+      'You are an assistant that only outputs JSON. Do not write any explanatory text or natural language.\n' +
+      'Your tasks are:\n' +
+      '1. Store the original user query in the "query" field.\n' +
+      '2. Rewrite the query as "enhancedQuery" by intelligently incorporating any *relevant* context provided, while preserving the original intent.\n' +
+      '   - If the original query is vague (e.g., "describe this page") and appears to reference a page, tool, feature, or system, rewrite it to make the help-related intent clear.\n' +
+      '   - If there is no relevant context or no need to enhance, copy the original query into "enhancedQuery".\n' +
+      '3. Set "rag_helpdesk" to true if the query relates to helpdesk-style topics such as:\n' +
+      '   - website functionality\n' +
+      '   - troubleshooting\n' +
+      '   - how-to questions\n' +
+      '   - user issues or technical support needs\n' +
+      '   - vague references to a page, tool, or feature that may require explanation or support\n' +
+      '   - **any question mentioning the BV-BRC (Bacterial and Viral Bioinformatics Resource Center) or its functionality**\n\n';
+
+    const contextAndFormatInstructions =
+      '\n\nAdditional context for the page the user is on, as well as relevant data, is provided below. Use it only if it helps clarify or improve the query:\n' +
+      `${system_prompt}\n\n` +
+      'Return ONLY a JSON object in the following format:\n' +
+      '{\n' +
+      '  "query": "<original user query>",\n' +
+      '  "enhancedQuery": "<rewritten or same query>",\n' +
+      '  "rag_helpdesk": <true or false>\n' +
+      '}';
+
+    const instructionSystemPrompt = (enhanced_prompt || defaultInstructionPrompt) + contextAndFormatInstructions;
+
+    let instructionResponse;
+    if (image) {
+      instructionResponse = await queryChatImage({
+        url: modelData.endpoint,
+        model,
+        query,
+        image,
+        system_prompt: instructionSystemPrompt
+      });
+    } else {
+      instructionResponse = await queryChatOnly({
+        query,
+        model,
+        system_prompt: instructionSystemPrompt,
+        modelData
+      });
+    }
+
+    const safeParseJson = (text) => {
+      if (!text || typeof text !== 'string') return null;
+      const cleaned = text
+        .replace(/```json[\s\S]*?```/gi, (m) => m.replace(/```json|```/gi, ''))
+        .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ''))
+        .trim();
+      try { return JSON.parse(cleaned); } catch (_) { return null; }
+    };
+
+    const parsed = safeParseJson(instructionResponse) || {
+      query,
+      enhancedQuery: query,
+      rag_helpdesk: false
+    };
+
+    const finalQuery      = parsed.enhancedQuery || query;
+    const useHelpdeskRag  = !!parsed.rag_helpdesk;
+    const activeRagDb     = useHelpdeskRag ? 'bvbrc_helpdesk' : null;
+
+    // --------------------------------------------------------------
+    // (2) Build context: history + RAG
+    // --------------------------------------------------------------
+
+    let ragDocs = null;
+    if (activeRagDb) {
+      const { documents = ['No documents found'] } = await queryRag(finalQuery, activeRagDb, user_id, model, num_docs, session_id);
+      ragDocs = documents;
+    }
+
+    if (rag_db && rag_db !== 'bvbrc_helpdesk') {
+      const { documents = ['No documents found'] } = await queryRag(finalQuery, rag_db, user_id, model, num_docs, session_id);
+      ragDocs = ragDocs ? ragDocs.concat(documents) : documents;
+    }
+
+    // --------------------------------------------------------------
+    // (3) Construct prompt
+    // --------------------------------------------------------------
+
+    const max_tokens = 40000;
+    let promptWithHistory = finalQuery;
+    if (include_history && history.length > 0) {
+      promptWithHistory = await createQueryFromMessages(finalQuery, history, system_prompt, max_tokens);
+    }
+
+    if (ragDocs) {
+      if (include_history && history.length > 0) {
+        promptWithHistory = `${promptWithHistory}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
+      } else {
+        promptWithHistory = `Current User Query: ${finalQuery}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
+      }
+    }
+
+    const ctx = {
+      prompt: promptWithHistory,
+      systemPrompt: system_prompt,
+      model,
+      image,
+      ragDocs
+    };
+
+    // --------------------------------------------------------------
+    // (4) Persist initial messages (user & system) BEFORE streaming
+    // --------------------------------------------------------------
+
+    const userContentForHistory = `Enhanced User Query: ${finalQuery}\n\nInstruction System Prompt: ${instructionSystemPrompt}`;
+
+    const userMessage = createMessage('user', query);
+
+    let systemMessage = null;
+    if (system_prompt && system_prompt.trim() !== '') {
+      systemMessage = createMessage('system', system_prompt);
+      if (ragDocs) systemMessage.documents = ragDocs;
+      if (userContentForHistory) systemMessage.copilotDetails = userContentForHistory;
+    }
+
+    if (!chatSession && save_chat) {
+      await createChatSession(session_id, user_id);
+    }
+
+    if (save_chat) {
+      const initialMsgs = systemMessage ? [userMessage, systemMessage] : [userMessage];
+      await addMessagesToSession(session_id, initialMsgs);
+    }
+
+    // --------------------------------------------------------------
+    // (5) Stream assistant response
+    // --------------------------------------------------------------
+    let assistantBuffer = '';
+    const onChunk = (text) => {
+      assistantBuffer += text;
+      // escape newlines for SSE so each chunk is one event
+      const safeText = text.replace(/\n/g, '\\n');
+      res.write(`data: ${safeText}\n\n`);
+    };
+
+    await runModelStream(ctx, modelData, onChunk);
+
+    // signal stream completion
+    res.write('data: [DONE]\n\n');
+    res.end();
+
+    // --------------------------------------------------------------
+    // (6) Persist assistant message after stream completes
+    // --------------------------------------------------------------
+
+    const assistantMessage = createMessage('assistant', assistantBuffer);
+
+    if (save_chat) {
+      await addMessagesToSession(session_id, [assistantMessage]);
+    }
+
+  } catch (error) {
+    console.error('Streaming copilot error:', error);
+    sendSseError('Internal server error');
+  }
+}
 
 
 module.exports = {
+  // Core chat flows
+  handleCopilotRequest,
+  handleCopilotStreamRequest,
   handleChatRequest,
   handleRagRequest,
+  handleChatImageRequest,
   handleLambdaDemo,
+
+  // Additional chat utilities
+  handleChatQuery,
+  createQueryFromMessages,
+  enhanceQuery,
+
+  // Infrastructure helpers
   getOpenaiClient,
   queryModel,
   queryRequest,
-  handleChatQuery,
-  handleChatImageRequest,
-  getPathState,
-  handleCopilotRequest
+  runModel,
+  runModelStream,
+  getPathState
 };
 
