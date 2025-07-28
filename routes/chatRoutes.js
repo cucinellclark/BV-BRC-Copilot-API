@@ -25,9 +25,11 @@ router.post('/copilot', authenticate, async (req, res) => {
         if (req.body.stream === true) {
             // -------- Streaming (SSE) path --------
             res.set({
-                'Content-Type': 'text/event-stream',
+                // Headers required for proper SSE behaviour and to disable proxy buffering
+                'Content-Type': 'text/event-stream; charset=utf-8',
                 'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no' // Prevent Nginx (and similar) from buffering the stream
             });
             // Immediately flush the headers so the client is aware it's an SSE stream
             if (typeof res.flushHeaders === 'function') {

@@ -801,7 +801,7 @@ async function handleCopilotStreamRequest(opts, res) {
       save_chat = true,
       include_history = true,
       rag_db = null,
-      num_docs,
+      num_docs = 5,
       image = null,
       enhanced_prompt = null,
       ...rest
@@ -949,18 +949,41 @@ async function handleCopilotStreamRequest(opts, res) {
     // (5) Stream assistant response
     // --------------------------------------------------------------
     let assistantBuffer = '';
+    
+    // Send a keep-alive comment every 15 seconds so that proxies/clients do not time out
+    const keepAliveInterval = setInterval(() => {
+      try {
+        res.write(': keep-alive\n\n');
+        if (typeof res.flush === 'function') {
+          res.flush();
+        }
+      } catch (e) {
+        /* Ignore network errors – connection may already be closed */
+      }
+    }, 15000);
+
     const onChunk = (text) => {
       assistantBuffer += text;
       // escape newlines for SSE so each chunk is one event
       const safeText = text.replace(/\n/g, '\\n');
       res.write(`data: ${safeText}\n\n`);
+      if (typeof res.flush === 'function') {
+        // Force flush so that small chunks are delivered immediately
+        res.flush();
+      }
     };
 
     await runModelStream(ctx, modelData, onChunk);
 
     // signal stream completion
     res.write('data: [DONE]\n\n');
+    if (typeof res.flush === 'function') {
+      res.flush();
+    }
     res.end();
+
+    // Stop keep-alive pings once the stream has finished
+    clearInterval(keepAliveInterval);
 
     // --------------------------------------------------------------
     // (6) Persist assistant message after stream completes
