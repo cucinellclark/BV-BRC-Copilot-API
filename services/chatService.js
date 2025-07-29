@@ -28,6 +28,11 @@ const {
 const { ChromaClient } = require('chromadb');
 const fs = require('fs');
 
+// === New helper modules (refactor) ===
+const { safeParseJson } = require('./jsonUtils');
+const { prepareCopilotContext } = require('./contextBuilder');
+const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
+
 const MAX_TOKEN_HEADROOM = 500;
 
 const config = require('../config.json');
@@ -105,219 +110,30 @@ async function runModel(ctx, modelData) {
 
 async function handleCopilotRequest(opts) {
   try {
-    // Destructure and set defaults from incoming options
     const {
-      query = '',
-      model,
-      session_id,
-      user_id,
-      system_prompt = '',
       save_chat = true,
-      include_history = true,
-      rag_db = null,
-      num_docs,
-      image = null,
-      enhanced_prompt = null,
-      ...rest // capture any additional, future fields without breaking
+      session_id,
+      user_id
     } = opts;
 
-    // ------------------------------------------------------------------
-    // (1) Determine whether to enhance the query / route to help-desk RAG
-    // ------------------------------------------------------------------
+    // Build context (deduplicated logic)
+    const {
+      ctx,
+      modelData,
+      userMessage,
+      systemMessage,
+      chatSession
+    } = await prepareCopilotContext(opts);
 
-    // Retrieve model configuration (API key, endpoint, etc.)
-    const modelData = await getModelData(model);
+    // Obtain assistant response in a single shot
+    const assistantText = await runModel(ctx, modelData);
+    const assistantMessage = createMessage('assistant', assistantText);
 
-    // Get conversation history first so it can be used in screenshot assessment
-    const chatSession = await getChatSession(session_id);
-    const history = chatSession?.messages || [];
-
-    // System prompt instructing the model to return structured JSON
-    const defaultInstructionPrompt = 
-    'You are an assistant that only outputs JSON. Do not write any explanatory text or natural language.\n' +
-    'Your tasks are:\n' +
-    '1. Store the original user query in the "query" field.\n' +
-    '2. Rewrite the query as "enhancedQuery" by intelligently incorporating any *relevant* context provided, while preserving the original intent.\n' +
-    '   - If the original query is vague (e.g., "describe this page") and appears to reference a page, tool, feature, or system, rewrite it to make the help-related intent clear.\n' +
-    '   - If there is no relevant context or no need to enhance, copy the original query into "enhancedQuery".\n' +
-    '3. Set "rag_helpdesk" to true if the query relates to helpdesk-style topics such as:\n' +
-    '   - website functionality\n' +
-    '   - troubleshooting\n' +
-    '   - how-to questions\n' +
-    '   - user issues or technical support needs\n' +
-    '   - vague references to a page, tool, or feature that may require explanation or support\n' +
-    '   - **any question mentioning the BV-BRC (Bacterial and Viral Bioinformatics Resource Center) or its functionality**\n\n';
-
-    const contextAndFormatInstructions = 
-    '\n\nAdditional context for the page the user is on, as well as relevant data, is provided below. Use it only if it helps clarify or improve the query:\n' +
-    `${system_prompt}\n\n` +
-    'Return ONLY a JSON object in the following format:\n' +
-    '{\n' +
-    '  "query": "<original user query>",\n' +
-    '  "enhancedQuery": "<rewritten or same query>",\n' +
-    '  "rag_helpdesk": <true or false>\n' +
-    '}';
-
-    console.log('***** enhanced_prompt *****\n', enhanced_prompt);
-
-    const instructionSystemPrompt = (enhanced_prompt || defaultInstructionPrompt) + contextAndFormatInstructions;
-  
-
-    // Call the LLM (image-aware if image is present)
-    let instructionResponse;
-    if (image) {
-      instructionResponse = await queryChatImage({
-        url: modelData.endpoint,
-        model,
-        query,
-        image,
-        system_prompt: instructionSystemPrompt
-      });
-    } else {
-      instructionResponse = await queryChatOnly({
-        query,
-        model,
-        system_prompt: instructionSystemPrompt,
-        modelData
-      });
-    }
-
-    // Utility for safely parsing possibly-wrapped JSON
-    const safeParseJson = (text) => {
-      if (!text || typeof text !== 'string') return null;
-      // Remove markdown fences if the model wrapped the JSON
-      const cleaned = text
-        .replace(/```json[\s\S]*?```/gi, (m) => m.replace(/```json|```/gi, ''))
-        .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ''))
-        .trim();
-
-      try {
-        return JSON.parse(cleaned);
-      } catch (_) {
-        // Fallback: extract first {...} block
-        const first = cleaned.indexOf('{');
-        const last  = cleaned.lastIndexOf('}');
-        if (first !== -1 && last !== -1) {
-          try { return JSON.parse(cleaned.slice(first, last + 1)); } catch (_) { return null; }
-        }
-      }
-      return null;
-    };
-
-    const parsed = safeParseJson(instructionResponse) || {
-      query,
-      enhancedQuery: query,
-      rag_helpdesk: false
-    };
-    console.log('***** parsed *****\n', parsed);
-
-    const finalQuery      = parsed.enhancedQuery || query;
-    const useHelpdeskRag  = !!parsed.rag_helpdesk;
-    const activeRagDb     = useHelpdeskRag ? 'bvbrc_helpdesk' : null;
-
-    // ------------------------------------------------------------------
-    // (2) Build context: history, RAG retrieval, embeddings, etc.
-    // ------------------------------------------------------------------
-
-    // chatSession and history are already retrieved above for screenshot assessment
-
-    // Retrieve documents (if RAG)
-    let ragDocs = null;
-    if (activeRagDb) {
-      var { documents = ['No documents found'] } = await queryRag(
-        finalQuery,
-        activeRagDb,
-        user_id,
-        model,
-        num_docs,
-        session_id
-      );
-      ragDocs = documents;
-    }
-
-    if (rag_db && rag_db !== 'bvbrc_helpdesk') {
-      var { documents = ['No documents found'] } = await queryRag(
-        finalQuery,
-        rag_db,
-        user_id,
-        model,
-        num_docs,
-        session_id
-      );
-
-      if (ragDocs && ragDocs.length > 0) {
-        ragDocs = ragDocs.concat(documents);
-      } else {
-        ragDocs = documents;
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // (3) Construct the prompt (history + RAG documents)
-    // ------------------------------------------------------------------
-
-    const max_tokens = 40000;
-    let promptWithHistory = finalQuery;
-    if (include_history && history.length > 0) {
-      promptWithHistory = await createQueryFromMessages(
-        finalQuery,
-        history,
-        system_prompt,
-        max_tokens
-      );
-    }
-
-    if (ragDocs) {
-      if (include_history && history.length > 0) {
-        promptWithHistory = `${promptWithHistory}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
-      } else {
-        promptWithHistory = `Current User Query: ${finalQuery}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
-      }
-    }
-
-    // Update context object for runModel convenience
-    const ctx = {
-      prompt: promptWithHistory,
-      systemPrompt: system_prompt,
-      model,
-      image,
-      ragDocs
-    };
-
-    // ------------------------------------------------------------------
-    // (4) Obtain model response
-    // ------------------------------------------------------------------
-
-    const response = await runModel(ctx, modelData);
-
-    // ------------------------------------------------------------------
-    // (5) Persist conversation + embeddings
-    // ------------------------------------------------------------------
-
-    // Create message objects
-    const userContentForHistory = `Enhanced User Query: ${finalQuery}\n\nInstruction System Prompt: ${instructionSystemPrompt}`;
-
-    const userMessage       = createMessage('user', query);
-    const assistantMessage  = createMessage('assistant', response);
-
-    let systemMessage = null;
-    if (system_prompt && system_prompt.trim() !== '') {
-      systemMessage = createMessage('system', system_prompt);
-      if (ragDocs) systemMessage.documents = ragDocs;
-      if (userContentForHistory) systemMessage.copilotDetails = userContentForHistory;
-    }
-
-    // Ensure chat session exists if we intend to save
-    if (!chatSession && save_chat) {
-      await createChatSession(session_id, user_id);
-    }
-
-    // Store messages
+    // Persist conversation
     if (save_chat) {
-      const toInsert = systemMessage
-        ? [userMessage, systemMessage, assistantMessage]
-        : [userMessage, assistantMessage];
-
+      if (!chatSession) await createChatSession(session_id, user_id);
+      const toInsert = systemMessage ? [userMessage, systemMessage, assistantMessage]
+                                     : [userMessage, assistantMessage];
       await addMessagesToSession(session_id, toInsert);
     }
 
@@ -328,9 +144,7 @@ async function handleCopilotRequest(opts) {
       ...(systemMessage && { systemMessage })
     };
   } catch (error) {
-    if (error instanceof LLMServiceError) {
-      throw error;
-    }
+    if (error instanceof LLMServiceError) throw error;
     throw new LLMServiceError('Failed to handle copilot request', error);
   }
 }
@@ -783,221 +597,57 @@ async function runModelStream(ctx, modelData, onChunk) {
  * SSE-enabled version of handleCopilotRequest. Writes chunks directly to `res`.
  */
 async function handleCopilotStreamRequest(opts, res) {
-  // Early exit helper for SSE error delivery
-  const sendSseError = (errorMsg) => {
-    try {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: errorMsg })}\n\n`);
-      res.end();
-    } catch (_) { /* noop */ }
-  };
-
   try {
     const {
-      query = '',
-      model,
-      session_id,
-      user_id,
-      system_prompt = '',
       save_chat = true,
-      include_history = true,
-      rag_db = null,
-      num_docs = 5,
-      image = null,
-      enhanced_prompt = null,
-      ...rest
+      session_id,
+      user_id
     } = opts;
 
-    const modelData = await getModelData(model);
+    // Build context (shared logic)
+    const {
+      ctx,
+      modelData,
+      userMessage,
+      systemMessage,
+      chatSession
+    } = await prepareCopilotContext(opts);
 
-    // --------------------------------------------------------------
-    // (1) Determine whether to enhance the query / route to RAG
-    // --------------------------------------------------------------
-
-    const chatSession = await getChatSession(session_id);
-    const history = chatSession?.messages || [];
-
-    const defaultInstructionPrompt =
-      'You are an assistant that only outputs JSON. Do not write any explanatory text or natural language.\n' +
-      'Your tasks are:\n' +
-      '1. Store the original user query in the "query" field.\n' +
-      '2. Rewrite the query as "enhancedQuery" by intelligently incorporating any *relevant* context provided, while preserving the original intent.\n' +
-      '   - If the original query is vague (e.g., "describe this page") and appears to reference a page, tool, feature, or system, rewrite it to make the help-related intent clear.\n' +
-      '   - If there is no relevant context or no need to enhance, copy the original query into "enhancedQuery".\n' +
-      '3. Set "rag_helpdesk" to true if the query relates to helpdesk-style topics such as:\n' +
-      '   - website functionality\n' +
-      '   - troubleshooting\n' +
-      '   - how-to questions\n' +
-      '   - user issues or technical support needs\n' +
-      '   - vague references to a page, tool, or feature that may require explanation or support\n' +
-      '   - **any question mentioning the BV-BRC (Bacterial and Viral Bioinformatics Resource Center) or its functionality**\n\n';
-
-    const contextAndFormatInstructions =
-      '\n\nAdditional context for the page the user is on, as well as relevant data, is provided below. Use it only if it helps clarify or improve the query:\n' +
-      `${system_prompt}\n\n` +
-      'Return ONLY a JSON object in the following format:\n' +
-      '{\n' +
-      '  "query": "<original user query>",\n' +
-      '  "enhancedQuery": "<rewritten or same query>",\n' +
-      '  "rag_helpdesk": <true or false>\n' +
-      '}';
-
-    const instructionSystemPrompt = (enhanced_prompt || defaultInstructionPrompt) + contextAndFormatInstructions;
-
-    let instructionResponse;
-    if (image) {
-      instructionResponse = await queryChatImage({
-        url: modelData.endpoint,
-        model,
-        query,
-        image,
-        system_prompt: instructionSystemPrompt
-      });
-    } else {
-      instructionResponse = await queryChatOnly({
-        query,
-        model,
-        system_prompt: instructionSystemPrompt,
-        modelData
-      });
-    }
-
-    const safeParseJson = (text) => {
-      if (!text || typeof text !== 'string') return null;
-      const cleaned = text
-        .replace(/```json[\s\S]*?```/gi, (m) => m.replace(/```json|```/gi, ''))
-        .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ''))
-        .trim();
-      try { return JSON.parse(cleaned); } catch (_) { return null; }
-    };
-
-    const parsed = safeParseJson(instructionResponse) || {
-      query,
-      enhancedQuery: query,
-      rag_helpdesk: false
-    };
-
-    const finalQuery      = parsed.enhancedQuery || query;
-    const useHelpdeskRag  = !!parsed.rag_helpdesk;
-    const activeRagDb     = useHelpdeskRag ? 'bvbrc_helpdesk' : null;
-
-    // --------------------------------------------------------------
-    // (2) Build context: history + RAG
-    // --------------------------------------------------------------
-
-    let ragDocs = null;
-    if (activeRagDb) {
-      const { documents = ['No documents found'] } = await queryRag(finalQuery, activeRagDb, user_id, model, num_docs, session_id);
-      ragDocs = documents;
-    }
-
-    if (rag_db && rag_db !== 'bvbrc_helpdesk') {
-      const { documents = ['No documents found'] } = await queryRag(finalQuery, rag_db, user_id, model, num_docs, session_id);
-      ragDocs = ragDocs ? ragDocs.concat(documents) : documents;
-    }
-
-    // --------------------------------------------------------------
-    // (3) Construct prompt
-    // --------------------------------------------------------------
-
-    const max_tokens = 40000;
-    let promptWithHistory = finalQuery;
-    if (include_history && history.length > 0) {
-      promptWithHistory = await createQueryFromMessages(finalQuery, history, system_prompt, max_tokens);
-    }
-
-    if (ragDocs) {
-      if (include_history && history.length > 0) {
-        promptWithHistory = `${promptWithHistory}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
-      } else {
-        promptWithHistory = `Current User Query: ${finalQuery}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
-      }
-    }
-
-    const ctx = {
-      prompt: promptWithHistory,
-      systemPrompt: system_prompt,
-      model,
-      image,
-      ragDocs
-    };
-
-    // --------------------------------------------------------------
-    // (4) Persist initial messages (user & system) BEFORE streaming
-    // --------------------------------------------------------------
-
-    const userContentForHistory = `Enhanced User Query: ${finalQuery}\n\nInstruction System Prompt: ${instructionSystemPrompt}`;
-
-    const userMessage = createMessage('user', query);
-
-    let systemMessage = null;
-    if (system_prompt && system_prompt.trim() !== '') {
-      systemMessage = createMessage('system', system_prompt);
-      if (ragDocs) systemMessage.documents = ragDocs;
-      if (userContentForHistory) systemMessage.copilotDetails = userContentForHistory;
-    }
-
-    if (!chatSession && save_chat) {
-      await createChatSession(session_id, user_id);
-    }
-
+    // Persist initial messages before starting the stream
     if (save_chat) {
+      if (!chatSession) await createChatSession(session_id, user_id);
       const initialMsgs = systemMessage ? [userMessage, systemMessage] : [userMessage];
       await addMessagesToSession(session_id, initialMsgs);
     }
 
-    // --------------------------------------------------------------
-    // (5) Stream assistant response
-    // --------------------------------------------------------------
-    let assistantBuffer = '';
-    
-    // Send a keep-alive comment every 15 seconds so that proxies/clients do not time out
-    const keepAliveInterval = setInterval(() => {
-      try {
-        res.write(': keep-alive\n\n');
-        if (typeof res.flush === 'function') {
-          res.flush();
-        }
-      } catch (e) {
-        /* Ignore network errors – connection may already be closed */
-      }
-    }, 15000);
+    // Keep-alive
+    const keepAliveId = startKeepAlive(res);
 
+    let assistantBuffer = '';
     const onChunk = (text) => {
       assistantBuffer += text;
-      // escape newlines for SSE so each chunk is one event
       const safeText = text.replace(/\n/g, '\\n');
       res.write(`data: ${safeText}\n\n`);
-      if (typeof res.flush === 'function') {
-        // Force flush so that small chunks are delivered immediately
-        res.flush();
-      }
+      if (typeof res.flush === 'function') res.flush();
     };
 
     await runModelStream(ctx, modelData, onChunk);
 
-    // signal stream completion
+    // Stream completed
     res.write('data: [DONE]\n\n');
-    if (typeof res.flush === 'function') {
-      res.flush();
-    }
+    if (typeof res.flush === 'function') res.flush();
     res.end();
 
-    // Stop keep-alive pings once the stream has finished
-    clearInterval(keepAliveInterval);
+    stopKeepAlive(keepAliveId);
 
-    // --------------------------------------------------------------
-    // (6) Persist assistant message after stream completes
-    // --------------------------------------------------------------
-
-    const assistantMessage = createMessage('assistant', assistantBuffer);
-
+    // Persist assistant message
     if (save_chat) {
+      const assistantMessage = createMessage('assistant', assistantBuffer);
       await addMessagesToSession(session_id, [assistantMessage]);
     }
-
   } catch (error) {
     console.error('Streaming copilot error:', error);
-    sendSseError('Internal server error');
+    sendSseError(res, 'Internal server error');
   }
 }
 
