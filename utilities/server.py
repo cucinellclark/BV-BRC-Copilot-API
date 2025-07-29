@@ -7,6 +7,7 @@ from text_utils import create_query_from_messages
 from state_utils import get_path_state
 import logging
 from datetime import datetime
+from vector_preloader import preload_databases, get_preloader
 
 app = Flask(__name__)
 
@@ -93,9 +94,21 @@ def path_state():
 @app.route('/rag', methods=["POST"])
 def rag():
     data = request.get_json()
-    response = rag_handler(data['query'], data['rag_db'], data['user_id'], data['model'], data['num_docs'], data['session_id'])
+    response = rag_handler(data['query'], data['rag_db'], data['user_id'], data['model'], data.get('num_docs', 10), data['session_id'])
     return jsonify(response), 200
 
+@app.route('/preload_status', methods=["GET"])
+def get_preload_status():
+    """Get the status of preloaded vector databases."""
+    preloader = get_preloader()
+    status = preloader.get_preload_status()
+    return jsonify(status), 200
+
 if __name__ == "__main__":
+    # Preload vector databases on startup
+    print("Preloading vector databases...")
+    preload_results = preload_databases()
+    print(f"Preload results: {preload_results}")
+    
     app.run(host='0.0.0.0',port=5000)
 

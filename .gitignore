@@ -8,3 +8,4 @@ mongodb_config.json
 node_modules/
 
 access.log
+test_streaming.py
