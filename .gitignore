@@ -9,3 +9,5 @@ node_modules/
 
 access.log
 test_streaming.py
+
+.nfs*
