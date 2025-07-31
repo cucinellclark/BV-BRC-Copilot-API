@@ -4,6 +4,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { connectToDatabase } = require('../database');
 const ChatService = require('../services/chatService');
+const streamStore = require('../services/streamStore');
 const {
   getModelData,
   getSessionMessages,
@@ -22,38 +23,63 @@ const router = express.Router();
 // ========== MAIN CHAT ROUTES ==========
 router.post('/copilot', authenticate, async (req, res) => {
     try {
-        if (req.body.stream === true) {
-            // -------- Streaming (SSE) path --------
-            res.set({
-                // Headers required for proper SSE behaviour and to disable proxy buffering
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no' // Prevent Nginx (and similar) from buffering the stream
-            });
-            // Immediately flush the headers so the client is aware it's an SSE stream
-            if (typeof res.flushHeaders === 'function') {
-                res.flushHeaders();
-            }
-
-            await ChatService.handleCopilotStreamRequest(req.body, res);
-            // The stream handler is responsible for ending the response
-            return;
-        }
-
-        // -------- Standard JSON path --------
         const { query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
         const response = await ChatService.handleCopilotRequest({ query, model, session_id, user_id, system_prompt, save_chat, include_history, rag_db, num_docs, image, enhanced_prompt });
         res.status(200).json(response);
     } catch (error) {
         console.error('Error:', error);
-        // If this was a streaming request, send error over SSE, else JSON
-        if (req.body.stream === true) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
-            res.end();
-        } else {
-            res.status(500).json({ message: 'Internal server error', error });
+        res.status(500).json({ message: 'Internal server error', error });
+    }
+});
+
+router.post('/copilot-stream', authenticate, async (req, res) => {
+    try {
+        // -------- Streaming (SSE) path --------
+        res.set({
+            // Headers required for proper SSE behaviour and to disable proxy buffering
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no' // Prevent Nginx (and similar) from buffering the stream
+        });
+        // Immediately flush the headers so the client is aware it's an SSE stream
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
         }
+
+        const { stream_id } = req.body;
+        if (!stream_id) {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: 'stream_id is required' })}\n\n`);
+            res.end();
+            return;
+        }
+
+        const setupData = await streamStore.get(stream_id);
+        if (!setupData) {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Invalid or expired stream_id' })}\n\n`);
+            res.end();
+            return;
+        }
+
+        await ChatService.handleCopilotStreamRequest(setupData, res);
+        // The stream handler is responsible for ending the response and removing from store
+    } catch (error) {
+        console.error('Error:', error);
+        res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
+        res.end();
+    }
+});
+
+router.post('/setup-copilot-stream', authenticate, async (req, res) => {
+    try {
+        const setupData = await ChatService.setupCopilotStream(req.body);
+        res.status(200).json({ 
+            message: 'success', 
+            setup_data: setupData 
+        });
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({ message: 'Internal server error', error });
     }
 });
 
