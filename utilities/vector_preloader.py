@@ -9,7 +9,7 @@ import faiss
 
 from mongo_helper import get_active_rag_configs
 from tfidf_vectorizer.tfidf_vectorizer import load_vectorizer_by_path, load_dataset_by_path
-from distllm.rag.search import FaissIndexV2
+from distllm.rag.search import FaissIndexV2, RemoteRetriever
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -182,7 +182,7 @@ class VectorDatabasePreloader:
             logger.info(f"FAISS index path: {faiss_index_path}")
             
             # Create FAISS index instance
-            retriever = FaissIndexV2(
+            faiss_index = FaissIndexV2(
                 dataset_dir=Path(dataset_dir),
                 faiss_index_path=Path(faiss_index_path),
                 precision='float32',
@@ -190,6 +190,9 @@ class VectorDatabasePreloader:
                 rescore_multiplier=2,
                 num_quantization_workers=1
             )
+            
+            # Wrap it in a RemoteRetriever
+            retriever = RemoteRetriever(faiss_index)
             
             # Store in cache
             self.distllm_retrievers[name] = retriever
@@ -202,8 +205,8 @@ class VectorDatabasePreloader:
             logger.info(f"Successfully preloaded distllm database: {name}")
             return {
                 'status': 'success',
-                'dataset_size': len(retriever.dataset),
-                'faiss_index_size': retriever.faiss_index.ntotal
+                'dataset_size': len(faiss_index.dataset),
+                'faiss_index_size': faiss_index.faiss_index.ntotal
             }
             
         except Exception as e:
@@ -252,7 +255,7 @@ class VectorDatabasePreloader:
             name: Database name
             
         Returns:
-            FaissIndexV2 instance, or None if not found
+            RemoteRetriever instance, or None if not found
         """
         if name not in self.loaded_configs:
             return None
