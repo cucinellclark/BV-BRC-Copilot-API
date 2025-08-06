@@ -374,106 +374,70 @@ def distllm_chat_with_retriever(query: str, rag_db: str, preloaded_retriever, ex
     Returns:
         Dict containing documents and embedding
     """
-    print(f"[DEBUG] distllm_chat_with_retriever called with query: '{query}', rag_db: '{rag_db}'")
-    print(f"[DEBUG] preloaded_retriever type: {type(preloaded_retriever)}")
-    print(f"[DEBUG] extra_context: {extra_context}")
     
     # Create conversation history
     conversation_history = [('User', query)]
     if extra_context:
         conversation_history.append(('System', extra_context))
-        print(f"[DEBUG] Added extra_context to conversation_history")
-    
-    print(f"[DEBUG] conversation_history: {conversation_history}")
     
     # Create conversation template
     conversation_template = ConversationPromptTemplate(conversation_history)
-    print(f"[DEBUG] Created ConversationPromptTemplate")
     
     # Search using the preloaded retriever
-    print(f"[DEBUG] Starting search with preloaded_retriever...")
-    print(f"[DEBUG] Search parameters: query=['{query}'], top_k=20, score_threshold=0.1")
-    
     try:
         results, embeddings = preloaded_retriever.search(
             [query],  # retrieve only on the new user input
             top_k=20,
             score_threshold=0.1,
         )
-        print(f"[DEBUG] Search completed successfully")
-        print(f"[DEBUG] Results type: {type(results)}")
-        print(f"[DEBUG] Embeddings type: {type(embeddings)}, shape: {embeddings.shape if hasattr(embeddings, 'shape') else 'no shape attr'}")
-        print(f"[DEBUG] Results.total_indices length: {len(results.total_indices) if hasattr(results, 'total_indices') else 'no total_indices attr'}")
     except Exception as e:
-        print(f"[DEBUG] Error during search: {e}")
+        print(f"Error during search: {e}")
         raise
     
     # Get documents from the search results
-    print(f"[DEBUG] Checking if preloaded_retriever has 'check_key_exists' method...")
     has_check_key_exists = hasattr(preloaded_retriever, 'check_key_exists')
-    print(f"[DEBUG] Has check_key_exists: {has_check_key_exists}")
     
     if has_check_key_exists:
         has_path_key = preloaded_retriever.check_key_exists('path')
-        print(f"[DEBUG] Has 'path' key: {has_path_key}")
     else:
         has_path_key = False
-        print(f"[DEBUG] Cannot check for 'path' key, assuming False")
     
     if has_check_key_exists and has_path_key:
-        print(f"[DEBUG] Processing results with file paths...")
         # Include file paths if available
         contexts = []
         for i, indices in enumerate(results.total_indices):
-            print(f"[DEBUG] Processing result set {i}, indices: {indices}")
             try:
                 paths = preloaded_retriever.get(indices, 'path')
-                print(f"[DEBUG] Retrieved {len(paths)} paths")
                 context_docs = preloaded_retriever.get_texts(indices)
-                print(f"[DEBUG] Retrieved {len(context_docs)} context documents")
                 context_with_path = [f"This text is from the following file: {path}\n{doc}\n\n" 
                                    for doc, path in zip(context_docs, paths)]
                 contexts.extend(context_with_path)
-                print(f"[DEBUG] Added {len(context_with_path)} contexts with paths")
             except Exception as e:
-                print(f"[DEBUG] Error processing result set {i}: {e}")
+                print(f"Error processing result set {i}: {e}")
                 raise
     else:
-        print(f"[DEBUG] Processing results without file paths...")
         # Just get the texts
         contexts = []
         for i, indices in enumerate(results.total_indices):
-            print(f"[DEBUG] Processing result set {i}, indices: {indices}")
             try:
                 context_docs = preloaded_retriever.get_texts(indices)
-                print(f"[DEBUG] Retrieved {len(context_docs)} context documents")
                 contexts.extend(context_docs)
-                print(f"[DEBUG] Added {len(context_docs)} contexts")
             except Exception as e:
-                print(f"[DEBUG] Error processing result set {i}: {e}")
+                print(f"Error processing result set {i}: {e}")
                 raise
     
-    print(f"[DEBUG] Total contexts collected: {len(contexts)}")
-    print(f"[DEBUG] First few context snippets: {[ctx[:100] + '...' if len(ctx) > 100 else ctx for ctx in contexts[:3]]}")
-    
     # Convert embeddings to list format
-    print(f"[DEBUG] Converting embeddings to list format...")
     try:
         embeddings = embeddings.tolist()
-        print(f"[DEBUG] Embeddings converted, type: {type(embeddings)}, length: {len(embeddings)}")
-        print(f"[DEBUG] First embedding shape/length: {len(embeddings[0]) if len(embeddings) > 0 else 'no embeddings'}")
     except Exception as e:
-        print(f"[DEBUG] Error converting embeddings: {e}")
+        print(f"Error converting embeddings: {e}")
         raise
  
-    print(f"[DEBUG] Preparing to return JSON response...")
-     
     try:
         result = json.dumps({'documents': contexts, 'embedding': embeddings[0]})
-        print(f"[DEBUG] JSON created successfully, length: {len(result)}")
         return result
     except Exception as e:
-        print(f"[DEBUG] Error creating JSON response: {e}")
+        print(f"Error creating JSON response: {e}")
         raise
 
 def distllm_chat(query: str, rag_db: str, data_path: str, faiss_index_path: str, extra_context: Optional[str] = None) -> dict:
