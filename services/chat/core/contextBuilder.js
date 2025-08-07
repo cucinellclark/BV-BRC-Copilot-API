@@ -11,8 +11,8 @@ const {
   queryRag,
   LLMServiceError,
   postJson
-} = require('./llmServices');
-const { safeParseJson } = require('./jsonUtils');
+} = require('../../llm/llmServices');
+const { safeParseJson } = require('../utils/jsonUtils');
 
 // Lightweight replica of chatService.createQueryFromMessages to avoid a circular
 // dependency.  Falls back to a simple concatenation if the helper microservice
