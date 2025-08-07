@@ -1,7 +1,7 @@
 // database.js
 
 const { MongoClient } = require('mongodb');
-const config = require('./utilities/mongodb_config.json'); // Load from utilities directory
+const config = require('../utilities/mongodb_config.json'); // Updated path to point to utilities directory
 
 // MongoDB setup
 const mongoUri = config['mongoDBUrl'];
@@ -52,4 +52,4 @@ async function removeBySession(sessionId, userId) {
 }
 
 
-module.exports = { connectToDatabase, removeBySession };
+module.exports = { connectToDatabase, removeBySession }; 

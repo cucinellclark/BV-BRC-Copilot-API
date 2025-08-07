@@ -1,5 +1,5 @@
-const { connectToDatabase } = require('../database');
-const { LLMServiceError } = require('./llmServices');
+const { connectToDatabase } = require('../../database');
+const { LLMServiceError } = require('../../llm/llmServices');
 
 const TTL_MS = 15 * 60 * 1000; // 15 minutes
 

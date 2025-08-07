@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { connectToDatabase } = require('../database');
+const { connectToDatabase } = require('../services/database');
 const ChatService = require('../services/chatService');
 const streamStore = require('../services/chat/streaming/streamStore');
 const {

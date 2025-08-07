@@ -1,5 +1,5 @@
-const { connectToDatabase } = require('../database');
-const { LLMServiceError } = require('./llmServices');
+const { connectToDatabase } = require('../../database');
+const { LLMServiceError } = require('../../llm/llmServices');
 
 /**
  * Get model data from the database

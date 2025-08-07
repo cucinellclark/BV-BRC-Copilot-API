@@ -1,7 +1,6 @@
 // services/chatHandlers.js
 
 const { v4: uuidv4 } = require('uuid');
-const { LLMServiceError } = require('./llmServices');
 const {
   getModelData,
   getChatSession,
@@ -22,7 +21,7 @@ const {
   queryClient,
   LLMServiceError
 } = require('../../llm/llmServices');
-const config = require('../config.json');
+const config = require('../../../config.json');
 
 async function handleCopilotRequest(opts) {
   try {
