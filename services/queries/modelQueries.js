@@ -89,22 +89,31 @@ async function runModel(ctx, modelData) {
  * @param {function(string)} onChunk – Callback for each text chunk
  */
 async function runModelStream(ctx, modelData, onChunk) {
-  if (ctx.image) {
-    // Current image endpoints do not support streaming; fall back to a single shot
-    const full = await runModel(ctx, modelData);
-    onChunk(full);
-    return;
-  }
-
   // ---------------------- client-based models ----------------------
   if (modelData.queryType === 'client') {
     const client = setupOpenaiClient(modelData.apiKey, modelData.endpoint);
+
+    // Build messages, supporting multimodal content if an image is present
+    const messages = [];
+    if (ctx.systemPrompt) {
+      messages.push({ role: 'system', content: ctx.systemPrompt });
+    }
+
+    if (ctx.image) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: ctx.prompt },
+          { type: 'image_url', image_url: { url: ctx.image } }
+        ]
+      });
+    } else {
+      messages.push({ role: 'user', content: ctx.prompt });
+    }
+
     const stream = await client.chat.completions.create({
       model: ctx.model,
-      messages: [
-        { role: 'system', content: ctx.systemPrompt },
-        { role: 'user', content: ctx.prompt }
-      ],
+      messages,
       stream: true
     });
 
@@ -117,18 +126,30 @@ async function runModelStream(ctx, modelData, onChunk) {
 
   // ---------------------- request-based models ----------------------
   if (modelData.queryType === 'request') {
-    // Build the same payload used in runModel
+    // Build payload similar to non-streaming, but include stream flag and multimodal content if needed
+    const messages = [];
+    if (ctx.systemPrompt) {
+      messages.push({ role: 'system', content: ctx.systemPrompt });
+    }
+    if (ctx.image) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: ctx.prompt },
+          { type: 'image_url', image_url: { url: ctx.image } }
+        ]
+      });
+    } else {
+      messages.push({ role: 'user', content: ctx.prompt });
+    }
+
     const payload = {
       model: ctx.model,
       temperature: 1.0,
-      messages: [
-        { role: 'system', content: ctx.systemPrompt },
-        { role: 'user', content: ctx.prompt }
-      ],
+      messages,
       stream: true
     };
 
-    // Utilize streaming POST helper
     await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
     return;
   }
