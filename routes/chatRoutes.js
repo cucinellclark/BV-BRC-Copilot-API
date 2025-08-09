@@ -121,6 +121,116 @@ router.post('/copilot-stream', authenticate, async (req, res) => {
     }
 });
 
+// ========== MCP STREAMING CHAT ENDPOINTS ==========
+// MCP-enhanced streaming chat functionality
+
+router.post('/setup-copilot-mcp-stream', authenticate, async (req, res) => {
+    try {
+        // Extract auth token from request headers
+        const authToken = req.headers['authorization'];
+        const requestBody = {
+            ...req.body,
+            mcp_options: {
+                ...req.body.mcp_options,
+                auth_token: authToken
+            }
+        };
+        const setupData = await ChatService.setupCopilotMCPStream(requestBody);
+        res.status(200).json({ 
+            message: 'success', 
+            setup_data: setupData 
+        });
+    } catch (error) {
+        console.error('Error setting up MCP stream:', error);
+        
+        // Handle specific MCP errors
+        if (error.name === 'MCPError') {
+            return res.status(error.statusCode || 503).json({ 
+                message: 'MCP service error', 
+                error: error.message 
+            });
+        }
+        
+        if (error.name === 'LLMServiceError') {
+            return res.status(400).json({ 
+                message: 'LLM service error', 
+                error: error.message 
+            });
+        }
+        
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+
+router.post('/copilot-mcp-stream', authenticate, async (req, res) => {
+    try {
+        // Set SSE headers
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        
+        // Flush headers immediately
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        const { stream_id } = req.body;
+        if (!stream_id) {
+            res.write(`event: error\ndata: ${JSON.stringify({ 
+                message: 'stream_id is required',
+                error_type: 'ValidationError'
+            })}\n\n`);
+            res.end();
+            return;
+        }
+
+        const setupData = await streamStore.get(stream_id);
+        if (!setupData) {
+            res.write(`event: error\ndata: ${JSON.stringify({ 
+                message: 'Invalid or expired stream_id',
+                error_type: 'StreamError'
+            })}\n\n`);
+            res.end();
+            return;
+        }
+
+        await ChatService.handleCopilotMCPStreamRequest(setupData, res);
+        // Stream handler ends the response and cleans up
+        
+    } catch (error) {
+        console.error('Error in MCP stream:', error);
+        
+        // Check if response is still writable before attempting to write
+        if (!res.headersSent && !res.destroyed) {
+            // Send appropriate error based on type
+            let errorType = 'InternalError';
+            if (error.name === 'MCPError') {
+                errorType = 'MCPError';
+            } else if (error.name === 'ToolSelectorError') {
+                errorType = 'ToolSelectorError';
+            } else if (error.name === 'MCPOrchestratorError') {
+                errorType = 'MCPOrchestratorError';
+            }
+            
+            try {
+                res.write(`event: error\ndata: ${JSON.stringify({ 
+                    message: 'MCP stream processing error', 
+                    error: error.message,
+                    error_type: errorType
+                })}\n\n`);
+                res.end();
+            } catch (writeError) {
+                console.error('Failed to send error response (stream already ended):', writeError.message);
+            }
+        } else {
+            console.error('Cannot send error response - stream already ended');
+        }
+    }
+});
+
 // ========== RAG (RETRIEVAL AUGMENTED GENERATION) ENDPOINTS ==========
 // Document retrieval and enhanced chat with external knowledge
 

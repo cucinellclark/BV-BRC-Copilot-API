@@ -15,6 +15,12 @@ const {
   handleCopilotStreamRequest
 } = require('./chat/streaming/streamingHandlers');
 
+// Import MCP streaming handlers
+const {
+  setupCopilotMCPStream,
+  handleCopilotMCPStreamRequest
+} = require('./mcp/mcpStreamingHandlers');
+
 const {
   getOpenaiClient,
   queryModel,
@@ -33,6 +39,10 @@ const {
   enhanceQuery
 } = require('./chat/utils/queryEnhancement');
 
+// Import MCP services
+const { MCPOrchestrator } = require('./mcp/mcpOrchestrator');
+const { BVBRCMCPClient } = require('./mcp/mcpClient');
+
 module.exports = {
   // Core chat flows
   handleCopilotRequest,
@@ -42,6 +52,10 @@ module.exports = {
   handleRagRequest,
   handleChatImageRequest,
   handleLambdaDemo,
+
+  // MCP streaming support
+  setupCopilotMCPStream,
+  handleCopilotMCPStreamRequest,
 
   // Additional chat utilities
   handleChatQuery,
@@ -54,6 +68,10 @@ module.exports = {
   queryRequest,
   runModel,
   runModelStream,
-  getPathState
+  getPathState,
+
+  // MCP utilities
+  getMCPOrchestrator: () => new MCPOrchestrator(),
+  getMCPClient: () => new BVBRCMCPClient()
 };
 
