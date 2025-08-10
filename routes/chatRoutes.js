@@ -125,6 +125,7 @@ router.post('/copilot-stream', authenticate, async (req, res) => {
 // MCP-enhanced streaming chat functionality
 
 router.post('/setup-copilot-mcp-stream', authenticate, async (req, res) => {
+    console.log('setup-copilot-mcp-stream');
     try {
         // Extract auth token from request headers
         const authToken = req.headers['authorization'];
@@ -163,6 +164,7 @@ router.post('/setup-copilot-mcp-stream', authenticate, async (req, res) => {
 });
 
 router.post('/copilot-mcp-stream', authenticate, async (req, res) => {
+    console.log('copilot-mcp-stream');
     try {
         // Set SSE headers
         res.set({
