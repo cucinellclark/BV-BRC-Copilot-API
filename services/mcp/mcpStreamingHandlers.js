@@ -62,7 +62,7 @@ async function setupCopilotMCPStream(opts) {
         stream_response: false // Not streaming during setup
       };
       
-      const query = opts.query || ctx.messages[ctx.messages.length - 1].content;
+      const query = opts.query || ctx.prompt;
       
       mcpResult = await orchestrator.processQuery(query, mcpOptions);
       console.log(`✅ MCP processing ${mcpResult?.success ? 'completed' : 'failed'} (${mcpResult?.tools_used?.length || 0} tools)`);
@@ -94,7 +94,7 @@ async function setupCopilotMCPStream(opts) {
       session_id,
       user_id,
       mcpResult, // Pre-processed MCP results
-      query: opts.query || ctx.messages[ctx.messages.length - 1].content
+      query: opts.query || ctx.prompt
     };
 
     await streamStore.set(streamId, setupData);
@@ -153,13 +153,7 @@ async function handleCopilotMCPStreamRequest(setupData, res) {
       // Stream the final response incorporating pre-processed MCP results
       const enhancedContext = {
         ...ctx,
-        messages: [
-          ...ctx.messages,
-          {
-            role: 'system',
-            content: `Tool execution results: ${JSON.stringify(mcpResult, null, 2)}\n\nGenerate a natural language response incorporating these results.`
-          }
-        ]
+        systemPrompt: `${ctx.systemPrompt || ''}\n\nTool execution results: ${JSON.stringify(mcpResult, null, 2)}\n\nGenerate a natural language response incorporating these results.`
       };
 
       res.write(`event: response_start\ndata: ${JSON.stringify({ message: 'Generating response...' })}\n\n`);

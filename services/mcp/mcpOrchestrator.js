@@ -3,7 +3,7 @@
 const { BVBRCMCPClient, MCPError } = require('./mcpClient');
 const { LLMToolSelector, ToolSelectorError } = require('./toolSelector');
 const { getModelData } = require('../chat/core/dbUtils');
-const { getOpenaiClient, queryModel } = require('../queries/modelQueries');
+const { queryRequestChat } = require('../llm/llmServices');
 
 class MCPOrchestratorError extends Error {
   constructor(message, originalError = null) {
@@ -106,16 +106,17 @@ class MCPOrchestrator {
 
       const responsePrompt = this.buildResponsePrompt(query, toolResults);
       const systemPrompt = this.getResponseSystemPrompt();
-      
       const modelData = await getModelData(model);
-      const openaiClient = getOpenaiClient(modelData);
-      
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: responsePrompt }
-      ];
-
-      const response = await queryModel(openaiClient, model, messages);
+      console.log('modelData', modelData);
+      console.log('responsePrompt', responsePrompt);
+      console.log('systemPrompt', systemPrompt);
+      console.log('model', model);
+      const response = await queryRequestChat(
+        modelData.endpoint,
+        model,
+        systemPrompt,
+        responsePrompt
+      );
       console.log(`📝 Generated response (${response.length} chars): ${response.substring(0, 100)}...`);
       return response;
     } catch (error) {
