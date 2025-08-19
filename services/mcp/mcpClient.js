@@ -25,18 +25,8 @@ class BVBRCMCPClient {
     try {
       console.log(`🌐 Connecting to MCP server: ${this.serverUrl}/mcp/tools/list`);
       
-      const payload = {};
-      if (authToken) {
-        payload.auth_token = authToken;
-      }
-      
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
-      const response = await axios.post(`${this.serverUrl}/mcp/tools/list`, payload, {
-        timeout: this.timeout,
-        headers
+      const response = await axios.get(`${this.serverUrl}/mcp/tools/list`, {
+        timeout: this.timeout
       });
 
       if (response.status !== 200) {
@@ -71,37 +61,66 @@ class BVBRCMCPClient {
     
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
+        // Initialize arguments object
+        const toolArguments = args == null ? {} : { ...args };
+
         const payload = {
           name: toolName,
-          arguments: args == null ? {} : args
+          arguments: toolArguments
         };
 
+        // Add auth_token at the top level if provided
         if (authToken) {
           payload.auth_token = authToken;
         }
 
-        console.log(`🔧 Calling MCP tool: ${toolName} with args: ${JSON.stringify(args, null, 2).substring(0, 200)}${JSON.stringify(args, null, 2).length > 200 ? '...' : ''}`);
+        // Create a copy of payload without auth_token for logging
+        const logPayload = { ...payload };
+        if (logPayload.auth_token) {
+          delete logPayload.auth_token;
+        }
 
+        console.log(`🔧 Calling MCP tool: ${toolName} with args: ${JSON.stringify(toolArguments, null, 2)}`);
+        console.log('payload: ', JSON.stringify(logPayload, null, 2));
         const response = await axios.post(`${this.serverUrl}/mcp/tools/call`, payload, {
           timeout: this.timeout,
           headers: {
             'Content-Type': 'application/json'
           }
         });
+        console.log('response.status: ', response.status);
+        console.log('response.headers: ', JSON.stringify(response.headers, null, 2));
+        console.log('response.data: ', JSON.stringify(response.data, null, 2));
 
         if (response.status !== 200) {
           throw new MCPError(`Tool execution failed with status ${response.status}`, response.status);
         }
 
-        return {
+        // Check if response.data exists and has the expected structure
+        if (!response.data) {
+          throw new MCPError(`Tool execution failed: No response data received`, 500);
+        }
+
+        // Check if the response contains an error message despite 200 status
+        if (response.data.error || response.data.status === 'error') {
+          throw new MCPError(`Tool execution failed: ${response.data.error || response.data.message || 'Unknown error'}`, 500);
+        }
+
+        const result = {
           success: true,
           result: response.data,
           tool: toolName,
           execution_time: response.headers['x-execution-time'] || null
         };
+        
+        console.log('callTool returning result: ', JSON.stringify(result, null, 2));
+        return result;
       } catch (error) {
         lastError = error;
-        
+        console.log('error: ', JSON.stringify(error, null, 2));
+        console.log('error.message: ', error.message);
+        console.log('error.name: ', error.name);
+        console.log('error.stack: ', error.stack);
         if (error.code === 'ECONNREFUSED') {
           if (attempt === this.maxRetries) {
             throw new MCPError('MCP server is not available after retries', 503, error);

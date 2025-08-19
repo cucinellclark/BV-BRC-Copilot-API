@@ -32,20 +32,48 @@ class MCPOrchestrator {
     try {
       // 1. Get available tools
       const availableTools = await this.mcpClient.getAvailableTools(auth_token);
-      
+
       // 2. Select appropriate tools
       const selection = await this.toolSelector.selectTools(query, availableTools, model, auth_token);
       const selectedTools = selection.tools.slice(0, max_tools);
       console.log(`🤖 Selected ${selectedTools.length}/${availableTools.length} tools: [${selectedTools.join(', ')}]`);
+      console.log(`📋 Tool arguments from selection: ${JSON.stringify(selection.tool_arguments)}`);
       
       // 3. Execute selected tools
       const toolResults = [];
       const toolErrors = [];
       
-      // 3. Execute selected tools
+      // 3. Execute selected tools with arguments
       for (const toolName of selectedTools) {
         try {
-          const result = await this.mcpClient.callTool(toolName, null, auth_token);
+          // Get arguments for this tool from the selection result
+          let toolArgs = selection.tool_arguments[toolName] || {};
+          
+          // If no arguments were provided, try to extract them from the query
+          if (Object.keys(toolArgs).length === 0) {
+            try {
+              console.log(`🔍 No arguments found for ${toolName}, attempting to extract from query...`);
+              toolArgs = await this.toolSelector.extractToolArguments(query, toolName, model, availableTools);
+            } catch (extractError) {
+              console.warn(`⚠️ Failed to extract arguments for ${toolName}: ${extractError.message}`);
+              toolArgs = {};
+            }
+          }
+          
+          // Validate and clean tool arguments
+          if (typeof toolArgs !== 'object' || toolArgs === null) {
+            console.warn(`⚠️ Invalid arguments for ${toolName}, using empty object`);
+            toolArgs = {};
+          }
+          
+          console.log(`🔧 Executing ${toolName} with args: ${JSON.stringify(toolArgs)}`);
+          
+          const result = await this.mcpClient.callTool(toolName, toolArgs, auth_token);
+          console.log(`🔍 Received result from callTool for ${toolName}:`, JSON.stringify(result, null, 2));
+          
+          // Add arguments to the result for reference
+          result.arguments = toolArgs;
+          
           // Truncate large results for logging
           const resultSummary = JSON.stringify(result.result).substring(0, 150);
           console.log(`✅ ${toolName}: ${resultSummary}${JSON.stringify(result.result).length > 150 ? '...' : ''}`);
@@ -71,6 +99,7 @@ class MCPOrchestrator {
         tools_used: selectedTools,
         tool_results: toolResults,
         tool_errors: toolErrors.length > 0 ? toolErrors : undefined,
+        tool_arguments: selection.tool_arguments,
         selection_reasoning: include_reasoning ? selection.reasoning : undefined,
         metadata: {
           processing_time_ms: processingTime,
@@ -142,6 +171,9 @@ Guidelines:
     toolResults.forEach((result, index) => {
       prompt += `\n${index + 1}. Tool: ${result.tool}\n`;
       prompt += `   Success: ${result.success}\n`;
+      if (result.arguments) {
+        prompt += `   Arguments: ${JSON.stringify(result.arguments, null, 2)}\n`;
+      }
       prompt += `   Result: ${JSON.stringify(result.result, null, 2)}\n`;
       if (result.execution_time) {
         prompt += `   Execution Time: ${result.execution_time}ms\n`;

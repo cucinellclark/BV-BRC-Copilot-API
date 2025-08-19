@@ -28,7 +28,7 @@ class LLMToolSelector {
       }
 
       const toolSelectionPrompt = this.buildToolSelectionPrompt(query, availableTools);
-      const systemPrompt = this.getSystemPrompt(availableTools, authToken);
+      const systemPrompt = this.getSystemPrompt();
       
       const modelData = await getModelData(model);
       
@@ -38,6 +38,8 @@ class LLMToolSelector {
         systemPrompt,
         toolSelectionPrompt
       );
+
+      console.log('tool selection response: ', response);
       
       const result = this.parseToolSelection(response, availableTools);
       console.log(`🎯 Tool selection: ${result.tools.join(', ')} (confidence: ${result.confidence})`);
@@ -50,29 +52,25 @@ class LLMToolSelector {
     }
   }
 
-  getSystemPrompt(availableTools = [], authToken = null) {
-    let toolTypesSection = '';
-    if (availableTools.length > 0) {
-      toolTypesSection = 'Available tool types:\n' + 
-        availableTools.map(tool => `- ${tool.name}: ${tool.description || 'No description available'}`).join('\n') + '\n\n';
-    }
-
-    const tokenValue = authToken || "auth_token";
-
+  getSystemPrompt() {
     return `You are a bioinformatics tool selector. Given a user query and available tools, select the most appropriate tools and provide reasoning.
 
-${toolTypesSection}Respond in JSON format and only return the JSON object. Do NOT use markdown formatting, code blocks, or backticks. Return only the raw JSON object:
-{
-  "selected_tools": ["tool_name1", "tool_name2"],
-  "reasoning": "Explanation of why these tools were selected",
-  "confidence": 0.95,
-  "tool_arguments": {
-    "tool_name1": {"arg1": "value1"},
-    "tool_name2": {"arg2": "value2"}
-  }
-}
+      Respond in JSON format and only return the JSON object. Do NOT use markdown formatting, code blocks, or backticks. Return only the raw JSON object:
+      {
+        "selected_tools": ["tool_name1", "tool_name2", ...],
+        "reasoning": "<explanation of why these tools were selected>",
+        "confidence": <confidence_score>,
+        "tool_arguments": {
+          "tool_name1": {"arg1": "value1", "arg2": "value2", ...},
+          "tool_name2": {"arg1": "value1", "arg2": "value2", ...},
+          ...
+        }
+      }
 
-Only select tools that are clearly relevant to the query. If unsure, select fewer tools rather than more.`;
+      IMPORTANT: For each selected tool, extract any relevant arguments from the user query and include them in the tool_arguments object. If no specific arguments are mentioned for a tool, include an empty object {} for that tool.
+      Make sure to include the required arguments for each tool. Conform to enum values if available.
+
+      Only select tools that are clearly relevant to the query. If unsure, select fewer tools rather than more.`;
   }
 
   buildToolSelectionPrompt(query, availableTools) {
@@ -81,9 +79,18 @@ Only select tools that are clearly relevant to the query. If unsure, select fewe
       
       // Add parameter information if available
       if (tool.inputSchema && tool.inputSchema.properties) {
-        const params = Object.keys(tool.inputSchema.properties);
-        if (params.length > 0) {
-          toolInfo += `\n  Parameters: ${params.join(', ')}`;
+        const properties = tool.inputSchema.properties;
+        const required = tool.inputSchema.required || [];
+        
+        toolInfo += `\n  Parameters:`;
+        for (const [paramName, paramSchema] of Object.entries(properties)) {
+          const isRequired = required.includes(paramName) ? ' (required)' : ' (optional)';
+          const paramType = paramSchema.type || 'string';
+          const paramDesc = paramSchema.description || 'No description';
+          toolInfo += `\n    - ${paramName} (${paramType})${isRequired}: ${paramDesc}`;
+          if (paramSchema.enum) {
+            toolInfo += `\n    - Enum: ${paramSchema.enum.join(', ')}`;
+          }
         }
       }
       
@@ -92,6 +99,8 @@ Only select tools that are clearly relevant to the query. If unsure, select fewe
         toolInfo += `\n  Display Name: ${tool.displayName}`;
       }
       
+      console.log('toolInfo: ', toolInfo);
+
       return toolInfo;
     }).join('\n\n');
 
@@ -100,7 +109,7 @@ Only select tools that are clearly relevant to the query. If unsure, select fewe
 Available Tools:
 ${toolList}
 
-Select the most appropriate tools for this query and provide reasoning.`;
+Select the most appropriate tools for this query and provide reasoning. For each selected tool, extract any relevant arguments from the user query and include them in the tool_arguments object.`;
   }
 
   parseToolSelection(response, availableTools) {
