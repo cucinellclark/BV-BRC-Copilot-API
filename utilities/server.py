@@ -1,12 +1,13 @@
 from flask import Flask, request, jsonify
-import os, json
+import os, json, sys, logging
+from datetime import datetime
 import tfidf_vectorizer as tv
 from tokenizer import count_tokens
 from rag import rag_handler
 from text_utils import create_query_from_messages
 from state_utils import get_path_state
-import logging
 from datetime import datetime
+from vector_preloader import preload_databases, get_preloader
 
 app = Flask(__name__)
 
@@ -93,8 +94,26 @@ def path_state():
 @app.route('/rag', methods=["POST"])
 def rag():
     data = request.get_json()
-    response = rag_handler(data['query'], data['rag_db'], data['user_id'], data['model'], data['num_docs'], data['session_id'])
+    response = rag_handler(data['query'], data['rag_db'], data['user_id'], data['model'], data.get('num_docs', 10), data['session_id'])
     return jsonify(response), 200
+
+@app.route('/preload_status', methods=["GET"])
+def get_preload_status():
+    """Get the status of preloaded vector databases."""
+    preloader = get_preloader()
+    status = preloader.get_preload_status()
+    return jsonify(status), 200
+
+# Preload vector databases when module is imported
+# Use logging to ensure output appears in Gunicorn
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+logger.info("Preloading vector databases...")
+print("Preloading vector databases...", flush=True)
+preload_results = preload_databases()
+logger.info(f"Preload results: {preload_results}")
+print(f"Preload results: {preload_results}", flush=True)
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0',port=5000)

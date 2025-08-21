@@ -2,8 +2,9 @@
 
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { connectToDatabase } = require('../database');
+const { connectToDatabase } = require('../services/database');
 const ChatService = require('../services/chatService');
+const streamStore = require('../services/chat/streaming/streamStore');
 const {
   getModelData,
   getSessionMessages,
@@ -15,11 +16,13 @@ const {
   saveUserPrompt,
   rateConversation,
   rateMessage
-} = require('../services/dbUtils');
+} = require('../services/chat/core/dbUtils');
 const authenticate = require('../middleware/auth');
 const router = express.Router();
 
-// ========== MAIN CHAT ROUTES ==========
+// ========== CORE CHAT ENDPOINTS ==========
+// Main chat functionality with session management and history
+
 router.post('/copilot', authenticate, async (req, res) => {
     try {
         const { query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
@@ -49,6 +52,78 @@ router.post('/chat', authenticate, async (req, res) => {
     }
 });
 
+router.post('/chat-only', authenticate, async (req, res) => {
+    try {
+        const { query, model, system_prompt } = req.body;
+        if (!query || !model) {
+            return res.status(400).json({ message: 'query and model are required' });
+        }
+
+        const response_json = await ChatService.handleChatQuery({ query, model, system_prompt });
+        res.status(200).json({ message: 'success', response:response_json });
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({ message: 'Internal server error', error });
+    }
+});
+
+// ========== STREAMING CHAT ENDPOINTS ==========
+// Real-time streaming chat functionality
+
+router.post('/setup-copilot-stream', authenticate, async (req, res) => {
+    try {
+        const setupData = await ChatService.setupCopilotStream(req.body);
+        res.status(200).json({ 
+            message: 'success', 
+            setup_data: setupData 
+        });
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({ message: 'Internal server error', error });
+    }
+});
+
+router.post('/copilot-stream', authenticate, async (req, res) => {
+    try {
+        // -------- Streaming (SSE) path --------
+        res.set({
+            // Headers required for proper SSE behaviour and to disable proxy buffering
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no' // Prevent Nginx (and similar) from buffering the stream
+        });
+        // Immediately flush the headers so the client is aware it's an SSE stream
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        const { stream_id } = req.body;
+        if (!stream_id) {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: 'stream_id is required' })}\n\n`);
+            res.end();
+            return;
+        }
+
+        const setupData = await streamStore.get(stream_id);
+        if (!setupData) {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Invalid or expired stream_id' })}\n\n`);
+            res.end();
+            return;
+        }
+
+        await ChatService.handleCopilotStreamRequest(setupData, res);
+        // The stream handler is responsible for ending the response and removing from store
+    } catch (error) {
+        console.error('Error:', error);
+        res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
+        res.end();
+    }
+});
+
+// ========== RAG (RETRIEVAL AUGMENTED GENERATION) ENDPOINTS ==========
+// Document retrieval and enhanced chat with external knowledge
+
 router.post('/rag', authenticate, async (req, res) => {
     try {
         const { query, rag_db, user_id, model, num_docs, session_id } = req.body;
@@ -71,6 +146,9 @@ router.post('/rag-distllm', authenticate, async (req, res) => {
     }
 });
 
+// ========== MULTIMODAL CHAT ENDPOINTS ==========
+// Chat with image input capabilities
+
 router.post('/chat-image', authenticate, async (req, res) => {
     try {
         const { query, model, session_id, user_id, system_prompt, save_chat = true, image } = req.body;
@@ -91,18 +169,9 @@ router.post('/chat-image', authenticate, async (req, res) => {
     }
 });
 
-router.post('/demo', authenticate, async (req, res) => {
-    try {
-        const { text, rag_flag } = req.body;
-        const lambdaResponse = await ChatService.handleLambdaDemo(text, rag_flag);
-        res.status(200).json({ content: lambdaResponse });
-    } catch (error) {
-        console.log(error);
-        res.status(500).json({ message: 'Internal server error in demo', error });
-    }
-});
+// ========== SESSION MANAGEMENT ENDPOINTS ==========
+// Chat session creation, retrieval, and management
 
-// ========== SESSION ROUTES ==========
 router.get('/start-chat', authenticate, (req, res) => {
     const sessionId = uuidv4();
     res.status(200).json({ message: 'created session id', session_id: sessionId });
@@ -161,40 +230,6 @@ router.get('/get-all-sessions', authenticate, async (req, res) => {
     }
 });
 
-router.post('/put-chat-entry', async (req, res) => {
-    console.log('Inserting chat entry');
-    console.log(req.body);
-    // Implement insertion logic
-});
-
-router.post('/generate-title-from-messages', authenticate, async (req, res) => {
-    try {
-        const { model, messages, user_id } = req.body;
-        const message_str = messages.map(msg => `message: ${msg}`).join('\n\n');
-        const query = `Provide a very short, concise, descriptive title based on the content ` +
-            `of the messages. Only return the title, no other text.\n\n${message_str}`;
-
-        const modelData = await getModelData(model);
-        const queryType = modelData['queryType'];
-        let response;
-
-        if (queryType === 'client') {
-            const openai_client = ChatService.getOpenaiClient(modelData);
-            const queryMsg = [{ role: 'user', content: query }];
-            response = await ChatService.queryModel(openai_client, model, queryMsg);
-        } else if (queryType === 'request') {
-            response = await ChatService.queryRequest(modelData.endpoint, model, '', query);
-        } else {
-            return res.status(500).json({ message: 'Invalid query type', queryType });
-        }
-
-        res.status(200).json({ message: 'success', response });
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
 router.post('/update-session-title', authenticate, async (req, res) => {
     try {
         const { title, session_id, user_id } = req.body;
@@ -231,6 +266,37 @@ router.post('/delete-session', authenticate, async (req, res) => {
     }
 });
 
+router.post('/generate-title-from-messages', authenticate, async (req, res) => {
+    try {
+        const { model, messages, user_id } = req.body;
+        const message_str = messages.map(msg => `message: ${msg}`).join('\n\n');
+        const query = `Provide a very short, concise, descriptive title based on the content ` +
+            `of the messages. Only return the title, no other text.\n\n${message_str}`;
+
+        const modelData = await getModelData(model);
+        const queryType = modelData['queryType'];
+        let response;
+
+        if (queryType === 'client') {
+            const openai_client = ChatService.getOpenaiClient(modelData);
+            const queryMsg = [{ role: 'user', content: query }];
+            response = await ChatService.queryModel(openai_client, model, queryMsg);
+        } else if (queryType === 'request') {
+            response = await ChatService.queryRequest(modelData.endpoint, model, '', query);
+        } else {
+            return res.status(500).json({ message: 'Invalid query type', queryType });
+        }
+
+        res.status(200).json({ message: 'success', response });
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({ message: 'Internal server error', error });
+    }
+});
+
+// ========== USER PROMPTS MANAGEMENT ==========
+// Saved prompts and templates for users
+
 router.get('/get-user-prompts', authenticate, async (req, res) => {
     try {
         const user_id = req.query.user_id;
@@ -252,6 +318,9 @@ router.post('/save-prompt', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Failed saving user prompt', error: error.message });
     }
 });
+
+// ========== RATING & FEEDBACK ENDPOINTS ==========
+// User feedback and rating system
 
 router.post('/rate-conversation', authenticate, async (req, res) => {
     try {
@@ -316,23 +385,20 @@ router.post('/rate-message', authenticate, async (req, res) => {
     }
 });
 
-// ========== SIMPLIFIED CHAT ==========
-router.post('/chat-only', authenticate, async (req, res) => {
-    try {
-        const { query, model, system_prompt } = req.body;
-        if (!query || !model) {
-            return res.status(400).json({ message: 'query and model are required' });
-        }
+// ========== DEMO & UTILITY ENDPOINTS ==========
+// Demo functionality and utility endpoints
 
-        const response_json = await ChatService.handleChatQuery({ query, model, system_prompt });
-        res.status(200).json({ message: 'success', response:response_json });
+router.post('/demo', authenticate, async (req, res) => {
+    try {
+        const { text, rag_flag } = req.body;
+        const lambdaResponse = await ChatService.handleLambdaDemo(text, rag_flag);
+        res.status(200).json({ content: lambdaResponse });
     } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
+        console.log(error);
+        res.status(500).json({ message: 'Internal server error in demo', error });
     }
 });
 
-// ========== Data Utils ==========
 router.post('/get-path-state', authenticate, async (req, res) => {
     try {
         const { path } = req.body;
@@ -343,6 +409,5 @@ router.post('/get-path-state', authenticate, async (req, res) => {
         res.status(500).json({ message: 'Internal server error', error });
     }
 });
-
 
 module.exports = router;

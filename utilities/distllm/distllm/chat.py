@@ -361,10 +361,89 @@ def chat_with_model(config: ChatAppConfig, query: str, extra_context: Optional[s
     )
     return documents, embeddings
 
+def distllm_chat_with_retriever(query: str, rag_db: str, preloaded_retriever, extra_context: Optional[str] = None) -> dict:
+    """
+    Use distLLM chat with a preloaded retriever instead of loading from paths.
+    
+    Args:
+        query: User query string
+        rag_db: RAG database name (for logging)
+        preloaded_retriever: Pre-loaded RemoteRetriever instance
+        extra_context: Optional extra context to include
+        
+    Returns:
+        Dict containing documents and embedding
+    """
+    
+    # Create conversation history
+    conversation_history = [('User', query)]
+    if extra_context:
+        conversation_history.append(('System', extra_context))
+    
+    # Create conversation template
+    conversation_template = ConversationPromptTemplate(conversation_history)
+    
+    # Search using the preloaded retriever
+    try:
+        results, embeddings = preloaded_retriever.search(
+            [query],  # retrieve only on the new user input
+            top_k=20,
+            score_threshold=0.1,
+        )
+    except Exception as e:
+        print(f"Error during search: {e}")
+        raise
+    
+    # Get documents from the search results
+    has_check_key_exists = hasattr(preloaded_retriever, 'check_key_exists')
+    
+    if has_check_key_exists:
+        has_path_key = preloaded_retriever.check_key_exists('path')
+    else:
+        has_path_key = False
+    
+    if has_check_key_exists and has_path_key:
+        # Include file paths if available
+        contexts = []
+        for i, indices in enumerate(results.total_indices):
+            try:
+                paths = preloaded_retriever.get(indices, 'path')
+                context_docs = preloaded_retriever.get_texts(indices)
+                context_with_path = [f"This text is from the following file: {path}\n{doc}\n\n" 
+                                   for doc, path in zip(context_docs, paths)]
+                contexts.extend(context_with_path)
+            except Exception as e:
+                print(f"Error processing result set {i}: {e}")
+                raise
+    else:
+        # Just get the texts
+        contexts = []
+        for i, indices in enumerate(results.total_indices):
+            try:
+                context_docs = preloaded_retriever.get_texts(indices)
+                contexts.extend(context_docs)
+            except Exception as e:
+                print(f"Error processing result set {i}: {e}")
+                raise
+    
+    # Convert embeddings to list format
+    try:
+        embeddings = embeddings.tolist()
+    except Exception as e:
+        print(f"Error converting embeddings: {e}")
+        raise
+ 
+    try:
+        result = json.dumps({'documents': contexts, 'embedding': embeddings[0]})
+        return result
+    except Exception as e:
+        print(f"Error creating JSON response: {e}")
+        raise
+
 def distllm_chat(query: str, rag_db: str, data_path: str, faiss_index_path: str, extra_context: Optional[str] = None) -> dict:
     data = get_data(rag_db, data_path, faiss_index_path)
     config = ChatAppConfig.from_dict(data)
-    documents, embeddings = chat_with_model(config, query, extra_context)
+    documents, embeddings = chat_with_model(config, query, extra_context) # no chatting, just retrieval
     embeddings = embeddings.tolist() # only one embedding per query
     return json.dumps({'documents': documents, 'embedding': embeddings[0]})
 

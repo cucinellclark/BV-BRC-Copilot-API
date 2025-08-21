@@ -3,8 +3,15 @@ import requests
 import os
 from typing import Optional, Dict, Any
 from mongo_helper import get_rag_configs
-from distllm.chat import distllm_chat
+from distllm.chat import distllm_chat, distllm_chat_with_retriever
 from tfidf_vectorizer.tfidf_vectorizer import tfidf_search
+
+# Import preloader
+try:
+    from vector_preloader import get_preloader
+    PRELOADER_AVAILABLE = True
+except ImportError:
+    PRELOADER_AVAILABLE = False
 
 def load_config():
     """Load configuration from config.json file"""
@@ -163,23 +170,38 @@ def distllm_rag(query, rag_db, user_id, model, num_docs, session_id, rag_config,
     try:
         print(f"distLLM RAG: Processing query for rag_db '{rag_db}'")
         
-        # get the datapath from the rag_config
-        if 'data' not in rag_config:
-            raise ValueError("data not found in rag_config")
-        if 'dataset_dir' not in rag_config['data'] or 'faiss_index_path' not in rag_config['data']:
-            raise ValueError("dataset_dir or faiss_index_path not found in rag_config")
-        data_path = rag_config['data']['dataset_dir']
-        faiss_index_path = rag_config['data']['faiss_index_path']
-
-        # Call the distllm_chat function
-        result_json = distllm_chat(query, rag_db, data_path, faiss_index_path, extra_context)
-        result = json.loads(result_json)
+        # Try to use preloaded retriever first
+        if PRELOADER_AVAILABLE:
+            preloader = get_preloader()
+            preloaded_retriever = preloader.get_preloaded_distllm_retriever(rag_db)
+            
+            if preloaded_retriever is not None:
+                print(f"Using preloaded distllm retriever for {rag_db}")
+                # Use the preloaded retriever directly
+                response = distllm_chat_with_retriever(query, rag_db, preloaded_retriever, extra_context)
+                
+                # Parse the JSON response
+                if isinstance(response, str):
+                    response = json.loads(response)
+                
+                return response
         
-        return {
-            'message': 'success',
-            'documents': result.get('documents', []),
-            'embedding': result.get('embedding', [])
-        }
+        # Original method - load from configuration
+        data = rag_config.get('data', {})
+        dataset_dir = data.get('dataset_dir')
+        faiss_index_path = data.get('faiss_index_path')
+        
+        if not dataset_dir or not faiss_index_path:
+            raise ValueError(f"Missing dataset_dir or faiss_index_path in RAG config for {rag_db}")
+        
+        # Call the distllm chat function
+        response = distllm_chat(query, rag_db, dataset_dir, faiss_index_path, extra_context)
+        
+        # Parse the JSON response
+        if isinstance(response, str):
+            response = json.loads(response)
+        
+        return response
         
     except Exception as e:
         print(f"Error in distllm_rag: {e}")
