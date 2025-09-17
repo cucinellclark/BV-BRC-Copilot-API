@@ -1,5 +1,6 @@
 // services/modelQueries.js
 
+const config = require('../../config.json');
 const {
   setupOpenaiClient,
   queryClient,
@@ -159,7 +160,7 @@ async function runModelStream(ctx, modelData, onChunk) {
 
 async function getPathState(path) {
   try {
-    const response = await postJson('http://0.0.0.0:5000/get_path_state', { path: path });
+    const response = await postJson(`${config.utilities_url}/get_path_state`, { path: path });
     return response;
   } catch (error) {
     if (error instanceof LLMServiceError) {

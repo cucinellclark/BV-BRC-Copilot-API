@@ -1,5 +1,6 @@
 // services/llmServices.js
 
+const config = require('../../config.json');
 const { OpenAI } = require('openai');
 const fetch = require('node-fetch');
 
@@ -49,7 +50,7 @@ async function count_tokens(query) {
         if (!query) {
             throw new LLMServiceError('Missing query parameter for count_tokens');
         }
-        const response = await postJson('http://0.0.0.0:5000/count_tokens', { query });
+        const response = await postJson(`${config.utilities_url}/count_tokens`, { query });
         if (typeof response?.token_count !== 'number') {
             throw new LLMServiceError('Invalid response format from token counting API');
         }
@@ -278,7 +279,7 @@ async function queryRag(query, rag_db, user_id, model, num_docs, session_id) {
             throw new LLMServiceError(`Missing required parameters for queryRag: ${missingParams.join(', ')}`);
         }
         
-        const res = await postJson('http://0.0.0.0:5000/rag', { 
+        const res = await postJson(`${config.utilities_url}/rag`, { 
             query, 
             rag_db, 
             user_id, 

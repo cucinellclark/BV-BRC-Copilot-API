@@ -1,5 +1,6 @@
 // services/contextBuilder.js
 
+const config = require('../../../config.json');
 const { v4: uuidv4 } = require('uuid');
 const {
   getModelData,
@@ -20,7 +21,7 @@ const { safeParseJson } = require('../utils/jsonUtils');
 function createQueryFromMessages(query, messages, system_prompt, max_tokens = 40000) {
   return new Promise(async (resolve) => {
     try {
-      const data = await postJson('http://0.0.0.0:5000/get_prompt_query', {
+      const data = await postJson(`${config.utilities_url}/get_prompt_query`, {
         query: query || '',
         messages: messages || [],
         system_prompt: system_prompt || '',
