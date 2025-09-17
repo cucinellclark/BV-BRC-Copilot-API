@@ -13,5 +13,6 @@ source $venv/bin/activate
 
 ## Start the Flask server
 #python3 server.py
-gunicorn --bind 0.0.0.0:5000 server:app
+gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 3 server:app
+
 
