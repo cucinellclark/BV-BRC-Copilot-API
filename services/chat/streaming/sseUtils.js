@@ -31,8 +31,34 @@ function stopKeepAlive(intervalId) {
   clearInterval(intervalId);
 }
 
+/**
+ * Write a structured SSE event with a named event and JSON payload.
+ */
+function sendSseEvent(res, event, payload) {
+  try {
+    if (event) res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    if (typeof res.flush === 'function') res.flush();
+  } catch (_) {
+    /* ignore write errors */
+  }
+}
+
+/**
+ * Suggest a retry interval for the EventSource client.
+ */
+function sendSseRetry(res, ms = 1500) {
+  try {
+    res.write(`retry: ${ms}\n\n`);
+  } catch (_) {
+    /* ignore write errors */
+  }
+}
+
 module.exports = {
   sendSseError,
   startKeepAlive,
-  stopKeepAlive
+  stopKeepAlive,
+  sendSseEvent,
+  sendSseRetry
 }; 

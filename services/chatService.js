@@ -12,7 +12,8 @@ const {
 
 const {
   setupCopilotStream,
-  handleCopilotStreamRequest
+  handleCopilotStreamRequest,
+  startCopilotSse
 } = require('./chat/streaming/streamingHandlers');
 
 const {
@@ -38,6 +39,7 @@ module.exports = {
   handleCopilotRequest,
   handleCopilotStreamRequest,
   setupCopilotStream,
+  startCopilotSse,
   handleChatRequest,
   handleRagRequest,
   handleChatImageRequest,

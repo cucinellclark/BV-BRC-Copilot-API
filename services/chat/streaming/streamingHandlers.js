@@ -10,7 +10,7 @@ const {
 const { prepareCopilotContext } = require('../core/contextBuilder');
 const { runModel, runModelStream } = require('../../queries/modelQueries');
 const { createMessage } = require('../utils/messageUtils');
-const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
+const { sendSseError, startKeepAlive, stopKeepAlive, sendSseEvent, sendSseRetry } = require('./sseUtils');
 const streamStore = require('./streamStore');
 
 /**
@@ -160,7 +160,87 @@ async function handleCopilotStreamRequest(streamData, res) {
   }
 }
 
+/**
+ * Single-call SSE handler. Performs setup and streams tokens under named events.
+ */
+async function startCopilotSse(opts, res) {
+  let keepAliveId = null;
+  try {
+    const {
+      save_chat = true,
+      session_id,
+      user_id
+    } = opts || {};
+
+    const {
+      ctx,
+      modelData,
+      userMessage,
+      systemMessage,
+      chatSession
+    } = await prepareCopilotContext(opts);
+
+    if (save_chat) {
+      if (!chatSession) await createChatSession(session_id, user_id);
+      const initialMsgs = systemMessage ? [userMessage, systemMessage] : [userMessage];
+      await addMessagesToSession(session_id, initialMsgs);
+    }
+
+    const assistantMessageId = uuidv4();
+
+    // Initial handshake and retry suggestion
+    sendSseRetry(res, 1500);
+    sendSseEvent(res, 'open', { ok: true });
+
+    // IDs metadata
+    sendSseEvent(res, 'metadata', {
+      user_message_id: userMessage.message_id,
+      assistant_message_id: assistantMessageId,
+      ...(systemMessage && { system_message_id: systemMessage.message_id })
+    });
+
+    if (systemMessage && Array.isArray(systemMessage.documents) && systemMessage.documents.length > 0) {
+      sendSseEvent(res, 'rag_docs', { documents: systemMessage.documents });
+    }
+    if (systemMessage && systemMessage.copilotDetails) {
+      sendSseEvent(res, 'copilot_details', { details: systemMessage.copilotDetails });
+    }
+
+    keepAliveId = startKeepAlive(res);
+    res.on('close', () => {
+      if (keepAliveId) stopKeepAlive(keepAliveId);
+    });
+
+    let assistantBuffer = '';
+    const onChunk = (text) => {
+      assistantBuffer += text;
+      sendSseEvent(res, 'token', { text });
+    };
+
+    await runModelStream(ctx, modelData, onChunk);
+
+    if (keepAliveId) stopKeepAlive(keepAliveId);
+    sendSseEvent(res, 'done', { message_id: assistantMessageId, content: assistantBuffer });
+    res.end();
+
+    if (save_chat) {
+      const assistantMessageFinal = {
+        message_id: assistantMessageId,
+        role: 'assistant',
+        content: assistantBuffer,
+        timestamp: new Date()
+      };
+      await addMessagesToSession(session_id, [assistantMessageFinal]);
+    }
+  } catch (error) {
+    console.error('startCopilotSse error:', error);
+    if (keepAliveId) stopKeepAlive(keepAliveId);
+    sendSseError(res, (error && error.message) || 'Internal server error');
+  }
+}
+
 module.exports = {
   setupCopilotStream,
-  handleCopilotStreamRequest
+  handleCopilotStreamRequest,
+  startCopilotSse
 }; 
