@@ -1,7 +1,3 @@
-# Chat Service Modular Structure
-
-The original `chatService.js` file (769 lines) has been refactored into logical modules and organized into subfolders for better maintainability and organization.
-
 ## Folder Structure
 
 ```
