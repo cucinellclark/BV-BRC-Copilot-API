@@ -12,6 +12,7 @@ const { runModel, runModelStream } = require('../../queries/modelQueries');
 const { createMessage } = require('../utils/messageUtils');
 const { sendSseError, startKeepAlive, stopKeepAlive, sendSseEvent, sendSseRetry } = require('./sseUtils');
 const streamStore = require('./streamStore');
+// MCP tool execution now occurs during prepareCopilotContext
 
 /**
  * Setup function that prepares message objects and context for streaming.
@@ -123,7 +124,8 @@ async function handleCopilotStreamRequest(streamData, res) {
     const keepAliveId = startKeepAlive(res);
 
     let assistantBuffer = '';
-    const onChunk = (text) => {
+    
+    const onChunk = async (text) => {
       assistantBuffer += text;
       const safeText = text.replace(/\n/g, '\\n');
       res.write(`data: ${safeText}\n\n`);
@@ -169,7 +171,8 @@ async function startCopilotSse(opts, res) {
     const {
       save_chat = true,
       session_id,
-      user_id
+      user_id,
+      auth_token
     } = opts || {};
 
     const {
@@ -212,7 +215,8 @@ async function startCopilotSse(opts, res) {
     });
 
     let assistantBuffer = '';
-    const onChunk = (text) => {
+    
+    const onChunk = async (text) => {
       assistantBuffer += text;
       sendSseEvent(res, 'token', { text });
     };

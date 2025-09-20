@@ -34,6 +34,8 @@ const {
   enhanceQuery
 } = require('./chat/utils/queryEnhancement');
 
+const mcpClient = require('./mcp/mcpClient');
+
 module.exports = {
   // Core chat flows
   handleCopilotRequest,
@@ -56,6 +58,15 @@ module.exports = {
   queryRequest,
   runModel,
   runModelStream,
-  getPathState
+  getPathState,
+
+  // MCP functionality
+  mcpClient,
+  getAvailableMCPTools: () => mcpClient.getAvailableTools(),
+  getMCPToolsByServer: (serverName) => mcpClient.getToolsByServer(serverName),
+  executeMCPTool: (serverName, toolName, params) => mcpClient.executeTool(serverName, toolName, params),
+  getMCPToolsForPrompt: () => mcpClient.getToolsForPrompt(),
+  getConnectedMCPServers: () => mcpClient.getConnectedServers(),
+  initializeMCP: () => mcpClient.initialize()
 };
 

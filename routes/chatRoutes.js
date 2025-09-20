@@ -81,7 +81,6 @@ router.post('/copilot-stream', authenticate, async (req, res) => {
         if (typeof res.flushHeaders === 'function') {
             res.flushHeaders();
         }
-
         await ChatService.startCopilotSse(req.body, res);
         // startCopilotSse will end the response
     } catch (error) {
@@ -379,6 +378,76 @@ router.post('/get-path-state', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Error:', error);
         res.status(500).json({ message: 'Internal server error', error });
+    }
+});
+
+// ========== MCP MANAGEMENT ENDPOINTS ==========
+// MCP server and tool management
+
+router.get('/mcp/status', authenticate, async (req, res) => {
+    try {
+        const connectedServers = ChatService.getConnectedMCPServers();
+        const availableTools = ChatService.getAvailableMCPTools();
+        
+        res.status(200).json({
+            message: 'success',
+            connected_servers: connectedServers,
+            total_tools: availableTools.length,
+            tools: availableTools.map(tool => ({
+                name: tool.name,
+                server: tool.serverName,
+                description: tool.description
+            }))
+        });
+    } catch (error) {
+        console.error('Error getting MCP status:', error);
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+
+router.get('/mcp/tools', authenticate, async (req, res) => {
+    try {
+        const serverName = req.query.server;
+        let tools;
+        
+        if (serverName) {
+            tools = ChatService.getMCPToolsByServer(serverName);
+        } else {
+            tools = ChatService.getAvailableMCPTools();
+        }
+        
+        res.status(200).json({
+            message: 'success',
+            tools: tools
+        });
+    } catch (error) {
+        console.error('Error getting MCP tools:', error);
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+
+router.post('/mcp/execute', authenticate, async (req, res) => {
+    try {
+        const { server_name, tool_name, parameters = {} } = req.body;
+        
+        if (!server_name || !tool_name) {
+            return res.status(400).json({ 
+                message: 'server_name and tool_name are required' 
+            });
+        }
+        
+        const result = await ChatService.executeMCPTool(server_name, tool_name, parameters);
+        
+        res.status(200).json({
+            message: 'success',
+            result: result
+        });
+    } catch (error) {
+        console.error('Error executing MCP tool:', error);
+        res.status(500).json({ 
+            message: 'MCP tool execution failed', 
+            error: error.message 
+        });
     }
 });
 

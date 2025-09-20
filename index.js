@@ -8,6 +8,7 @@ const { OpenAI } = require('openai');
 
 const chatRoutes = require('./routes/chatRoutes'); // chat-related routes
 const dbRoutes = require('./routes/dbRoutes');
+const ChatService = require('./services/chatService');
 //const port = process.env.PORT || 3000;
 // const port = process.env.PORT || 7032;
 const app = express();
@@ -29,6 +30,20 @@ app.use(bodyParser.urlencoded({ extended: true, limit: size_limit })); // for pa
 app.get('/copilot-api/test', (req, res) => {
     res.send('Welcome to my API');
 });
+
+// Initialize MCP Client
+async function initializeMCP() {
+  try {
+    await ChatService.initializeMCP();
+    console.log('MCP Client initialized successfully');
+  } catch (error) {
+    console.error('Failed to initialize MCP Client:', error.message);
+    // Continue without MCP - don't crash the server
+  }
+}
+
+// Initialize MCP before starting routes
+initializeMCP();
 
 // Register chat-related routes with the Express app
 app.use('/copilot-api/chatbrc', chatRoutes);
