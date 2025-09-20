@@ -165,14 +165,14 @@ async function handleCopilotStreamRequest(streamData, res) {
 /**
  * Single-call SSE handler. Performs setup and streams tokens under named events.
  */
-async function startCopilotSse(opts, res) {
+async function startCopilotSse(opts, res, auth_token) {
   let keepAliveId = null;
   try {
     const {
       save_chat = true,
       session_id,
       user_id,
-      auth_token
+      auth_token = auth_token
     } = opts || {};
 
     const {

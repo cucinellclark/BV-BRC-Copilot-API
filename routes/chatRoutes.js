@@ -81,7 +81,11 @@ router.post('/copilot-stream', authenticate, async (req, res) => {
         if (typeof res.flushHeaders === 'function') {
             res.flushHeaders();
         }
-        await ChatService.startCopilotSse(req.body, res);
+        const auth_token = req.headers['authorization']
+        if (!auth_token) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+        await ChatService.startCopilotSse(req.body, res, auth_token);
         // startCopilotSse will end the response
     } catch (error) {
         console.error('Error:', error);
