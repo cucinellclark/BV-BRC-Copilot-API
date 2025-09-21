@@ -171,9 +171,10 @@ async function startCopilotSse(opts, res, auth_token) {
     const {
       save_chat = true,
       session_id,
-      user_id,
-      auth_token = auth_token
+      user_id
     } = opts || {};
+
+    opts.auth_token = auth_token;
 
     const {
       ctx,

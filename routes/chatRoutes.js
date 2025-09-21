@@ -81,6 +81,7 @@ router.post('/copilot-stream', authenticate, async (req, res) => {
         if (typeof res.flushHeaders === 'function') {
             res.flushHeaders();
         }
+        console.log('req.headers', req.headers);
         const auth_token = req.headers['authorization']
         if (!auth_token) {
             return res.status(401).json({ message: 'Unauthorized' });
