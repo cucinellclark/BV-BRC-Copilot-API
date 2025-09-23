@@ -242,6 +242,8 @@ async function prepareCopilotContext(opts) {
       });
     }
 
+    console.log('instructionResponse', instructionResponse);
+
     const parsed = safeParseJson(instructionResponse) || {
       query,
       enhancedQuery: query,
@@ -324,8 +326,14 @@ async function prepareCopilotContext(opts) {
       promptWithHistory = `${promptWithHistory}${toolResultBlock}`;
     }
 
-    // 8. Build chat system prompt WITHOUT MCP information
-    const enhancedSystemPrompt = system_prompt;
+    // 8. Build chat system prompt with answer policy prioritizing MCP results over RAG
+    const answerPolicy = 'Answer policy:\n'
+      + "- When a 'Tool execution result' section is present, base the answer primarily on it.\n"
+      + "- Treat any 'RAG retrieval results' as supplemental context only; never contradict or override the tool result.\n"
+      + "- If there is any conflict, prefer the tool result and keep the answer concise.\n"
+      + "- Do not output commands, tool names, or document excerpts; return only the final answer.";
+
+    const enhancedSystemPrompt = `${system_prompt}\n\n${answerPolicy}`;
 
     // 9. Assemble ctx object for downstream model helpers
     const ctx = {
