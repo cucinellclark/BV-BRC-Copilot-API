@@ -17,6 +17,7 @@ const {
   rateMessage
 } = require('../services/dbUtils');
 const authenticate = require('../middleware/auth');
+const promptManager = require('../prompts');
 const router = express.Router();
 
 // ========== MAIN CHAT ROUTES ==========
@@ -197,8 +198,8 @@ router.post('/generate-title-from-messages', authenticate, async (req, res) => {
     try {
         const { model, messages, user_id } = req.body;
         const message_str = messages.map(msg => `message: ${msg}`).join('\n\n');
-        const query = `Provide a very short, concise, descriptive title based on the content ` +
-            `of the messages. Only return the title, no other text.\n\n${message_str}`;
+        const titlePrompt = promptManager.getChatPrompt('titleGeneration');
+        const query = `${titlePrompt}\n\n${message_str}`;
 
         const modelData = await getModelData(model);
         const queryType = modelData['queryType'];

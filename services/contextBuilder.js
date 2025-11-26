@@ -13,6 +13,7 @@ const {
   postJson
 } = require('./llmServices');
 const { safeParseJson } = require('./jsonUtils');
+const promptManager = require('../prompts');
 
 // Lightweight replica of chatService.createQueryFromMessages to avoid a circular
 // dependency.  Falls back to a simple concatenation if the helper microservice
@@ -78,32 +79,12 @@ async function prepareCopilotContext(opts) {
     const history = chatSession?.messages || [];
 
     // 3. Build the instruction system prompt used for query enhancement
-    const defaultInstructionPrompt =
-      'You are an assistant that only outputs JSON. Do not write any explanatory text or natural language.\n' +
-      'Your tasks are:\n' +
-      '1. Store the original user query in the "query" field.\n' +
-      '2. Rewrite the query as "enhancedQuery" by intelligently incorporating any *relevant* context provided, while preserving the original intent.\n' +
-      '   - If the original query is vague (e.g., "describe this page") and appears to reference a page, tool, feature, or system, rewrite it to make the help-related intent clear.\n' +
-      '   - If there is no relevant context or no need to enhance, copy the original query into "enhancedQuery".\n' +
-      '3. Set "rag_helpdesk" to true if the query relates to helpdesk-style topics such as:\n' +
-      '   - website functionality\n' +
-      '   - troubleshooting\n' +
-      '   - how-to questions\n' +
-      '   - user issues or technical support needs\n' +
-      '   - vague references to a page, tool, or feature that may require explanation or support\n' +
-      '   - **any question mentioning the BV-BRC (Bacterial and Viral Bioinformatics Resource Center) or its functionality**\n\n';
-
-    const contextAndFormatInstructions =
-      '\n\nAdditional context for the page the user is on, as well as relevant data, is provided below. Use it only if it helps clarify or improve the query:\n' +
-      `${system_prompt}\n\n` +
-      'Return ONLY a JSON object in the following format:\n' +
-      '{\n' +
-      '  "query": "<original user query>",\n' +
-      '  "enhancedQuery": "<rewritten or same query>",\n' +
-      '  "rag_helpdesk": <true or false>\n' +
-      '}';
-
-    const instructionSystemPrompt = (enhanced_prompt || defaultInstructionPrompt) + contextAndFormatInstructions;
+    const baseEnhancementPrompt = enhanced_prompt || promptManager.getEnhancementPrompt('default');
+    const contextFormat = promptManager.formatPrompt(
+      promptManager.getEnhancementContextFormat(),
+      { system_prompt: system_prompt }
+    );
+    const instructionSystemPrompt = baseEnhancementPrompt + contextFormat;
 
     // 4. Query the LLM (image-aware if needed) to get enhancement JSON
     let instructionResponse;
@@ -159,9 +140,9 @@ async function prepareCopilotContext(opts) {
 
     if (ragDocs) {
       if (include_history && history.length > 0) {
-        promptWithHistory = `${promptWithHistory}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
+        promptWithHistory = promptManager.formatRagPrompt(finalQuery, ragDocs, promptWithHistory);
       } else {
-        promptWithHistory = `Current User Query: ${finalQuery}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
+        promptWithHistory = promptManager.formatRagPrompt(finalQuery, ragDocs);
       }
     }
 

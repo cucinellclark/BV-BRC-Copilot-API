@@ -32,6 +32,7 @@ const fs = require('fs');
 const { safeParseJson } = require('./jsonUtils');
 const { prepareCopilotContext } = require('./contextBuilder');
 const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
+const promptManager = require('../prompts');
 
 const MAX_TOKEN_HEADROOM = 500;
 
@@ -183,7 +184,7 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
     }
 
     if (!system_prompt || system_prompt.trim() === '') {
-      system_prompt = 'You are a helpful assistant that can answer questions.';
+      system_prompt = promptManager.getSystemPrompt('default');
     }
 
     let response;
@@ -252,12 +253,8 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
       documents = ['No documents found'];
     }
 
-    var prompt_query = 'RAG retrieval results:\n' + documents.join('\n\n');
-    prompt_query = "Current User Query: " + query + "\n\n" + prompt_query;
-    var system_prompt = "You are a helpful AI assistant that can answer questions." + 
-     "You are given a list of documents and a user query. " +
-     "You need to answer the user query based on the documents if those documents are relevant to the user query. " +
-     "If they are not relevant, you need to answer the user query based on your knowledge. ";
+    var prompt_query = promptManager.formatRagPrompt(query, documents);
+    var system_prompt = promptManager.getSystemPrompt('rag');
 
     response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
 
@@ -492,11 +489,7 @@ async function enhanceQuery(originalQuery, systemPrompt = '', image = null, mode
     }
 
     // Instruction telling the model exactly how to behave.
-    const enhancementInstruction =
-      'You are an assistant that rewrites the user\'s query by augmenting it with any RELEVANT context provided.' +
-      ' The rewritten query must preserve the original intent while adding helpful detail.' +
-      ' If the additional context is not relevant, keep the query unchanged.' +
-      ' Respond ONLY with the rewritten query and nothing else.';
+    const enhancementInstruction = promptManager.getSimpleRewriteInstruction();
 
     // Build the user content that will be passed to the enhancement model.
     const userContent = image
@@ -512,7 +505,7 @@ async function enhanceQuery(originalQuery, systemPrompt = '', image = null, mode
         model,
         query: userContent,
         image,
-        system_prompt: enhancementInstruction + (systemPrompt ? `\n\nTextual context you may use if relevant:\n${systemPrompt}` : '')
+        system_prompt: enhancementInstruction + promptManager.getImageContextInstruction(systemPrompt)
       });
     } else {
       // Text-only path.
