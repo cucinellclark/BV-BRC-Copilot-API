@@ -2,10 +2,31 @@
 //var debug = require('debug')('p3-web');
 var app = require('../index');
 var conf = require('../config.json');
+const { discoverTools } = require('../services/mcp/toolDiscovery');
 
 app.set('port', conf.http_port || 7032);
 
-var server = app.listen(app.get('port'), '0.0.0.0',  function () {
-  console.log('Express server listening on port ' + server.address().port);
+// Initialize MCP tools on startup
+async function initializeServer() {
+  console.log('[Startup] Initializing MCP tool discovery...');
+  
+  try {
+    await discoverTools();
+    console.log('[Startup] MCP tools discovered successfully');
+  } catch (error) {
+    console.error('[Startup] Failed to discover MCP tools:', error.message);
+    console.warn('[Startup] Continuing without MCP tools - agent features will be limited');
+  }
+  
+  // Start the server
+  var server = app.listen(app.get('port'), '0.0.0.0', function () {
+    console.log('[Startup] Express server listening on port ' + server.address().port);
+  });
+}
+
+// Run initialization
+initializeServer().catch(error => {
+  console.error('[Startup] Fatal error during initialization:', error);
+  process.exit(1);
 });
 

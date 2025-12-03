@@ -1,0 +1,4042 @@
+{
+  "discovered_at": "2025-12-03T20:57:34.504Z",
+  "servers": {
+    "bvbrc_server": {
+      "status": "connected",
+      "tool_count": 47,
+      "server_name": "BV-BRC MCP Server",
+      "server_description": "Provides access to BV-BRC services, workspace and data",
+      "discovered_at": "2025-12-03T20:57:34.559Z"
+    },
+    "internal_server": {
+      "status": "connected",
+      "tool_count": 5,
+      "server_name": "Internal MCP Server",
+      "server_description": "Provides access to internal services like code execution and rag databases",
+      "discovered_at": "2025-12-03T20:57:34.544Z"
+    }
+  },
+  "tools": {
+    "bvbrc_server.query_collection": {
+      "name": "query_collection",
+      "description": "Query BV-BRC data directly using collection name and Solr query expression.\n\nArgs:\n    collection: The collection name (e.g., \"genome\", \"genome_feature\")\n    filter_str: Solr query expression (e.g., \"genome_id:123.45\" or \"species:\"Escherichia coli\"\")\n    select: Comma-separated list of fields to select (optional)\n    sort: Field to sort by (optional)\n    cursorId: Cursor ID for pagination (optional, use \"*\" or omit for first page)\n    countOnly: If True, only return the total count without data (optional, default False)\n    token: Authentication token for API access (optional, will be auto-detected if token_provider is configured)\n\nNotes: Information on genome resistance to antibiotics is in the genome_amr table. Information on\n    special feature properties like Antibiotic Resistance, Virulence Factor, and Essential Gene is in the\n    sp_gene table. To find which features are in a subsystem, use the subsystem_ref table. Use the\n    genome_name field to search for an organism by name. Note that antibiotic names are case-sensitive\n    and stored in all lower case (e.g. \"methicillin\"). Thus, to ask for all Bacillus subtilis resistant\n    to ampicillin, you would use the filter string\n\n    resistant_phenotype:Resistant AND genome_name:\"Bacillus subtilis\" AND antibiotic:ampicillin\n\n    In the filter string, any field value with spaces in it must be enclosed in double quotes (e.g. \"field value\").\n    \n    The solr_collection_parameters tool lists all the field names for each collection. This tool should\n    be checked to avoid Bad Request errors.\n\n    When countOnly is True, use the minimum number of fields in the select parameter to reduce the number of fields returned.\n\n    To find a DNA or protein sequence for a genome feature, you need to call this method twice, first using the\n    genome_feature table to get the aa_sequence_md5 or na_sequence_md5 for the feature. Then you can use the\n    appropriate MD5 value to query the feature_sequence table using the md5 field as the key, and extract the\n    sequence from the sequence field.\n\n    The \"evidence\" field in the genome_amr table describes how the resistance determination was made. If the\n    evidence is \"Laboratory Method\", we have the most confidence, since the determination was confirmed in a laboratory. \n    \"Computational Method\" indicates lesser confidence.\n\n    In the genome_feature table, whenever possible, the patric_id should be used instead of the feature_id, as\n    only the patric_id is made visible to the end user. Patric IDs always begin with \"fig|\".\n\n    Always use the solr_collection_parameters tool to get the parameters for a given collection before using this tool.\n\nReturns:\n    JSON string with query results:\n    - If countOnly is True: {\"count\": <total_count>}\n    - Otherwise: {\"count\": <batch_count>, \"results\": [...], \"nextCursorId\": <str|None>}",
+      "inputSchema": {
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "filter_str": {
+            "default": "",
+            "type": "string"
+          },
+          "select": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cursorId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "countOnly": {
+            "default": false,
+            "type": "boolean"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "collection"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.solr_collection_parameters": {
+      "name": "solr_collection_parameters",
+      "description": "Get parameters for a given collection.\n\nArgs:\n    collection: The collection name (e.g., \"genome\")\n\nReturns:\n    String with the parameters for the given collection",
+      "inputSchema": {
+        "properties": {
+          "collection": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.solr_query_instructions": {
+      "name": "solr_query_instructions",
+      "description": "Get general query instructions for all collections.\n\nReturns:\n    String with general query instructions and formatting guidelines",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.solr_collections": {
+      "name": "solr_collections",
+      "description": "Get all available collections.\n\nReturns:\n    String with the available collections",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.list_service_apps": {
+      "name": "list_service_apps",
+      "description": "Enumerate all apps. Parameters: token (str, optional) - Authentication token for API access",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.submit_date_app": {
+      "name": "submit_date_app",
+      "description": "Start the date app. Always use the get_service_info tool before using this tool. Parameters: token (str, optional) - Authentication token for API access, output_path (str, required) - Path for output files, output_file (str, required) - Name of output file",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.get_service_info": {
+      "name": "get_service_info",
+      "description": "Get information about the service. Parameters: Service Name (str, required) - Name of the service to get information about. example: genome_assembly, blast, primer_design, etc.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "service_name": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.get_job_details": {
+      "name": "get_job_details",
+      "description": "Query tasks. Parameters: token (str, optional) - Authentication token for API access, task_ids (List[str]) - List of task IDs to query",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "task_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.genome_assembly": {
+      "name": "genome_assembly",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_bases": {
+            "default": 10000000000,
+            "type": "integer"
+          },
+          "recipe": {
+            "default": "auto",
+            "type": "string"
+          },
+          "racon_iter": {
+            "default": 2,
+            "type": "integer"
+          },
+          "pilon_iter": {
+            "default": 2,
+            "type": "integer"
+          },
+          "trim": {
+            "default": false,
+            "type": "boolean"
+          },
+          "target_depth": {
+            "default": 200,
+            "type": "integer"
+          },
+          "normalize": {
+            "default": false,
+            "type": "boolean"
+          },
+          "filtlong": {
+            "default": false,
+            "type": "boolean"
+          },
+          "genome_size": {
+            "default": 5000000,
+            "type": "integer"
+          },
+          "min_contig_len": {
+            "default": 300,
+            "type": "integer"
+          },
+          "min_contig_cov": {
+            "default": 5,
+            "type": "number"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.genome_annotation": {
+      "name": "genome_annotation",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "contigs": {
+            "default": null,
+            "type": "string"
+          },
+          "scientific_name": {
+            "default": null,
+            "type": "string"
+          },
+          "tax_id": {
+            "default": null,
+            "type": "string"
+          },
+          "my_label": {
+            "default": null,
+            "type": "string"
+          },
+          "taxonomy_id": {
+            "default": null,
+            "type": "integer"
+          },
+          "code": {
+            "default": 0,
+            "type": "integer"
+          },
+          "domain": {
+            "default": "auto",
+            "type": "string"
+          },
+          "public": {
+            "default": false,
+            "type": "boolean"
+          },
+          "queue_nowait": {
+            "default": false,
+            "type": "boolean"
+          },
+          "skip_indexing": {
+            "default": false,
+            "type": "boolean"
+          },
+          "skip_workspace_output": {
+            "default": false,
+            "type": "boolean"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "reference_genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "lowvan_min_contig_length": {
+            "default": 300,
+            "type": "integer"
+          },
+          "lowvan_max_contig_length": {
+            "default": 35000,
+            "type": "integer"
+          },
+          "reference_virus_name": {
+            "default": null,
+            "type": "string"
+          },
+          "fix_errors": {
+            "default": null,
+            "type": "boolean"
+          },
+          "fix_frameshifts": {
+            "default": null,
+            "type": "boolean"
+          },
+          "verbose_level": {
+            "default": null,
+            "type": "integer"
+          },
+          "workflow": {
+            "default": null,
+            "type": "string"
+          },
+          "recipe": {
+            "default": null,
+            "type": "string"
+          },
+          "disable_replication": {
+            "default": null,
+            "type": "boolean"
+          },
+          "analyze_quality": {
+            "default": null,
+            "type": "boolean"
+          },
+          "assembly_output": {
+            "default": null,
+            "type": "string"
+          },
+          "custom_pipeline": {
+            "additionalProperties": true,
+            "default": null,
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.comprehensive_genome_analysis": {
+      "name": "comprehensive_genome_analysis",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_type": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reference_assembly": {
+            "default": null,
+            "type": "string"
+          },
+          "recipe": {
+            "default": "auto",
+            "type": "string"
+          },
+          "racon_iter": {
+            "default": 2,
+            "type": "integer"
+          },
+          "pilon_iter": {
+            "default": 2,
+            "type": "integer"
+          },
+          "trim": {
+            "default": false,
+            "type": "boolean"
+          },
+          "normalize": {
+            "default": false,
+            "type": "boolean"
+          },
+          "filtlong": {
+            "default": false,
+            "type": "boolean"
+          },
+          "target_depth": {
+            "default": 200,
+            "type": "integer"
+          },
+          "genome_size": {
+            "default": 5000000,
+            "type": "integer"
+          },
+          "min_contig_len": {
+            "default": 300,
+            "type": "integer"
+          },
+          "min_contig_cov": {
+            "default": 5,
+            "type": "number"
+          },
+          "gto": {
+            "default": null,
+            "type": "string"
+          },
+          "genbank_file": {
+            "default": null,
+            "type": "string"
+          },
+          "contigs": {
+            "default": null,
+            "type": "string"
+          },
+          "scientific_name": {
+            "default": null,
+            "type": "string"
+          },
+          "taxonomy_id": {
+            "default": null,
+            "type": "integer"
+          },
+          "code": {
+            "default": 0,
+            "type": "integer"
+          },
+          "domain": {
+            "default": "auto",
+            "type": "string"
+          },
+          "public": {
+            "default": false,
+            "type": "boolean"
+          },
+          "queue_nowait": {
+            "default": false,
+            "type": "boolean"
+          },
+          "skip_indexing": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reference_genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "analyze_quality": {
+            "default": null,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.blast": {
+      "name": "blast",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_type": {
+            "default": null,
+            "type": "string"
+          },
+          "input_source": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_data": {
+            "default": null,
+            "type": "string"
+          },
+          "input_id_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "input_fasta_file": {
+            "default": null,
+            "type": "string"
+          },
+          "input_feature_group": {
+            "default": null,
+            "type": "string"
+          },
+          "input_genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "db_type": {
+            "default": null,
+            "type": "string"
+          },
+          "db_source": {
+            "default": null,
+            "type": "string"
+          },
+          "db_fasta_data": {
+            "default": null,
+            "type": "string"
+          },
+          "db_fasta_file": {
+            "default": null,
+            "type": "string"
+          },
+          "db_id_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "db_feature_group": {
+            "default": null,
+            "type": "string"
+          },
+          "db_genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "db_genome_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "db_taxon_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "db_precomputed_database": {
+            "default": null,
+            "type": "string"
+          },
+          "blast_program": {
+            "default": null,
+            "type": "string"
+          },
+          "blast_evalue_cutoff": {
+            "default": 0.00001,
+            "type": "number"
+          },
+          "blast_max_hits": {
+            "default": 300,
+            "type": "integer"
+          },
+          "blast_min_coverage": {
+            "default": null,
+            "type": "integer"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.primer_design": {
+      "name": "primer_design",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "input_type": {
+            "default": null,
+            "type": "string"
+          },
+          "sequence_input": {
+            "default": null,
+            "type": "string"
+          },
+          "SEQUENCE_ID": {
+            "default": null,
+            "type": "string"
+          },
+          "SEQUENCE_TARGET": {
+            "default": null,
+            "items": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "SEQUENCE_INCLUDED_REGION": {
+            "default": null,
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "SEQUENCE_EXCLUDED_REGION": {
+            "default": null,
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "SEQUENCE_OVERLAP_JUNCTION_LIST": {
+            "default": null,
+            "items": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "PRIMER_PICK_INTERNAL_OLIGO": {
+            "default": null,
+            "type": "integer"
+          },
+          "PRIMER_PRODUCT_SIZE_RANGE": {
+            "default": null,
+            "items": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "PRIMER_NUM_RETURN": {
+            "default": null,
+            "type": "integer"
+          },
+          "PRIMER_MIN_SIZE": {
+            "default": null,
+            "type": "integer"
+          },
+          "PRIMER_OPT_SIZE": {
+            "default": null,
+            "type": "integer"
+          },
+          "PRIMER_MAX_SIZE": {
+            "default": null,
+            "type": "integer"
+          },
+          "PRIMER_MAX_TM": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_MIN_TM": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_OPT_TM": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_PAIR_MAX_DIFF_TM": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_MAX_GC": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_MIN_GC": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_OPT_GC": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_SALT_MONOVALENT": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_SALT_DIVALENT": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_DNA_CONC": {
+            "default": null,
+            "type": "number"
+          },
+          "PRIMER_DNTP_CONC": {
+            "default": null,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.variation": {
+      "name": "variation",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "reference_genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mapper": {
+            "default": "BWA-mem",
+            "type": "string"
+          },
+          "caller": {
+            "default": "FreeBayes",
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.tnseq": {
+      "name": "tnseq",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "experimental_conditions": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "contrasts": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "read_files": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reference_genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "recipe": {
+            "default": "gumbel",
+            "type": "string"
+          },
+          "protocol": {
+            "default": "sassetti",
+            "type": "string"
+          },
+          "primer": {
+            "default": "",
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.bacterial_genome_tree": {
+      "name": "bacterial_genome_tree",
+      "description": "Tool to submit a bacterial genome tree analysis. Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "genome_groups": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "optional_genome_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "genome_metadata_fields": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "default": null
+          },
+          "number_of_genes": {
+            "default": 20,
+            "type": "integer"
+          },
+          "bootstraps": {
+            "default": 100,
+            "type": "integer"
+          },
+          "max_genomes_missing": {
+            "default": 0,
+            "type": "integer"
+          },
+          "max_allowed_dups": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.gene_tree": {
+      "name": "gene_tree",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sequences": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "alignment_program": {
+            "default": null,
+            "type": "string"
+          },
+          "trim_threshold": {
+            "default": null,
+            "type": "number"
+          },
+          "gap_threshold": {
+            "default": null,
+            "type": "number"
+          },
+          "alphabet": {
+            "default": null,
+            "type": "string"
+          },
+          "substitution_model": {
+            "default": null,
+            "type": "string"
+          },
+          "bootstrap": {
+            "default": null,
+            "type": "integer"
+          },
+          "recipe": {
+            "default": "RAxML",
+            "type": "string"
+          },
+          "tree_type": {
+            "default": null,
+            "type": "string"
+          },
+          "feature_metadata_fields": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_metadata_fields": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.core_genome_mlst": {
+      "name": "core_genome_mlst",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_genome_type": {
+            "default": "genome_group",
+            "type": "string"
+          },
+          "analysis_type": {
+            "default": "chewbbaca",
+            "type": "string"
+          },
+          "input_genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "input_genome_fasta": {
+            "default": null,
+            "type": "string"
+          },
+          "schema_location": {
+            "default": null,
+            "type": "string"
+          },
+          "input_schema_selection": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.whole_genome_snp": {
+      "name": "whole_genome_snp",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_genome_type": {
+            "default": null,
+            "type": "string"
+          },
+          "majority_threshold": {
+            "default": 0.5,
+            "type": "number"
+          },
+          "min_mid_linkage": {
+            "default": 10,
+            "type": "integer"
+          },
+          "max_mid_linkage": {
+            "default": 40,
+            "type": "integer"
+          },
+          "analysis_type": {
+            "default": "Whole Genome SNP Analysis",
+            "type": "string"
+          },
+          "input_genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "input_genome_fasta": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.taxonomic_classification": {
+      "name": "taxonomic_classification",
+      "description": "Submits a taxonomic classification job against one or more metagenonic read libraries. Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "host_genome": {
+            "default": "no_host",
+            "type": "string"
+          },
+          "analysis_type": {
+            "default": "16S",
+            "type": "string"
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "database": {
+            "default": "SILVA",
+            "type": "string"
+          },
+          "save_classified_sequences": {
+            "default": false,
+            "type": "boolean"
+          },
+          "save_unclassified_sequences": {
+            "default": false,
+            "type": "boolean"
+          },
+          "confidence_interval": {
+            "default": 0.1,
+            "type": "number"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.metagenomic_binning": {
+      "name": "metagenomic_binning",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "contigs": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "skip_indexing": {
+            "default": false,
+            "type": "boolean"
+          },
+          "recipe": {
+            "default": null,
+            "type": "string"
+          },
+          "viral_recipe": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "force_local_assembly": {
+            "default": false,
+            "type": "boolean"
+          },
+          "force_inline_annotation": {
+            "default": true,
+            "type": "boolean"
+          },
+          "perform_bacterial_binning": {
+            "default": true,
+            "type": "boolean"
+          },
+          "perform_viral_binning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "perform_viral_annotation": {
+            "default": false,
+            "type": "boolean"
+          },
+          "perform_bacterial_annotation": {
+            "default": true,
+            "type": "boolean"
+          },
+          "assembler": {
+            "default": "",
+            "type": "string"
+          },
+          "danglen": {
+            "default": "50",
+            "type": "string"
+          },
+          "min_contig_len": {
+            "default": 400,
+            "type": "integer"
+          },
+          "min_contig_cov": {
+            "default": 4,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.metagenomic_read_mapping": {
+      "name": "metagenomic_read_mapping",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "gene_set_type": {
+            "default": null,
+            "type": "string"
+          },
+          "gene_set_name": {
+            "default": null,
+            "type": "string"
+          },
+          "gene_set_fasta": {
+            "default": null,
+            "type": "string"
+          },
+          "gene_set_feature_group": {
+            "default": null,
+            "type": "string"
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.rnaseq": {
+      "name": "rnaseq",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "experimental_conditions": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "contrasts": {
+            "default": null,
+            "type": "string"
+          },
+          "strand_specific": {
+            "default": true,
+            "type": "boolean"
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reference_genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_type": {
+            "default": null,
+            "type": "string"
+          },
+          "recipe": {
+            "default": "HTSeq-DESeq",
+            "type": "string"
+          },
+          "host_ftp": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "trimming": {
+            "default": false,
+            "type": "boolean"
+          },
+          "unit_test": {
+            "default": null,
+            "type": "string"
+          },
+          "skip_sampling": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.expression_import": {
+      "name": "expression_import",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "xfile": {
+            "default": null,
+            "type": "string"
+          },
+          "mfile": {
+            "default": null,
+            "type": "string"
+          },
+          "ustring": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.sars_wastewater_analysis": {
+      "name": "sars_wastewater_analysis",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "recipe": {
+            "default": "auto",
+            "type": "string"
+          },
+          "primers": {
+            "default": "ARTIC",
+            "type": "string"
+          },
+          "minimum_base_quality_score": {
+            "default": 20,
+            "type": "integer"
+          },
+          "minimum_genome_coverage": {
+            "default": 60,
+            "type": "integer"
+          },
+          "agg_minimum_lineage_abundance": {
+            "default": 0.01,
+            "type": "number"
+          },
+          "minimum_coverage_depth": {
+            "default": 0,
+            "type": "integer"
+          },
+          "confirmedonly": {
+            "default": false,
+            "type": "boolean"
+          },
+          "minimum_lineage_abundance": {
+            "default": 0.001,
+            "type": "number"
+          },
+          "coverage_estimate": {
+            "default": 10,
+            "type": "integer"
+          },
+          "timeseries_plot_interval": {
+            "default": "0",
+            "type": "string"
+          },
+          "primer_version": {
+            "default": null,
+            "type": "string"
+          },
+          "barcode_csv": {
+            "default": null,
+            "type": "string"
+          },
+          "sample_metadata_csv": {
+            "default": null,
+            "type": "string"
+          },
+          "keep_intermediates": {
+            "default": true,
+            "type": "boolean"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.sequence_submission": {
+      "name": "sequence_submission",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_source": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_data": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_file": {
+            "default": null,
+            "type": "string"
+          },
+          "input_genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "metadata": {
+            "default": null,
+            "type": "string"
+          },
+          "affiliation": {
+            "default": null,
+            "type": "string"
+          },
+          "first_name": {
+            "default": null,
+            "type": "string"
+          },
+          "last_name": {
+            "default": null,
+            "type": "string"
+          },
+          "email": {
+            "default": null,
+            "type": "string"
+          },
+          "consortium": {
+            "default": null,
+            "type": "string"
+          },
+          "country": {
+            "default": null,
+            "type": "string"
+          },
+          "phoneNumber": {
+            "default": null,
+            "type": "string"
+          },
+          "street": {
+            "default": null,
+            "type": "string"
+          },
+          "postal_code": {
+            "default": null,
+            "type": "string"
+          },
+          "city": {
+            "default": null,
+            "type": "string"
+          },
+          "state": {
+            "default": null,
+            "type": "string"
+          },
+          "numberOfSequences": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.influenza_ha_subtype_conversion": {
+      "name": "influenza_ha_subtype_conversion",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_source": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_data": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_file": {
+            "default": null,
+            "type": "string"
+          },
+          "input_feature_group": {
+            "default": null,
+            "type": "string"
+          },
+          "input_feature_list": {
+            "default": null,
+            "type": "string"
+          },
+          "types": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.subspecies_classification": {
+      "name": "subspecies_classification",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_source": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_data": {
+            "default": null,
+            "type": "string"
+          },
+          "input_fasta_file": {
+            "default": null,
+            "type": "string"
+          },
+          "input_genome_group": {
+            "default": null,
+            "type": "string"
+          },
+          "ref_msa_fasta": {
+            "default": null,
+            "type": "string"
+          },
+          "virus_type": {
+            "default": null,
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.viral_assembly": {
+      "name": "viral_assembly",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paired_end_lib": {
+            "additionalProperties": true,
+            "default": null,
+            "type": "object"
+          },
+          "single_end_lib": {
+            "additionalProperties": true,
+            "default": null,
+            "type": "object"
+          },
+          "srr_id": {
+            "default": null,
+            "type": "string"
+          },
+          "recipe": {
+            "default": "auto",
+            "type": "string"
+          },
+          "module": {
+            "default": null,
+            "type": "string"
+          },
+          "viral_size": {
+            "default": "5M",
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.genome_alignment": {
+      "name": "genome_alignment",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "genome_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "recipe": {
+            "default": "progressiveMauve",
+            "type": "string"
+          },
+          "seedWeight": {
+            "default": null,
+            "type": "number"
+          },
+          "maxGappedAlignerLength": {
+            "default": null,
+            "type": "number"
+          },
+          "maxBreakpointDistanceScale": {
+            "default": null,
+            "type": "number"
+          },
+          "conservationDistanceScale": {
+            "default": null,
+            "type": "number"
+          },
+          "weight": {
+            "default": null,
+            "type": "number"
+          },
+          "minScaledPenalty": {
+            "default": null,
+            "type": "number"
+          },
+          "hmmPGoHomologous": {
+            "default": null,
+            "type": "number"
+          },
+          "hmmPGoUnrelated": {
+            "default": null,
+            "type": "number"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.sars_genome_analysis": {
+      "name": "sars_genome_analysis",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "recipe": {
+            "default": "auto",
+            "type": "string"
+          },
+          "primers": {
+            "default": "ARTIC",
+            "type": "string"
+          },
+          "primer_version": {
+            "default": null,
+            "type": "string"
+          },
+          "min_depth": {
+            "default": 100,
+            "type": "integer"
+          },
+          "max_depth": {
+            "default": 8000,
+            "type": "integer"
+          },
+          "keep_intermediates": {
+            "default": 0,
+            "type": "integer"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.msa_snp_analysis": {
+      "name": "msa_snp_analysis",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "input_status": {
+            "default": "unaligned",
+            "type": "string"
+          },
+          "input_type": {
+            "default": "input_group",
+            "type": "string"
+          },
+          "fasta_files": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "select_genomegroup": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "feature_groups": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "feature_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "genome_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "aligner": {
+            "default": "Muscle",
+            "type": "string"
+          },
+          "alphabet": {
+            "default": "dna",
+            "type": "string"
+          },
+          "fasta_keyboard_input": {
+            "default": "",
+            "type": "string"
+          },
+          "ref_type": {
+            "default": "none",
+            "type": "string"
+          },
+          "strategy": {
+            "default": "auto",
+            "type": "string"
+          },
+          "ref_string": {
+            "default": "",
+            "type": "string"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.metacats": {
+      "name": "metacats",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "p_value": {
+            "default": 0.05,
+            "type": "number"
+          },
+          "year_ranges": {
+            "default": null,
+            "type": "string"
+          },
+          "metadata_group": {
+            "default": null,
+            "type": "string"
+          },
+          "input_type": {
+            "default": null,
+            "type": "string"
+          },
+          "alphabet": {
+            "default": "na",
+            "type": "string"
+          },
+          "groups": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "alignment_file": {
+            "default": null,
+            "type": "string"
+          },
+          "group_file": {
+            "default": null,
+            "type": "string"
+          },
+          "alignment_type": {
+            "default": null,
+            "type": "string"
+          },
+          "auto_groups": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.proteome_comparison": {
+      "name": "proteome_comparison",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "genome_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "user_genomes": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "user_feature_groups": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reference_genome_index": {
+            "default": 1,
+            "type": "integer"
+          },
+          "min_seq_cov": {
+            "default": 0.3,
+            "type": "number"
+          },
+          "max_e_val": {
+            "default": 0.00001,
+            "type": "number"
+          },
+          "min_ident": {
+            "default": 0.1,
+            "type": "number"
+          },
+          "min_positives": {
+            "default": 0.2,
+            "type": "number"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.comparative_systems": {
+      "name": "comparative_systems",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_ids": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "genome_groups": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.docking": {
+      "name": "docking",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "protein_input_type": {
+            "default": null,
+            "type": "string"
+          },
+          "input_pdb": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "user_pdb_file": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ligand_library_type": {
+            "default": null,
+            "type": "string"
+          },
+          "ligand_named_library": {
+            "default": null,
+            "type": "string"
+          },
+          "ligand_smiles_list": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ligand_ws_file": {
+            "default": null,
+            "type": "string"
+          },
+          "top_n": {
+            "default": null,
+            "type": "integer"
+          },
+          "batch_size": {
+            "default": 10,
+            "type": "integer"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.similar_genome_finder": {
+      "name": "similar_genome_finder",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "selectedGenomeId": {
+            "default": null,
+            "type": "string"
+          },
+          "fasta_file": {
+            "default": null,
+            "type": "string"
+          },
+          "max_pvalue": {
+            "default": null,
+            "type": "number"
+          },
+          "max_distance": {
+            "default": null,
+            "type": "number"
+          },
+          "max_hits": {
+            "default": null,
+            "type": "integer"
+          },
+          "include_reference": {
+            "default": null,
+            "type": "boolean"
+          },
+          "include_representative": {
+            "default": null,
+            "type": "boolean"
+          },
+          "include_bacterial": {
+            "default": null,
+            "type": "boolean"
+          },
+          "include_viral": {
+            "default": null,
+            "type": "boolean"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.fastqutils": {
+      "name": "fastqutils",
+      "description": "Always use the get_service_info tool before using this tool.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "reference_genome_id": {
+            "default": null,
+            "type": "string"
+          },
+          "paired_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "single_end_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "srr_libs": {
+            "default": null,
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "output_path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "default": null,
+            "type": "string"
+          },
+          "recipe": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.workspace_ls_tool": {
+      "name": "workspace_ls_tool",
+      "description": "List the contents of the workspace.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    paths: Optional list of paths to list (relative to user's home directory). If empty or None, lists user home directory.\n    file_type: Optional file type(s) to filter by. Can be a string or list of strings\n              (e.g., 'contigs', 'folder', 'unspecified', 'genome_group', 'feature_group', 'reads'). \n              If provided, only files/objects with these types will be returned. This filters by the workspace object type,\n              not by file extension, so it can match files with different extensions that share the same type.\n\nReturns:\n    String representation of workspace contents.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paths": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file_types": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.workspace_search_tool": {
+      "name": "workspace_search_tool",
+      "description": "Search the workspace for a given term and/or file extension.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    search_term: Optional term to search the workspace for in file names.\n    paths: Optional list of paths to search (relative to user's home directory). If empty or None, searches user home directory.\n    file_extension: Optional file extension to filter by (e.g., 'py', 'txt', 'json'). Can include or exclude the leading dot.\n    file_types: Optional file type(s) to filter by. Can be a string or list of strings\n               (e.g., 'contigs', 'folder', 'unspecified', 'genome_group', 'feature_group', 'reads').\n               If provided, only files/objects with these types will be returned. This filters by the workspace object type,\n               not by file extension, so it can match files with different extensions that share the same type.\n               At least one of search_term, file_extension, or file_types must be provided.\n\nNote: Paths are relative to the user's home directory. If no paths are provided, the search will be performed in the user's home directory.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "search_term": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "paths": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "file_extension": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "file_types": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.workspace_get_file_metadata_tool": {
+      "name": "workspace_get_file_metadata_tool",
+      "description": "Get the metadata of a file from the workspace.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    path: Path to the file to get (relative to user's home directory).",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "path": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.workspace_download_file_tool": {
+      "name": "workspace_download_file_tool",
+      "description": "Download a file from the workspace.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    path: Path to the file to download (relative to user's home directory).\n    output_file: Optional name and path of the file to save the downloaded content to.\n                If not provided and return_data is False, file data will be returned directly.\n    return_data: If True, return the file data directly (base64 encoded for binary files, text for text files).\n                If False and output_file is provided, only write to file. If False and output_file is None,\n                returns file data (default behavior).",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "path": {
+            "default": null,
+            "type": "string"
+          },
+          "output_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "return_data": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.workspace_upload": {
+      "name": "workspace_upload",
+      "description": "Create an upload URL for a file in the workspace.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    filename: Name of the file to create upload URL for.\n    upload_dir: Directory to upload the file to (relative to user's home directory, defaults to user's home directory).",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "filename": {
+            "default": null,
+            "type": "string"
+          },
+          "upload_dir": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.create_genome_group": {
+      "name": "create_genome_group",
+      "description": "Create a genome group in the workspace.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    genome_group_name: Name of the genome group to create (used if genome_group_path not provided).\n    genome_id_list: List of genome IDs to add to the genome group. Accepts multiple genome ids as a string with comma separation. Example: genome_id1,genome_id2,genome_id3,...\n    genome_group_path: Full path for the genome group. If not provided, defaults to /<user_id>/home/<genome_group_name>.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "genome_group_name": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_id_list": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_group_path": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.create_feature_group": {
+      "name": "create_feature_group",
+      "description": "Create a feature group in the workspace.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    feature_group_name: Name of the feature group to create (used if feature_group_path not provided).\n    feature_id_list: List of feature IDs as a string with comma separation to add to the feature group. Example: feature_id1,feature_id2,feature_id3,...\n    feature_group_path: Full path for the feature group. If not provided, defaults to /<user_id>/home/<feature_group_name>.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "feature_group_name": {
+            "default": null,
+            "type": "string"
+          },
+          "feature_id_list": {
+            "default": null,
+            "type": "string"
+          },
+          "feature_group_path": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.get_genome_group_ids": {
+      "name": "get_genome_group_ids",
+      "description": "Get the IDs of the genomes in a genome group.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    genome_group_name: Name of the genome group to get the IDs of.\n    genome_group_path: Full path for the genome group. If not provided, defaults to /<user_id>/home/Genome Groups/<genome_group_name>.\n\n    Only one of genome_group_name or genome_group_path parameter can be provided.\n\nReturns:\n    List of genome IDs in the genome group.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "genome_group_name": {
+            "default": null,
+            "type": "string"
+          },
+          "genome_group_path": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "bvbrc_server.get_feature_group_ids": {
+      "name": "get_feature_group_ids",
+      "description": "Get the IDs of the features in a feature group.\n\nArgs:\n    token: Authentication token (optional - will use default if not provided)\n    feature_group_name: Name of the feature group to get the IDs of.\n    feature_group_path: Full path for the feature group. If not provided, defaults to /<user_id>/home/Feature Groups/<feature_group_name>.",
+      "inputSchema": {
+        "properties": {
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "feature_group_name": {
+            "default": null,
+            "type": "string"
+          },
+          "feature_group_path": {
+            "default": null,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "bvbrc_server",
+      "server_url": "http:/140.221.78.67:8051"
+    },
+    "internal_server.run_python_code": {
+      "name": "run_python_code",
+      "description": "Execute Python code and return the result.\nValidates syntax before execution. If syntax errors are found,\nthey are returned in the response without executing the code.\n\nArgs:\n    code: The Python code to execute\n\nReturns:\n    JSON string with execution results including:\n    - success: bool indicating if execution succeeded\n    - output: stdout output\n    - error: stderr output or syntax error (if any)\n    - result: return value (if any)\n    - execution_time: time taken in seconds",
+      "inputSchema": {
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "internal_server",
+      "server_url": "http://140.221.78.67:8052"
+    },
+    "internal_server.get_python_info": {
+      "name": "get_python_info",
+      "description": "Get information about the Python environment.\n\nReturns:\n    JSON string with Python environment information:\n    - version: Python version\n    - platform: platform information\n    - installed_packages: list of installed packages (optional)",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "internal_server",
+      "server_url": "http://140.221.78.67:8052"
+    },
+    "internal_server.query_rag_helpdesk": {
+      "name": "query_rag_helpdesk",
+      "description": "Query the BV-BRC helpdesk rag database to retrieve relevant helpdesk documents.\n\nArgs:\n    query: The search query string, typically a user help or troubleshooting question.\n    top_k: Number of top results to return (uses config default if not provided).\n\nReturns:\n    JSON string with query results:\n    - results: list of retrieved documents with scores and metadata\n    - count: number of results returned\n    - query: the original query",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "internal_server",
+      "server_url": "http://140.221.78.67:8052"
+    },
+    "internal_server.list_publication_datasets": {
+      "name": "list_publication_datasets",
+      "description": "List publication datasets relevant to a query using the RAG index.\n\nArgs:\n    query: The search query string, typically describing an analysis or data need.\n    top_k: Optional maximum number of datasets to return (uses config default if not provided).\n\nReturns:\n    JSON string with dataset results:\n    - results: list of datasets with identifiers, titles, and metadata\n    - count: number of results returned\n    - query: the original query",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "internal_server",
+      "server_url": "http://140.221.78.67:8052"
+    },
+    "internal_server.health_check": {
+      "name": "health_check",
+      "description": "Health check endpoint",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "outputSchema": {
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "type": "object",
+        "x-fastmcp-wrap-result": true
+      },
+      "_meta": {
+        "_fastmcp": {
+          "tags": []
+        }
+      },
+      "server": "internal_server",
+      "server_url": "http://140.221.78.67:8052"
+    }
+  },
+  "tool_count": 52
+}

@@ -1,0 +1,858 @@
+# Available MCP Tools (52 total)
+# Last Updated: 2025-12-03T20:57:34.504Z
+
+## BV-BRC MCP Server
+Provides access to BV-BRC services, workspace and data
+
+### query_collection
+Query BV-BRC data directly using collection name and Solr query expression.
+
+Args:
+    collection: The collection name (e.g., "genome", "genome_feature")
+    filter_str: Solr query expression (e.g., "genome_id:123.45" or "species:"Escherichia coli"")
+    select: Comma-separated list of fields to select (optional)
+    sort: Field to sort by (optional)
+    cursorId: Cursor ID for pagination (optional, use "*" or omit for first page)
+    countOnly: If True, only return the total count without data (optional, default False)
+    token: Authentication token for API access (optional, will be auto-detected if token_provider is configured)
+
+Notes: Information on genome resistance to antibiotics is in the genome_amr table. Information on
+    special feature properties like Antibiotic Resistance, Virulence Factor, and Essential Gene is in the
+    sp_gene table. To find which features are in a subsystem, use the subsystem_ref table. Use the
+    genome_name field to search for an organism by name. Note that antibiotic names are case-sensitive
+    and stored in all lower case (e.g. "methicillin"). Thus, to ask for all Bacillus subtilis resistant
+    to ampicillin, you would use the filter string
+
+    resistant_phenotype:Resistant AND genome_name:"Bacillus subtilis" AND antibiotic:ampicillin
+
+    In the filter string, any field value with spaces in it must be enclosed in double quotes (e.g. "field value").
+    
+    The solr_collection_parameters tool lists all the field names for each collection. This tool should
+    be checked to avoid Bad Request errors.
+
+    When countOnly is True, use the minimum number of fields in the select parameter to reduce the number of fields returned.
+
+    To find a DNA or protein sequence for a genome feature, you need to call this method twice, first using the
+    genome_feature table to get the aa_sequence_md5 or na_sequence_md5 for the feature. Then you can use the
+    appropriate MD5 value to query the feature_sequence table using the md5 field as the key, and extract the
+    sequence from the sequence field.
+
+    The "evidence" field in the genome_amr table describes how the resistance determination was made. If the
+    evidence is "Laboratory Method", we have the most confidence, since the determination was confirmed in a laboratory. 
+    "Computational Method" indicates lesser confidence.
+
+    In the genome_feature table, whenever possible, the patric_id should be used instead of the feature_id, as
+    only the patric_id is made visible to the end user. Patric IDs always begin with "fig|".
+
+    Always use the solr_collection_parameters tool to get the parameters for a given collection before using this tool.
+
+Returns:
+    JSON string with query results:
+    - If countOnly is True: {"count": <total_count>}
+    - Otherwise: {"count": <batch_count>, "results": [...], "nextCursorId": <str|None>}
+**Parameters:**
+- collection (required): string - 
+- filter_str: string - 
+- select: undefined - 
+- sort: undefined - 
+- cursorId: undefined - 
+- countOnly: boolean - 
+- token: undefined - 
+
+### solr_collection_parameters
+Get parameters for a given collection.
+
+Args:
+    collection: The collection name (e.g., "genome")
+
+Returns:
+    String with the parameters for the given collection
+**Parameters:**
+- collection (required): string - 
+
+### solr_query_instructions
+Get general query instructions for all collections.
+
+Returns:
+    String with general query instructions and formatting guidelines
+**Parameters:**
+
+### solr_collections
+Get all available collections.
+
+Returns:
+    String with the available collections
+**Parameters:**
+
+### list_service_apps
+Enumerate all apps. Parameters: token (str, optional) - Authentication token for API access
+**Parameters:**
+- token: undefined - 
+
+### submit_date_app
+Start the date app. Always use the get_service_info tool before using this tool. Parameters: token (str, optional) - Authentication token for API access, output_path (str, required) - Path for output files, output_file (str, required) - Name of output file
+**Parameters:**
+- token: undefined - 
+- output_path: string - 
+- output_file: string - 
+
+### get_service_info
+Get information about the service. Parameters: Service Name (str, required) - Name of the service to get information about. example: genome_assembly, blast, primer_design, etc.
+**Parameters:**
+- token: undefined - 
+- service_name: string - 
+
+### get_job_details
+Query tasks. Parameters: token (str, optional) - Authentication token for API access, task_ids (List[str]) - List of task IDs to query
+**Parameters:**
+- token: undefined - 
+- task_ids: array - 
+
+### genome_assembly
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_ids: array - 
+- max_bases: integer - 
+- recipe: string - 
+- racon_iter: integer - 
+- pilon_iter: integer - 
+- trim: boolean - 
+- target_depth: integer - 
+- normalize: boolean - 
+- filtlong: boolean - 
+- genome_size: integer - 
+- min_contig_len: integer - 
+- min_contig_cov: number - 
+- output_path: string - 
+- output_file: string - 
+
+### genome_annotation
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- genome_id: string - 
+- contigs: string - 
+- scientific_name: string - 
+- tax_id: string - 
+- my_label: string - 
+- taxonomy_id: integer - 
+- code: integer - 
+- domain: string - 
+- public: boolean - 
+- queue_nowait: boolean - 
+- skip_indexing: boolean - 
+- skip_workspace_output: boolean - 
+- output_path: string - 
+- output_file: string - 
+- reference_genome_id: string - 
+- lowvan_min_contig_length: integer - 
+- lowvan_max_contig_length: integer - 
+- reference_virus_name: string - 
+- fix_errors: boolean - 
+- fix_frameshifts: boolean - 
+- verbose_level: integer - 
+- workflow: string - 
+- recipe: string - 
+- disable_replication: boolean - 
+- analyze_quality: boolean - 
+- assembly_output: string - 
+- custom_pipeline: object - 
+
+### comprehensive_genome_analysis
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_type: string - 
+- output_path: string - 
+- output_file: string - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_ids: array - 
+- reference_assembly: string - 
+- recipe: string - 
+- racon_iter: integer - 
+- pilon_iter: integer - 
+- trim: boolean - 
+- normalize: boolean - 
+- filtlong: boolean - 
+- target_depth: integer - 
+- genome_size: integer - 
+- min_contig_len: integer - 
+- min_contig_cov: number - 
+- gto: string - 
+- genbank_file: string - 
+- contigs: string - 
+- scientific_name: string - 
+- taxonomy_id: integer - 
+- code: integer - 
+- domain: string - 
+- public: boolean - 
+- queue_nowait: boolean - 
+- skip_indexing: boolean - 
+- reference_genome_id: string - 
+- analyze_quality: boolean - 
+
+### blast
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_type: string - 
+- input_source: string - 
+- input_fasta_data: string - 
+- input_id_list: array - 
+- input_fasta_file: string - 
+- input_feature_group: string - 
+- input_genome_group: string - 
+- db_type: string - 
+- db_source: string - 
+- db_fasta_data: string - 
+- db_fasta_file: string - 
+- db_id_list: array - 
+- db_feature_group: string - 
+- db_genome_group: string - 
+- db_genome_list: array - 
+- db_taxon_list: array - 
+- db_precomputed_database: string - 
+- blast_program: string - 
+- blast_evalue_cutoff: number - 
+- blast_max_hits: integer - 
+- blast_min_coverage: integer - 
+- output_path: string - 
+- output_file: string - 
+
+### primer_design
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- output_file: string - 
+- output_path: string - 
+- input_type: string - 
+- sequence_input: string - 
+- SEQUENCE_ID: string - 
+- SEQUENCE_TARGET: array - 
+- SEQUENCE_INCLUDED_REGION: array - 
+- SEQUENCE_EXCLUDED_REGION: array - 
+- SEQUENCE_OVERLAP_JUNCTION_LIST: array - 
+- PRIMER_PICK_INTERNAL_OLIGO: integer - 
+- PRIMER_PRODUCT_SIZE_RANGE: array - 
+- PRIMER_NUM_RETURN: integer - 
+- PRIMER_MIN_SIZE: integer - 
+- PRIMER_OPT_SIZE: integer - 
+- PRIMER_MAX_SIZE: integer - 
+- PRIMER_MAX_TM: number - 
+- PRIMER_MIN_TM: number - 
+- PRIMER_OPT_TM: number - 
+- PRIMER_PAIR_MAX_DIFF_TM: number - 
+- PRIMER_MAX_GC: number - 
+- PRIMER_MIN_GC: number - 
+- PRIMER_OPT_GC: number - 
+- PRIMER_SALT_MONOVALENT: number - 
+- PRIMER_SALT_DIVALENT: number - 
+- PRIMER_DNA_CONC: number - 
+- PRIMER_DNTP_CONC: number - 
+
+### variation
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- reference_genome_id: string - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_ids: array - 
+- mapper: string - 
+- caller: string - 
+- output_path: string - 
+- output_file: string - 
+
+### tnseq
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- experimental_conditions: array - 
+- contrasts: array - 
+- read_files: array - 
+- reference_genome_id: string - 
+- recipe: string - 
+- protocol: string - 
+- primer: string - 
+- output_path: string - 
+- output_file: string - 
+
+### bacterial_genome_tree
+Tool to submit a bacterial genome tree analysis. Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- output_path: string - 
+- output_file: string - 
+- genome_ids: array - 
+- genome_groups: array - 
+- optional_genome_ids: array - 
+- genome_metadata_fields: undefined - 
+- number_of_genes: integer - 
+- bootstraps: integer - 
+- max_genomes_missing: integer - 
+- max_allowed_dups: integer - 
+
+### gene_tree
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- sequences: array - 
+- alignment_program: string - 
+- trim_threshold: number - 
+- gap_threshold: number - 
+- alphabet: string - 
+- substitution_model: string - 
+- bootstrap: integer - 
+- recipe: string - 
+- tree_type: string - 
+- feature_metadata_fields: string - 
+- genome_metadata_fields: string - 
+- output_path: string - 
+- output_file: string - 
+
+### core_genome_mlst
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_genome_type: string - 
+- analysis_type: string - 
+- input_genome_group: string - 
+- input_genome_fasta: string - 
+- schema_location: string - 
+- input_schema_selection: string - 
+- output_path: string - 
+- output_file: string - 
+
+### whole_genome_snp
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_genome_type: string - 
+- majority_threshold: number - 
+- min_mid_linkage: integer - 
+- max_mid_linkage: integer - 
+- analysis_type: string - 
+- input_genome_group: string - 
+- input_genome_fasta: string - 
+- output_path: string - 
+- output_file: string - 
+
+### taxonomic_classification
+Submits a taxonomic classification job against one or more metagenonic read libraries. Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- host_genome: string - 
+- analysis_type: string - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_libs: array - 
+- database: string - 
+- save_classified_sequences: boolean - 
+- save_unclassified_sequences: boolean - 
+- confidence_interval: number - 
+- output_path: string - 
+- output_file: string - 
+
+### metagenomic_binning
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_ids: array - 
+- contigs: string - 
+- genome_group: string - 
+- skip_indexing: boolean - 
+- recipe: string - 
+- viral_recipe: string - 
+- output_path: string - 
+- output_file: string - 
+- force_local_assembly: boolean - 
+- force_inline_annotation: boolean - 
+- perform_bacterial_binning: boolean - 
+- perform_viral_binning: boolean - 
+- perform_viral_annotation: boolean - 
+- perform_bacterial_annotation: boolean - 
+- assembler: string - 
+- danglen: string - 
+- min_contig_len: integer - 
+- min_contig_cov: number - 
+
+### metagenomic_read_mapping
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- gene_set_type: string - 
+- gene_set_name: string - 
+- gene_set_fasta: string - 
+- gene_set_feature_group: string - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_ids: array - 
+- output_path: string - 
+- output_file: string - 
+
+### rnaseq
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- experimental_conditions: array - 
+- contrasts: string - 
+- strand_specific: boolean - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_libs: array - 
+- reference_genome_id: string - 
+- genome_type: string - 
+- recipe: string - 
+- host_ftp: string - 
+- output_path: string - 
+- output_file: string - 
+- trimming: boolean - 
+- unit_test: string - 
+- skip_sampling: string - 
+
+### expression_import
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- xfile: string - 
+- mfile: string - 
+- ustring: string - 
+- output_path: string - 
+- output_file: string - 
+
+### sars_wastewater_analysis
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_libs: array - 
+- recipe: string - 
+- primers: string - 
+- minimum_base_quality_score: integer - 
+- minimum_genome_coverage: integer - 
+- agg_minimum_lineage_abundance: number - 
+- minimum_coverage_depth: integer - 
+- confirmedonly: boolean - 
+- minimum_lineage_abundance: number - 
+- coverage_estimate: integer - 
+- timeseries_plot_interval: string - 
+- primer_version: string - 
+- barcode_csv: string - 
+- sample_metadata_csv: string - 
+- keep_intermediates: boolean - 
+- output_path: string - 
+- output_file: string - 
+
+### sequence_submission
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_source: string - 
+- input_fasta_data: string - 
+- input_fasta_file: string - 
+- input_genome_group: string - 
+- metadata: string - 
+- affiliation: string - 
+- first_name: string - 
+- last_name: string - 
+- email: string - 
+- consortium: string - 
+- country: string - 
+- phoneNumber: string - 
+- street: string - 
+- postal_code: string - 
+- city: string - 
+- state: string - 
+- numberOfSequences: string - 
+- output_path: string - 
+- output_file: string - 
+
+### influenza_ha_subtype_conversion
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_source: string - 
+- input_fasta_data: string - 
+- input_fasta_file: string - 
+- input_feature_group: string - 
+- input_feature_list: string - 
+- types: string - 
+- output_path: string - 
+- output_file: string - 
+
+### subspecies_classification
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_source: string - 
+- input_fasta_data: string - 
+- input_fasta_file: string - 
+- input_genome_group: string - 
+- ref_msa_fasta: string - 
+- virus_type: string - 
+- output_path: string - 
+- output_file: string - 
+
+### viral_assembly
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- paired_end_lib: object - 
+- single_end_lib: object - 
+- srr_id: string - 
+- recipe: string - 
+- module: string - 
+- viral_size: string - 
+- output_path: string - 
+- output_file: string - 
+
+### genome_alignment
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- genome_ids: array - 
+- recipe: string - 
+- seedWeight: number - 
+- maxGappedAlignerLength: number - 
+- maxBreakpointDistanceScale: number - 
+- conservationDistanceScale: number - 
+- weight: number - 
+- minScaledPenalty: number - 
+- hmmPGoHomologous: number - 
+- hmmPGoUnrelated: number - 
+- output_path: string - 
+- output_file: string - 
+
+### sars_genome_analysis
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_ids: array - 
+- recipe: string - 
+- primers: string - 
+- primer_version: string - 
+- min_depth: integer - 
+- max_depth: integer - 
+- keep_intermediates: integer - 
+- output_path: string - 
+- output_file: string - 
+
+### msa_snp_analysis
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- input_status: string - 
+- input_type: string - 
+- fasta_files: array - 
+- select_genomegroup: array - 
+- feature_groups: array - 
+- feature_list: array - 
+- genome_list: array - 
+- aligner: string - 
+- alphabet: string - 
+- fasta_keyboard_input: string - 
+- ref_type: string - 
+- strategy: string - 
+- ref_string: string - 
+- output_path: string - 
+- output_file: string - 
+
+### metacats
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- output_path: string - 
+- output_file: string - 
+- p_value: number - 
+- year_ranges: string - 
+- metadata_group: string - 
+- input_type: string - 
+- alphabet: string - 
+- groups: array - 
+- alignment_file: string - 
+- group_file: string - 
+- alignment_type: string - 
+- auto_groups: array - 
+
+### proteome_comparison
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- genome_ids: array - 
+- user_genomes: array - 
+- user_feature_groups: array - 
+- reference_genome_index: integer - 
+- min_seq_cov: number - 
+- max_e_val: number - 
+- min_ident: number - 
+- min_positives: number - 
+- output_path: string - 
+- output_file: string - 
+
+### comparative_systems
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- output_path: string - 
+- output_file: string - 
+- genome_ids: array - 
+- genome_groups: array - 
+
+### docking
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- protein_input_type: string - 
+- input_pdb: array - 
+- user_pdb_file: array - 
+- ligand_library_type: string - 
+- ligand_named_library: string - 
+- ligand_smiles_list: array - 
+- ligand_ws_file: string - 
+- top_n: integer - 
+- batch_size: integer - 
+- output_path: string - 
+- output_file: string - 
+
+### similar_genome_finder
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- selectedGenomeId: string - 
+- fasta_file: string - 
+- max_pvalue: number - 
+- max_distance: number - 
+- max_hits: integer - 
+- include_reference: boolean - 
+- include_representative: boolean - 
+- include_bacterial: boolean - 
+- include_viral: boolean - 
+- output_path: string - 
+- output_file: string - 
+
+### fastqutils
+Always use the get_service_info tool before using this tool.
+**Parameters:**
+- token: undefined - 
+- reference_genome_id: string - 
+- paired_end_libs: array - 
+- single_end_libs: array - 
+- srr_libs: array - 
+- output_path: string - 
+- output_file: string - 
+- recipe: array - 
+
+### workspace_ls_tool
+List the contents of the workspace.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    paths: Optional list of paths to list (relative to user's home directory). If empty or None, lists user home directory.
+    file_type: Optional file type(s) to filter by. Can be a string or list of strings
+              (e.g., 'contigs', 'folder', 'unspecified', 'genome_group', 'feature_group', 'reads'). 
+              If provided, only files/objects with these types will be returned. This filters by the workspace object type,
+              not by file extension, so it can match files with different extensions that share the same type.
+
+Returns:
+    String representation of workspace contents.
+**Parameters:**
+- token: undefined - 
+- paths: array - 
+- file_types: undefined - 
+
+### workspace_search_tool
+Search the workspace for a given term and/or file extension.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    search_term: Optional term to search the workspace for in file names.
+    paths: Optional list of paths to search (relative to user's home directory). If empty or None, searches user home directory.
+    file_extension: Optional file extension to filter by (e.g., 'py', 'txt', 'json'). Can include or exclude the leading dot.
+    file_types: Optional file type(s) to filter by. Can be a string or list of strings
+               (e.g., 'contigs', 'folder', 'unspecified', 'genome_group', 'feature_group', 'reads').
+               If provided, only files/objects with these types will be returned. This filters by the workspace object type,
+               not by file extension, so it can match files with different extensions that share the same type.
+               At least one of search_term, file_extension, or file_types must be provided.
+
+Note: Paths are relative to the user's home directory. If no paths are provided, the search will be performed in the user's home directory.
+**Parameters:**
+- token: undefined - 
+- search_term: undefined - 
+- paths: array - 
+- file_extension: undefined - 
+- file_types: undefined - 
+
+### workspace_get_file_metadata_tool
+Get the metadata of a file from the workspace.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    path: Path to the file to get (relative to user's home directory).
+**Parameters:**
+- token: undefined - 
+- path: string - 
+
+### workspace_download_file_tool
+Download a file from the workspace.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    path: Path to the file to download (relative to user's home directory).
+    output_file: Optional name and path of the file to save the downloaded content to.
+                If not provided and return_data is False, file data will be returned directly.
+    return_data: If True, return the file data directly (base64 encoded for binary files, text for text files).
+                If False and output_file is provided, only write to file. If False and output_file is None,
+                returns file data (default behavior).
+**Parameters:**
+- token: undefined - 
+- path: string - 
+- output_file: undefined - 
+- return_data: boolean - 
+
+### workspace_upload
+Create an upload URL for a file in the workspace.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    filename: Name of the file to create upload URL for.
+    upload_dir: Directory to upload the file to (relative to user's home directory, defaults to user's home directory).
+**Parameters:**
+- token: undefined - 
+- filename: string - 
+- upload_dir: string - 
+
+### create_genome_group
+Create a genome group in the workspace.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    genome_group_name: Name of the genome group to create (used if genome_group_path not provided).
+    genome_id_list: List of genome IDs to add to the genome group. Accepts multiple genome ids as a string with comma separation. Example: genome_id1,genome_id2,genome_id3,...
+    genome_group_path: Full path for the genome group. If not provided, defaults to /<user_id>/home/<genome_group_name>.
+**Parameters:**
+- token: undefined - 
+- genome_group_name: string - 
+- genome_id_list: string - 
+- genome_group_path: string - 
+
+### create_feature_group
+Create a feature group in the workspace.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    feature_group_name: Name of the feature group to create (used if feature_group_path not provided).
+    feature_id_list: List of feature IDs as a string with comma separation to add to the feature group. Example: feature_id1,feature_id2,feature_id3,...
+    feature_group_path: Full path for the feature group. If not provided, defaults to /<user_id>/home/<feature_group_name>.
+**Parameters:**
+- token: undefined - 
+- feature_group_name: string - 
+- feature_id_list: string - 
+- feature_group_path: string - 
+
+### get_genome_group_ids
+Get the IDs of the genomes in a genome group.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    genome_group_name: Name of the genome group to get the IDs of.
+    genome_group_path: Full path for the genome group. If not provided, defaults to /<user_id>/home/Genome Groups/<genome_group_name>.
+
+    Only one of genome_group_name or genome_group_path parameter can be provided.
+
+Returns:
+    List of genome IDs in the genome group.
+**Parameters:**
+- token: undefined - 
+- genome_group_name: string - 
+- genome_group_path: string - 
+
+### get_feature_group_ids
+Get the IDs of the features in a feature group.
+
+Args:
+    token: Authentication token (optional - will use default if not provided)
+    feature_group_name: Name of the feature group to get the IDs of.
+    feature_group_path: Full path for the feature group. If not provided, defaults to /<user_id>/home/Feature Groups/<feature_group_name>.
+**Parameters:**
+- token: undefined - 
+- feature_group_name: string - 
+- feature_group_path: string - 
+
+
+## Internal MCP Server
+Provides access to internal services like code execution and rag databases
+
+### run_python_code
+Execute Python code and return the result.
+Validates syntax before execution. If syntax errors are found,
+they are returned in the response without executing the code.
+
+Args:
+    code: The Python code to execute
+
+Returns:
+    JSON string with execution results including:
+    - success: bool indicating if execution succeeded
+    - output: stdout output
+    - error: stderr output or syntax error (if any)
+    - result: return value (if any)
+    - execution_time: time taken in seconds
+**Parameters:**
+- code (required): string - 
+
+### get_python_info
+Get information about the Python environment.
+
+Returns:
+    JSON string with Python environment information:
+    - version: Python version
+    - platform: platform information
+    - installed_packages: list of installed packages (optional)
+**Parameters:**
+
+### query_rag_helpdesk
+Query the BV-BRC helpdesk rag database to retrieve relevant helpdesk documents.
+
+Args:
+    query: The search query string, typically a user help or troubleshooting question.
+    top_k: Number of top results to return (uses config default if not provided).
+
+Returns:
+    JSON string with query results:
+    - results: list of retrieved documents with scores and metadata
+    - count: number of results returned
+    - query: the original query
+**Parameters:**
+- query (required): string - 
+- top_k: undefined - 
+
+### list_publication_datasets
+List publication datasets relevant to a query using the RAG index.
+
+Args:
+    query: The search query string, typically describing an analysis or data need.
+    top_k: Optional maximum number of datasets to return (uses config default if not provided).
+
+Returns:
+    JSON string with dataset results:
+    - results: list of datasets with identifiers, titles, and metadata
+    - count: number of results returned
+    - query: the original query
+**Parameters:**
+- query (required): string - 
+- top_k: undefined - 
+
+### health_check
+Health check endpoint
+**Parameters:**
+
+
