@@ -408,9 +408,16 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       modelData
     });
     
+    console.log('[Agent] Raw LLM response:', response);
+    
     // Parse JSON response
     const parsed = safeParseJson(response);
+    console.log('[Agent] Parsed JSON:', parsed);
+    
     if (!parsed || !parsed.action) {
+      console.error('[Agent] JSON parsing failed or missing action field');
+      console.error('[Agent] Raw response was:', response);
+      console.error('[Agent] Parsed result was:', parsed);
       throw new Error('Invalid planning response: missing action field');
     }
     

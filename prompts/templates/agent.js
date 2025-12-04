@@ -78,7 +78,9 @@ Generate a natural, helpful response that:
 6. If multiple results were found, summarize the key findings
 7. If no results were found, explain why and suggest alternatives
 
-Format your response in clear paragraphs. Use markdown for formatting when appropriate (tables, lists, bold).
+Format your response in clear paragraphs. Use markdown for formatting when appropriate (tables, lists, bold, and links).
+
+When including hyperlinks, use standard markdown link syntax: [link text](URL)
 
 Do NOT mention the internal tools or technical details about how you gathered the information. Focus on answering the user's question naturally.`,
 
@@ -102,6 +104,8 @@ Provide a natural, helpful response that:
 4. For general questions about BV-BRC, provide accurate information
 5. For thanks or acknowledgments, respond naturally
 6. Keep it concise but informative
+
+When including hyperlinks, use standard markdown link syntax: [link text](URL)
 
 Do NOT mention internal tools, planning, or technical implementation details.`,
 
