@@ -4,6 +4,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { connectToDatabase } = require('../database');
 const ChatService = require('../services/chatService');
+const AgentOrchestrator = require('../services/agentOrchestrator');
 const {
   getModelData,
   getSessionMessages,
@@ -18,6 +19,7 @@ const {
 } = require('../services/dbUtils');
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
+const config = require('../config.json');
 const router = express.Router();
 
 // ========== MAIN CHAT ROUTES ==========
@@ -54,6 +56,108 @@ router.post('/copilot', authenticate, async (req, res) => {
             res.end();
         } else {
             res.status(500).json({ message: 'Internal server error', error });
+        }
+    }
+});
+
+// ========== AGENT COPILOT ROUTE ==========
+router.post('/copilot-agent', authenticate, async (req, res) => {
+    try {
+        const { 
+            query, 
+            model, 
+            session_id,
+            user_id, 
+            system_prompt = '', 
+            save_chat = true,
+            include_history = true,
+            auth_token = null,
+            stream = true  // Default to streaming
+        } = req.body;
+
+        // Validate required fields
+        if (!query || !model || !user_id) {
+            return res.status(400).json({ 
+                message: 'Missing required fields', 
+                required: ['query', 'model', 'user_id'] 
+            });
+        }
+
+        // Get max_iterations from config (system-level setting)
+        const max_iterations = config.agent?.max_iterations || 8;
+
+        console.log('[Agent Route] Received agent request:', { 
+            query, 
+            model, 
+            session_id, 
+            user_id, 
+            save_chat,
+            max_iterations,
+            stream
+        });
+
+        // Streaming is default, only disable if explicitly set to false
+        if (stream !== false) {
+            // -------- Streaming (SSE) path --------
+            res.set({
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no'
+            });
+            
+            if (typeof res.flushHeaders === 'function') {
+                res.flushHeaders();
+            }
+
+            // Execute agent loop with streaming
+            await AgentOrchestrator.executeAgentLoop({
+                query,
+                model,
+                session_id,
+                user_id,
+                system_prompt,
+                save_chat,
+                include_history,
+                max_iterations,
+                auth_token,
+                stream: stream,
+                responseStream: res
+            });
+
+            // The stream handler is responsible for ending the response
+            return;
+        }
+
+        // -------- Standard JSON path --------
+        // Execute agent loop
+        const response = await AgentOrchestrator.executeAgentLoop({
+            query,
+            model,
+            session_id,
+            user_id,
+            system_prompt,
+            save_chat,
+            include_history,
+            max_iterations,
+            auth_token
+        });
+
+        res.status(200).json(response);
+    } catch (error) {
+        console.error('[Agent Route] Error:', error);
+        
+        // If this was a streaming request, send error over SSE, else JSON
+        // Default is streaming, so check if stream is not explicitly false
+        if (req.body.stream !== false) {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
+            res.end();
+        } else {
+            res.status(500).json({ 
+                message: 'Internal server error', 
+                error: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            });
         }
     }
 });

@@ -5,6 +5,7 @@ const systemPrompts = require('./templates/system');
 const enhancementPrompts = require('./templates/enhancement');
 const ragPrompts = require('./templates/rag');
 const chatPrompts = require('./templates/chat');
+const agentPrompts = require('./templates/agent');
 
 class PromptManager {
   constructor() {
@@ -125,6 +126,15 @@ class PromptManager {
   getImageContextInstruction(systemPrompt = '') {
     if (!systemPrompt) return '';
     return enhancementPrompts.imageContext.replace('{{system_prompt}}', systemPrompt);
+  }
+
+  /**
+   * Get an agent prompt by type
+   * @param {string} type - The type of agent prompt ('taskPlanning', 'finalResponse', 'errorRecovery')
+   * @returns {string} The agent prompt
+   */
+  getAgentPrompt(type = 'taskPlanning') {
+    return agentPrompts[type] || agentPrompts.taskPlanning;
   }
 }
 
