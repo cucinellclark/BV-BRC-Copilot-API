@@ -144,12 +144,61 @@ async function executeAgentLoop(opts) {
         break;
       }
       
+      // Check if this is a workflow creation request (terminal action)
+      if (nextAction.action === 'local.create_workflow') {
+        console.log('[Agent] Creating workflow plan (terminal action)');
+        
+        try {
+          const workflowPlan = await executeMcpTool(
+            nextAction.action,
+            nextAction.parameters,
+            authToken,
+            {
+              query,
+              model,
+              system_prompt
+            }
+          );
+          
+          traceEntry.result = workflowPlan;
+          traceEntry.status = 'success';
+          toolResults[nextAction.action] = workflowPlan;
+          
+          // Emit SSE event for workflow creation
+          if (stream && responseStream) {
+            emitSSE(responseStream, 'workflow_created', {
+              workflow: workflowPlan
+            });
+          }
+          
+          // Format workflow as final response
+          finalResponse = await formatWorkflowResponse(workflowPlan, query);
+          
+          console.log('[Agent] Workflow plan created, ending agent loop');
+          break;
+        } catch (error) {
+          console.error('[Agent] Workflow creation failed:', error);
+          traceEntry.error = error.message;
+          traceEntry.status = 'failed';
+          toolResults[nextAction.action] = { error: error.message };
+          
+          // Generate error response
+          finalResponse = `I apologize, but I encountered an error while creating the workflow plan: ${error.message}`;
+          break;
+        }
+      }
+      
       // Execute the tool
       try {
         const result = await executeMcpTool(
           nextAction.action,
           nextAction.parameters,
-          authToken
+          authToken,
+          {
+            query,
+            model,
+            system_prompt
+          }
         );
         
         toolResults[nextAction.action] = result;
@@ -544,9 +593,65 @@ async function handleToolError(failedAction, error, executionTrace, toolResults)
   return true;
 }
 
+/**
+ * Format workflow plan as a readable response
+ */
+async function formatWorkflowResponse(workflowPlan, originalQuery) {
+  // Create a nicely formatted text representation of the workflow
+  let response = `# Workflow Plan: ${workflowPlan.workflow_title || 'Multi-Step Analysis'}\n\n`;
+  
+  if (workflowPlan.description) {
+    response += `${workflowPlan.description}\n\n`;
+  }
+  
+  response += `**Query:** ${originalQuery}\n\n`;
+  
+  if (workflowPlan.estimated_duration || workflowPlan.estimated_steps) {
+    response += `**Estimated Steps:** ${workflowPlan.estimated_steps || workflowPlan.steps?.length || 'N/A'}\n`;
+    if (workflowPlan.estimated_duration) {
+      response += `**Estimated Duration:** ${workflowPlan.estimated_duration}\n`;
+    }
+    response += '\n';
+  }
+  
+  response += `## Execution Steps\n\n`;
+  
+  if (workflowPlan.steps && Array.isArray(workflowPlan.steps)) {
+    workflowPlan.steps.forEach((step) => {
+      response += `### Step ${step.step || step.step_number}\n`;
+      response += `**Action:** \`${step.action}\`\n\n`;
+      
+      if (step.description) {
+        response += `**Description:** ${step.description}\n\n`;
+      }
+      
+      if (step.reason || step.reasoning) {
+        response += `**Reasoning:** ${step.reason || step.reasoning}\n\n`;
+      }
+      
+      if (step.parameters && Object.keys(step.parameters).length > 0) {
+        response += `**Parameters:**\n\`\`\`json\n${JSON.stringify(step.parameters, null, 2)}\n\`\`\`\n\n`;
+      }
+      
+      if (step.expected_output) {
+        response += `**Expected Output:** ${step.expected_output}\n\n`;
+      }
+      
+      response += '---\n\n';
+    });
+  }
+  
+  if (workflowPlan.final_deliverable) {
+    response += `## Final Deliverable\n\n${workflowPlan.final_deliverable}\n`;
+  }
+  
+  return response;
+}
+
 module.exports = {
   executeAgentLoop,
   planNextAction,
-  generateFinalResponse
+  generateFinalResponse,
+  formatWorkflowResponse
 };
 

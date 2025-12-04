@@ -8,6 +8,7 @@ const { sessionManager } = require('./mcpSessionManager');
 const MCP_CONFIG_PATH = path.join(__dirname, 'config.json');
 const TOOLS_MANIFEST_PATH = path.join(__dirname, 'tools.json');
 const TOOLS_PROMPT_PATH = path.join(__dirname, 'tools-for-prompt.txt');
+const LOCAL_TOOLS_PATH = path.join(__dirname, 'local-tools.json');
 
 /**
  * Discover tools from all configured MCP servers
@@ -82,7 +83,7 @@ async function discoverTools() {
       JSON.stringify(toolsManifest, null, 2)
     );
     
-    // Write prompt-optimized file (human/LLM-readable)
+    // Write prompt-optimized file (human/LLM-readable) with local tools appended
     await writeToolsForPrompt(toolsManifest);
     
     console.log(`[MCP Tool Discovery] Complete. ${toolsManifest.tool_count} tools from ${enabledServers.length} server(s)`);
@@ -199,7 +200,7 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
 }
 
 /**
- * Write tools in a format optimized for LLM prompts
+ * Write tools in a format optimized for LLM prompts (includes local tools)
  */
 async function writeToolsForPrompt(manifest) {
   let promptText = `# Available MCP Tools (${manifest.tool_count} total)\n`;
@@ -238,6 +239,35 @@ async function writeToolsForPrompt(manifest) {
     promptText += '\n';
   });
   
+  // Append local tools
+  try {
+    const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
+    const localToolsConfig = JSON.parse(localToolsFile);
+    
+    promptText += `## Local Meta-Tools\n`;
+    promptText += `${localToolsConfig.description}\n\n`;
+    
+    Object.entries(localToolsConfig.tools).forEach(([toolId, tool]) => {
+      promptText += `### ${toolId}\n`;
+      promptText += `Tool Name: ${tool.name}\n`;
+      promptText += `${tool.description}\n`;
+      
+      if (tool.inputSchema?.properties) {
+        promptText += `**Parameters:**\n`;
+        Object.entries(tool.inputSchema.properties).forEach(([paramName, paramSpec]) => {
+          const required = tool.inputSchema.required?.includes(paramName) ? ' (required)' : '';
+          const description = paramSpec.description || '';
+          const enumValues = paramSpec.enum ? ` [Options: ${paramSpec.enum.join(', ')}]` : '';
+          promptText += `- ${paramName}${required}: ${paramSpec.type} - ${description}${enumValues}\n`;
+        });
+      }
+      
+      promptText += '\n';
+    });
+  } catch (error) {
+    console.warn('[MCP Tool Discovery] Could not load local tools, skipping');
+  }
+  
   await fs.writeFile(TOOLS_PROMPT_PATH, promptText);
 }
 
@@ -255,7 +285,7 @@ async function loadToolsManifest() {
 }
 
 /**
- * Load tools formatted for prompts
+ * Load tools formatted for prompts (now includes local tools in the file itself)
  */
 async function loadToolsForPrompt() {
   try {
@@ -267,9 +297,22 @@ async function loadToolsForPrompt() {
 }
 
 /**
- * Get tool definition by ID
+ * Get tool definition by ID (checks both MCP and local tools)
  */
 async function getToolDefinition(toolId) {
+  // Check if it's a local tool
+  if (toolId && toolId.startsWith('local.')) {
+    try {
+      const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
+      const localToolsConfig = JSON.parse(localToolsFile);
+      return localToolsConfig.tools[toolId] || null;
+    } catch (error) {
+      console.warn('[MCP] Failed to load local tool definition');
+      return null;
+    }
+  }
+  
+  // Check MCP tools
   const manifest = await loadToolsManifest();
   return manifest?.tools[toolId] || null;
 }

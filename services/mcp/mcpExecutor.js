@@ -3,19 +3,27 @@
 const axios = require('axios');
 const { getToolDefinition, loadToolsManifest } = require('./toolDiscovery');
 const { sessionManager } = require('./mcpSessionManager');
+const { isLocalTool, executeLocalTool } = require('./localToolExecutor');
 const config = require('./config.json');
 
 /**
- * Execute an MCP tool
+ * Execute an MCP tool or local pseudo-tool
  * 
- * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection")
+ * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection" or "local.create_workflow")
  * @param {object} parameters - Tool parameters
  * @param {string} authToken - Authentication token
+ * @param {object} context - Additional context for local tools (query, model, etc.)
  * @returns {Promise<object>} Tool execution result
  */
-async function executeMcpTool(toolId, parameters = {}, authToken = null) {
+async function executeMcpTool(toolId, parameters = {}, authToken = null, context = {}) {
   console.log(`[MCP Executor] Executing tool: ${toolId}`);
   console.log(`[MCP Executor] Parameters:`, JSON.stringify(parameters, null, 2));
+  
+  // Handle local pseudo-tools
+  if (isLocalTool(toolId)) {
+    console.log(`[MCP Executor] Routing to local tool executor`);
+    return await executeLocalTool(toolId, parameters, context);
+  }
   
   try {
     // Load tool definition
