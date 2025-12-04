@@ -3,10 +3,12 @@
 const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
+const { sessionManager } = require('./mcpSessionManager');
 
 const MCP_CONFIG_PATH = path.join(__dirname, 'config.json');
 const TOOLS_MANIFEST_PATH = path.join(__dirname, 'tools.json');
 const TOOLS_PROMPT_PATH = path.join(__dirname, 'tools-for-prompt.txt');
+const LOCAL_TOOLS_PATH = path.join(__dirname, 'local-tools.json');
 
 /**
  * Discover tools from all configured MCP servers
@@ -81,7 +83,7 @@ async function discoverTools() {
       JSON.stringify(toolsManifest, null, 2)
     );
     
-    // Write prompt-optimized file (human/LLM-readable)
+    // Write prompt-optimized file (human/LLM-readable) with local tools appended
     await writeToolsForPrompt(toolsManifest);
     
     console.log(`[MCP Tool Discovery] Complete. ${toolsManifest.tool_count} tools from ${enabledServers.length} server(s)`);
@@ -95,6 +97,7 @@ async function discoverTools() {
 
 /**
  * Fetch tools from a single MCP server using JSON-RPC
+ * Uses the shared mcpExecutor session manager to avoid duplication
  */
 async function fetchServerTools(serverKey, serverConfig, globalSettings, authToken) {
   const mcpEndpoint = `${serverConfig.url}/mcp`;
@@ -109,10 +112,20 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
   
   for (let attempt = 1; attempt <= retryAttempts; attempt++) {
     try {
-      // Build headers
+      // Use shared session manager (creates/reuses session)
+      const sessionId = await sessionManager.getOrCreateSession(
+        serverKey,
+        serverConfig,
+        authToken
+      );
+      
+      console.log(`[MCP Tool Discovery] Using session ${sessionId} for ${serverKey}`);
+      
+      // Build headers with session ID
       const headers = {
         'Content-Type': 'application/json',
-        'Accept': 'application/json, text/event-stream'
+        'Accept': 'application/json, text/event-stream',
+        'mcp-session-id': sessionId
       };
       
       // Add auth token if server is in allowlist
@@ -125,57 +138,7 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
         headers['Authorization'] = serverConfig.auth.startsWith('Bearer ') ? serverConfig.auth : `Bearer ${serverConfig.auth}`;
       }
       
-      // Step 1: Initialize session
-      const initRequest = {
-        jsonrpc: '2.0',
-        id: `init-${serverKey}-${Date.now()}`,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          clientInfo: {
-            name: 'bvbrc-copilot-client',
-            version: '1.0.0'
-          }
-        }
-      };
-      
-      const initResponse = await axios.post(mcpEndpoint, initRequest, {
-        timeout: serverConfig.timeout || 10000,
-        headers,
-        withCredentials: true
-      });
-      
-      // Parse SSE format response if needed
-      let initData = initResponse.data;
-      if (typeof initData === 'string') {
-        // Response is in SSE format: "event: message\r\ndata: {JSON}\r\n\r\n"
-        const dataMatch = initData.match(/data: (.+?)(?:\r?\n|$)/);
-        if (dataMatch && dataMatch[1]) {
-          initData = JSON.parse(dataMatch[1]);
-        }
-      }
-      
-      // Check for initialization error
-      if (initData.error) {
-        throw new Error(`Initialization failed: ${initData.error.message || JSON.stringify(initData.error)}`);
-      }
-      
-      // Capture session ID from response headers
-      const sessionId = initResponse.headers['mcp-session-id'] || 
-                        initResponse.headers['x-session-id'] || 
-                        initResponse.headers['session-id'] ||
-                        initData.result?.sessionId ||
-                        initData.result?.session_id;
-      
-      if (!sessionId) {
-        throw new Error('No session ID received from server');
-      }
-      
-      // Add session ID to headers for subsequent requests
-      headers['mcp-session-id'] = sessionId;
-      
-      // Step 2: Request tools list
+      // Request tools list (session already initialized by session manager)
       const toolsRequest = {
         jsonrpc: '2.0',
         id: `discovery-${serverKey}-${Date.now()}`,
@@ -192,14 +155,13 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
       // Parse SSE format response if needed
       let responseData = response.data;
       if (typeof responseData === 'string') {
-        // Response is in SSE format: "event: message\r\ndata: {JSON}\r\n\r\n"
         const dataMatch = responseData.match(/data: (.+?)(?:\r?\n|$)/);
         if (dataMatch && dataMatch[1]) {
           responseData = JSON.parse(dataMatch[1]);
         }
       }
       
-      console.log(`[MCP Tool Discovery] tools/list response from ${serverKey}:`, JSON.stringify(responseData, null, 2));
+      console.log(`[MCP Tool Discovery] Discovered ${responseData.result?.tools?.length || 0} tools from ${serverKey}`);
       
       // Check for JSON-RPC error
       if (responseData.error) {
@@ -222,6 +184,12 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
       const errorMsg = error.response?.data?.error?.message || error.message;
       console.error(`[MCP Tool Discovery] ${serverKey} attempt ${attempt} failed: ${errorMsg}`);
       
+      // Clear session on error so it retries initialization
+      if (error.message.includes('session') || error.message.includes('Session')) {
+        console.log(`[MCP Tool Discovery] Clearing session for ${serverKey} due to session error`);
+        sessionManager.clearSession(serverKey);
+      }
+      
       if (attempt < retryAttempts) {
         await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
@@ -232,11 +200,12 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
 }
 
 /**
- * Write tools in a format optimized for LLM prompts
+ * Write tools in a format optimized for LLM prompts (includes local tools)
  */
 async function writeToolsForPrompt(manifest) {
   let promptText = `# Available MCP Tools (${manifest.tool_count} total)\n`;
   promptText += `# Last Updated: ${manifest.discovered_at}\n\n`;
+  promptText += `**IMPORTANT: When using tools, you MUST use the full tool ID format: server_name.tool_name**\n\n`;
   
   // Group by server (only include enabled and connected servers)
   Object.entries(manifest.servers).forEach(([serverKey, serverInfo]) => {
@@ -248,10 +217,11 @@ async function writeToolsForPrompt(manifest) {
     // List tools from this server
     const serverTools = Object.entries(manifest.tools)
       .filter(([toolId, tool]) => tool.server === serverKey)
-      .map(([toolId, tool]) => tool);
+      .map(([toolId, tool]) => ({ toolId, tool }));
     
-    serverTools.forEach(tool => {
-      promptText += `### ${tool.name}\n`;
+    serverTools.forEach(({ toolId, tool }) => {
+      promptText += `### ${toolId}\n`;
+      promptText += `Tool Name: ${tool.name}\n`;
       promptText += `${tool.description || 'No description'}\n`;
       
       if (tool.inputSchema?.properties) {
@@ -268,6 +238,35 @@ async function writeToolsForPrompt(manifest) {
     
     promptText += '\n';
   });
+  
+  // Append local tools
+  try {
+    const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
+    const localToolsConfig = JSON.parse(localToolsFile);
+    
+    promptText += `## Local Meta-Tools\n`;
+    promptText += `${localToolsConfig.description}\n\n`;
+    
+    Object.entries(localToolsConfig.tools).forEach(([toolId, tool]) => {
+      promptText += `### ${toolId}\n`;
+      promptText += `Tool Name: ${tool.name}\n`;
+      promptText += `${tool.description}\n`;
+      
+      if (tool.inputSchema?.properties) {
+        promptText += `**Parameters:**\n`;
+        Object.entries(tool.inputSchema.properties).forEach(([paramName, paramSpec]) => {
+          const required = tool.inputSchema.required?.includes(paramName) ? ' (required)' : '';
+          const description = paramSpec.description || '';
+          const enumValues = paramSpec.enum ? ` [Options: ${paramSpec.enum.join(', ')}]` : '';
+          promptText += `- ${paramName}${required}: ${paramSpec.type} - ${description}${enumValues}\n`;
+        });
+      }
+      
+      promptText += '\n';
+    });
+  } catch (error) {
+    console.warn('[MCP Tool Discovery] Could not load local tools, skipping');
+  }
   
   await fs.writeFile(TOOLS_PROMPT_PATH, promptText);
 }
@@ -286,7 +285,7 @@ async function loadToolsManifest() {
 }
 
 /**
- * Load tools formatted for prompts
+ * Load tools formatted for prompts (now includes local tools in the file itself)
  */
 async function loadToolsForPrompt() {
   try {
@@ -298,9 +297,22 @@ async function loadToolsForPrompt() {
 }
 
 /**
- * Get tool definition by ID
+ * Get tool definition by ID (checks both MCP and local tools)
  */
 async function getToolDefinition(toolId) {
+  // Check if it's a local tool
+  if (toolId && toolId.startsWith('local.')) {
+    try {
+      const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
+      const localToolsConfig = JSON.parse(localToolsFile);
+      return localToolsConfig.tools[toolId] || null;
+    } catch (error) {
+      console.warn('[MCP] Failed to load local tool definition');
+      return null;
+    }
+  }
+  
+  // Check MCP tools
   const manifest = await loadToolsManifest();
   return manifest?.tools[toolId] || null;
 }
