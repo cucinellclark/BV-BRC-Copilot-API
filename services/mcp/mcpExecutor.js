@@ -118,6 +118,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     
     const result = responseData.result;
     console.log(`[MCP Executor] Tool executed successfully`);
+    console.log(`[MCP Executor] Result:`, JSON.stringify(result, null, 2));
     
     return result;
   } catch (error) {

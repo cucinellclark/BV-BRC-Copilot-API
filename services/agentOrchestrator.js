@@ -160,6 +160,8 @@ async function executeAgentLoop(opts) {
             }
           );
           
+          console.log('[Agent] Workflow plan received:', JSON.stringify(workflowPlan, null, 2));
+          
           traceEntry.result = workflowPlan;
           traceEntry.status = 'success';
           toolResults[nextAction.action] = workflowPlan;
@@ -206,6 +208,7 @@ async function executeAgentLoop(opts) {
         traceEntry.status = 'success';
         
         console.log(`[Agent] Tool executed successfully`);
+        console.log(`[Agent] Result received:`, JSON.stringify(result, null, 2));
         
         // Emit SSE event for tool execution result
         if (stream && responseStream) {
