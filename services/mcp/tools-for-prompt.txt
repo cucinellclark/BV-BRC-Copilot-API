@@ -1,5 +1,5 @@
 # Available MCP Tools (52 total)
-# Last Updated: 2025-12-03T20:57:34.504Z
+# Last Updated: 2025-12-04T14:28:15.787Z
 
 ## BV-BRC MCP Server
 Provides access to BV-BRC services, workspace and data

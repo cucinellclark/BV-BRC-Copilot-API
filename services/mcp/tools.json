@@ -1,19 +1,19 @@
 {
-  "discovered_at": "2025-12-03T20:57:34.504Z",
+  "discovered_at": "2025-12-04T14:28:15.787Z",
   "servers": {
     "bvbrc_server": {
       "status": "connected",
       "tool_count": 47,
       "server_name": "BV-BRC MCP Server",
       "server_description": "Provides access to BV-BRC services, workspace and data",
-      "discovered_at": "2025-12-03T20:57:34.559Z"
+      "discovered_at": "2025-12-04T14:28:15.849Z"
     },
     "internal_server": {
       "status": "connected",
       "tool_count": 5,
       "server_name": "Internal MCP Server",
       "server_description": "Provides access to internal services like code execution and rag databases",
-      "discovered_at": "2025-12-03T20:57:34.544Z"
+      "discovered_at": "2025-12-04T14:28:15.832Z"
     }
   },
   "tools": {

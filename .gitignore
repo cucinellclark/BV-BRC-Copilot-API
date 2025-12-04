@@ -11,3 +11,6 @@ access.log
 test_streaming.py
 
 *.nfs*
+
+services/mcp/tools.json
+services/mcp/tools-for-prompt.txt
