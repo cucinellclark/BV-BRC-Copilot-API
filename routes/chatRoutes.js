@@ -19,14 +19,25 @@ const {
 } = require('../services/dbUtils');
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
+const { createLogger } = require('../services/logger');
 const config = require('../config.json');
 const router = express.Router();
 
 // ========== MAIN CHAT ROUTES ==========
 router.post('/copilot', authenticate, async (req, res) => {
+    const logger = createLogger('CopilotRoute', req.body.session_id);
+    
     try {
+        logger.info('Copilot request received', { 
+            user_id: req.body.user_id,
+            model: req.body.model,
+            stream: req.body.stream,
+            has_rag: !!req.body.rag_db
+        });
+        
         if (req.body.stream === true) {
             // -------- Streaming (SSE) path --------
+            logger.debug('Using streaming response');
             res.set({
                 // Headers required for proper SSE behaviour and to disable proxy buffering
                 'Content-Type': 'text/event-stream; charset=utf-8',
@@ -45,11 +56,18 @@ router.post('/copilot', authenticate, async (req, res) => {
         }
 
         // -------- Standard JSON path --------
+        logger.debug('Using standard JSON response');
         const { query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
         const response = await ChatService.handleCopilotRequest({ query, model, session_id, user_id, system_prompt, save_chat, include_history, rag_db, num_docs, image, enhanced_prompt });
+        
+        logger.info('Copilot request completed successfully');
         res.status(200).json(response);
     } catch (error) {
-        console.error('Error:', error);
+        logger.error('Copilot request failed', { 
+            error: error.message, 
+            stack: error.stack 
+        });
+        
         // If this was a streaming request, send error over SSE, else JSON
         if (req.body.stream === true) {
             res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
@@ -62,6 +80,8 @@ router.post('/copilot', authenticate, async (req, res) => {
 
 // ========== AGENT COPILOT ROUTE ==========
 router.post('/copilot-agent', authenticate, async (req, res) => {
+    const logger = createLogger('AgentRoute', req.body.session_id);
+    
     try {
         const { 
             query, 
@@ -77,6 +97,11 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
 
         // Validate required fields
         if (!query || !model || !user_id) {
+            logger.warn('Missing required fields', { 
+                has_query: !!query,
+                has_model: !!model,
+                has_user_id: !!user_id
+            });
             return res.status(400).json({ 
                 message: 'Missing required fields', 
                 required: ['query', 'model', 'user_id'] 
@@ -86,8 +111,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
         // Get max_iterations from config (system-level setting)
         const max_iterations = config.agent?.max_iterations || 8;
 
-        console.log('[Agent Route] Received agent request:', { 
-            query, 
+        logger.info('Agent request received', { 
+            query_preview: query.substring(0, 100),
             model, 
             session_id, 
             user_id, 
@@ -99,6 +124,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
         // Streaming is default, only disable if explicitly set to false
         if (stream !== false) {
             // -------- Streaming (SSE) path --------
+            logger.debug('Using streaming response for agent');
             res.set({
                 'Content-Type': 'text/event-stream; charset=utf-8',
                 'Cache-Control': 'no-cache',
@@ -125,11 +151,13 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 responseStream: res
             });
 
+            logger.info('Agent streaming request completed');
             // The stream handler is responsible for ending the response
             return;
         }
 
         // -------- Standard JSON path --------
+        logger.debug('Using standard JSON response for agent');
         // Execute agent loop
         const response = await AgentOrchestrator.executeAgentLoop({
             query,
@@ -143,9 +171,13 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             auth_token
         });
 
+        logger.info('Agent request completed successfully');
         res.status(200).json(response);
     } catch (error) {
-        console.error('[Agent Route] Error:', error);
+        logger.error('Agent request failed', { 
+            error: error.message, 
+            stack: error.stack 
+        });
         
         // If this was a streaming request, send error over SSE, else JSON
         // Default is streaming, so check if stream is not explicitly false
@@ -163,7 +195,14 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
 });
 
 router.post('/chat', authenticate, async (req, res) => {
+    const logger = createLogger('ChatRoute', req.body.session_id);
+    
     try {
+        logger.info('Chat request received', { 
+            user_id: req.body.user_id,
+            model: req.body.model
+        });
+        
         const { query, model, session_id, user_id, system_prompt, save_chat = true } = req.body;
         const response = await ChatService.handleChatRequest({ 
             query, 
@@ -173,9 +212,14 @@ router.post('/chat', authenticate, async (req, res) => {
             system_prompt, 
             save_chat 
         });
+        
+        logger.info('Chat request completed successfully');
         res.status(200).json(response);
     } catch (error) {
-        console.error('Error:', error);
+        logger.error('Chat request failed', { 
+            error: error.message, 
+            stack: error.stack 
+        });
         res.status(500).json({ message: 'Internal server error', error });
     }
 });

@@ -505,6 +505,130 @@ async function getChatCollections() {
   }
 }
 
+/**
+ * Save file metadata to database
+ * @param {string} sessionId - The session ID
+ * @param {object} fileMetadata - File metadata object
+ * @returns {Object} Insert result
+ */
+async function saveFileMetadata(sessionId, fileMetadata) {
+  try {
+    console.log(`[saveFileMetadata] Saving file metadata for session ${sessionId}, fileId: ${fileMetadata.fileId}`);
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    
+    const result = await filesCollection.insertOne({
+      session_id: sessionId,
+      ...fileMetadata,
+      created_at: new Date()
+    });
+    
+    console.log(`[saveFileMetadata] File metadata saved successfully for fileId: ${fileMetadata.fileId}`);
+    return result;
+  } catch (error) {
+    console.error(`[saveFileMetadata] Error saving file metadata:`, error);
+    throw new LLMServiceError('Failed to save file metadata', error);
+  }
+}
+
+/**
+ * Get file metadata by fileId and sessionId
+ * @param {string} sessionId - The session ID
+ * @param {string} fileId - The file ID
+ * @returns {Object|null} File metadata or null if not found
+ */
+async function getFileMetadata(sessionId, fileId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    
+    const fileMetadata = await filesCollection.findOne({
+      session_id: sessionId,
+      fileId: fileId
+    });
+    
+    if (fileMetadata) {
+      // Update last accessed time
+      await filesCollection.updateOne(
+        { _id: fileMetadata._id },
+        { $set: { lastAccessed: new Date() } }
+      );
+    }
+    
+    return fileMetadata;
+  } catch (error) {
+    console.error(`[getFileMetadata] Error getting file metadata:`, error);
+    throw new LLMServiceError('Failed to get file metadata', error);
+  }
+}
+
+/**
+ * Get all file metadata for a session
+ * @param {string} sessionId - The session ID
+ * @returns {Array} Array of file metadata objects
+ */
+async function getSessionFiles(sessionId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    
+    return await filesCollection
+      .find({ session_id: sessionId })
+      .sort({ created_at: -1 })
+      .toArray();
+  } catch (error) {
+    console.error(`[getSessionFiles] Error getting session files:`, error);
+    throw new LLMServiceError('Failed to get session files', error);
+  }
+}
+
+/**
+ * Delete file metadata
+ * @param {string} sessionId - The session ID
+ * @param {string} fileId - The file ID
+ * @returns {Object} Delete result
+ */
+async function deleteFileMetadata(sessionId, fileId) {
+  try {
+    console.log(`[deleteFileMetadata] Deleting file metadata for session ${sessionId}, fileId: ${fileId}`);
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    
+    const result = await filesCollection.deleteOne({
+      session_id: sessionId,
+      fileId: fileId
+    });
+    
+    console.log(`[deleteFileMetadata] File metadata deleted successfully`);
+    return result;
+  } catch (error) {
+    console.error(`[deleteFileMetadata] Error deleting file metadata:`, error);
+    throw new LLMServiceError('Failed to delete file metadata', error);
+  }
+}
+
+/**
+ * Get total storage used by a session
+ * @param {string} sessionId - The session ID
+ * @returns {number} Total size in bytes
+ */
+async function getSessionStorageSize(sessionId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    
+    const result = await filesCollection.aggregate([
+      { $match: { session_id: sessionId } },
+      { $group: { _id: null, totalSize: { $sum: '$size' } } }
+    ]).toArray();
+    
+    return result.length > 0 ? result[0].totalSize : 0;
+  } catch (error) {
+    console.error(`[getSessionStorageSize] Error getting session storage size:`, error);
+    throw new LLMServiceError('Failed to get session storage size', error);
+  }
+}
+
 module.exports = {
   getModelData,
   getActiveModels,
@@ -527,5 +651,10 @@ module.exports = {
   storeMessageEmbedding,
   getEmbeddingsBySessionId,
   getEmbeddingByMessageId,
-  getChatCollections
+  getChatCollections,
+  saveFileMetadata,
+  getFileMetadata,
+  getSessionFiles,
+  deleteFileMetadata,
+  getSessionStorageSize
 }; 

@@ -4,7 +4,15 @@ const axios = require('axios');
 const { getToolDefinition, loadToolsManifest } = require('./toolDiscovery');
 const { sessionManager } = require('./mcpSessionManager');
 const { isLocalTool, executeLocalTool } = require('./localToolExecutor');
+const { fileManager } = require('../fileManager');
+const { createLogger } = require('../logger');
 const config = require('./config.json');
+
+// Initialize file manager on module load
+const initLogger = createLogger('MCP-Init');
+fileManager.init().catch(err => {
+  initLogger.error('Failed to initialize file manager', { error: err.message, stack: err.stack });
+});
 
 /**
  * Execute an MCP tool or local pseudo-tool
@@ -13,16 +21,18 @@ const config = require('./config.json');
  * @param {object} parameters - Tool parameters
  * @param {string} authToken - Authentication token
  * @param {object} context - Additional context for local tools (query, model, etc.)
+ * @param {Logger} logger - Optional logger instance
  * @returns {Promise<object>} Tool execution result
  */
-async function executeMcpTool(toolId, parameters = {}, authToken = null, context = {}) {
-  console.log(`[MCP Executor] Executing tool: ${toolId}`);
-  console.log(`[MCP Executor] Parameters:`, JSON.stringify(parameters, null, 2));
+async function executeMcpTool(toolId, parameters = {}, authToken = null, context = {}, logger = null) {
+  const log = logger || createLogger('MCP-Executor', context.session_id);
+  
+  log.info(`Executing tool: ${toolId}`, { parameters });
   
   // Handle local pseudo-tools
   if (isLocalTool(toolId)) {
-    console.log(`[MCP Executor] Routing to local tool executor`);
-    return await executeLocalTool(toolId, parameters, context);
+    log.info('Routing to local tool executor');
+    return await executeLocalTool(toolId, parameters, context, log);
   }
   
   try {
@@ -31,7 +41,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     
     // If tool not found and toolId doesn't contain a dot, try to find it by name
     if (!toolDef && !toolId.includes('.')) {
-      console.log(`[MCP Executor] Tool ID missing server prefix, searching by name: ${toolId}`);
+      log.debug('Tool ID missing server prefix, searching by name', { toolId });
       const manifest = await loadToolsManifest();
       if (manifest && manifest.tools) {
         // Find tool by name across all servers
@@ -40,7 +50,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         );
         if (foundTool) {
           const [fullToolId, tool] = foundTool;
-          console.log(`[MCP Executor] Found tool by name, using full ID: ${fullToolId}`);
+          log.info('Found tool by name, using full ID', { originalId: toolId, fullToolId });
           toolDef = tool;
           toolId = fullToolId; // Update toolId for logging/error messages
         }
@@ -48,6 +58,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     }
     
     if (!toolDef) {
+      log.error('Tool not found', { toolId });
       throw new Error(`Tool not found: ${toolId}`);
     }
     
@@ -112,20 +123,51 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     
     // Check for JSON-RPC error
     if (responseData.error) {
-      console.error(`[MCP Executor] Tool execution error:`, responseData.error);
+      log.error('Tool execution error', { 
+        toolId, 
+        error: responseData.error 
+      });
       throw new Error(`Tool execution failed: ${responseData.error.message || JSON.stringify(responseData.error)}`);
     }
     
     const result = responseData.result;
-    console.log(`[MCP Executor] Tool executed successfully`);
-    console.log(`[MCP Executor] Result:`, JSON.stringify(result, null, 2));
+    log.info('Tool executed successfully', { toolId });
+    
+    // Process result through file manager if session_id is available
+    // This will save large results to disk and return a file reference
+    if (context.session_id) {
+      log.debug('Processing result for session', { session_id: context.session_id });
+      const processedResult = await fileManager.processToolResult(
+        context.session_id,
+        toolId,
+        result
+      );
+      
+      if (processedResult.type === 'file_reference') {
+        log.info('Large result saved to file', { 
+          fileName: processedResult.fileName,
+          recordCount: processedResult.summary?.recordCount 
+        });
+        return processedResult;
+      } else if (processedResult.type === 'inline') {
+        log.debug('Result returned inline');
+        return processedResult.data;
+      }
+    } else {
+      log.debug('No session_id in context, returning result inline');
+    }
     
     return result;
   } catch (error) {
-    console.error(`[MCP Executor] Error executing tool ${toolId}:`, error.message);
+    log.error('Error executing tool', { 
+      toolId, 
+      error: error.message, 
+      stack: error.stack 
+    });
     
     // If session error, clear it and retry once
     if (error.message.includes('session') || error.message.includes('Session')) {
+      log.warn('Session error detected, clearing session', { toolId });
       const toolDef = await getToolDefinition(toolId);
       if (toolDef) {
         sessionManager.clearSession(toolDef.server);

@@ -18,6 +18,7 @@ const {
 const { safeParseJson } = require('./jsonUtils');
 const promptManager = require('../prompts');
 const mcpConfig = require('./mcp/config.json');
+const { createLogger } = require('./logger');
 
 /**
  * Helper function to create message objects with consistent structure
@@ -46,6 +47,146 @@ function emitSSE(responseStream, eventType, data) {
 }
 
 /**
+ * Normalize parameters for consistent comparison
+ * Handles empty strings, null, undefined, whitespace, and boolean strings
+ */
+function normalizeParameters(params) {
+  if (!params || typeof params !== 'object') {
+    return params;
+  }
+  
+  const normalized = {};
+  const keys = Object.keys(params).sort(); // Sort keys for consistent comparison
+  
+  for (const key of keys) {
+    let value = params[key];
+    
+    // Normalize empty strings, null, undefined to null
+    if (value === '' || value === null || value === undefined) {
+      normalized[key] = null;
+    }
+    // Normalize string values
+    else if (typeof value === 'string') {
+      // Trim whitespace
+      value = value.trim();
+      // Normalize boolean strings
+      if (value === 'true') {
+        normalized[key] = true;
+      } else if (value === 'false') {
+        normalized[key] = false;
+      } else if (value === '') {
+        normalized[key] = null;
+      } else {
+        normalized[key] = value;
+      }
+    }
+    // Recursively normalize nested objects
+    else if (typeof value === 'object' && !Array.isArray(value)) {
+      normalized[key] = normalizeParameters(value);
+    }
+    // Keep other types as-is
+    else {
+      normalized[key] = value;
+    }
+  }
+  
+  return normalized;
+}
+
+/**
+ * Deep equality check for objects
+ */
+function deepEquals(obj1, obj2) {
+  if (obj1 === obj2) return true;
+  
+  if (obj1 == null || obj2 == null) return obj1 === obj2;
+  
+  if (typeof obj1 !== 'object' || typeof obj2 !== 'object') {
+    return obj1 === obj2;
+  }
+  
+  const keys1 = Object.keys(obj1);
+  const keys2 = Object.keys(obj2);
+  
+  if (keys1.length !== keys2.length) return false;
+  
+  for (const key of keys1) {
+    if (!keys2.includes(key)) return false;
+    if (!deepEquals(obj1[key], obj2[key])) return false;
+  }
+  
+  return true;
+}
+
+/**
+ * Check if a planned action is a duplicate of a previously executed action
+ * Returns an object with isDuplicate flag and details
+ */
+function isDuplicateAction(plannedAction, executionTrace) {
+  if (!plannedAction || !plannedAction.action) {
+    return { isDuplicate: false };
+  }
+  
+  // Don't check FINALIZE actions
+  if (plannedAction.action === 'FINALIZE') {
+    return { isDuplicate: false };
+  }
+  
+  const normalizedPlanned = normalizeParameters(plannedAction.parameters);
+  
+  // Check against all successful past actions
+  for (const pastAction of executionTrace) {
+    // Only check successful actions
+    if (pastAction.status !== 'success') {
+      continue;
+    }
+    
+    // Check if action names match
+    if (pastAction.action === plannedAction.action) {
+      const normalizedPast = normalizeParameters(pastAction.parameters);
+      
+      // Check if parameters are identical
+      if (deepEquals(normalizedPlanned, normalizedPast)) {
+        return {
+          isDuplicate: true,
+          duplicateIteration: pastAction.iteration,
+          action: pastAction.action,
+          message: `This exact action was already executed successfully in iteration ${pastAction.iteration}`,
+          previousResult: pastAction.result
+        };
+      }
+    }
+  }
+  
+  return { isDuplicate: false };
+}
+
+/**
+ * Check if there are sufficient results to answer the query
+ */
+function hasSufficientData(toolResults) {
+  if (!toolResults || Object.keys(toolResults).length === 0) {
+    return false;
+  }
+  
+  // Check if we have any file references with data
+  for (const result of Object.values(toolResults)) {
+    if (result && result.type === 'file_reference' && result.summary) {
+      // Has data if recordCount > 0
+      if (result.summary.recordCount && result.summary.recordCount > 0) {
+        return true;
+      }
+    }
+    // Check for inline results
+    else if (result && typeof result === 'object' && !result.error) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
  * Main agent orchestrator - executes iterative task loop
  * 
  * @param {object} opts - Options object
@@ -66,7 +207,20 @@ async function executeAgentLoop(opts) {
     responseStream = null
   } = opts;
   
-  console.log('[Agent] Starting agent loop for query:', query);
+  // Create logger for this session
+  const logger = createLogger('Agent', session_id);
+  
+  // Start a new query (this will increment the query counter and create Query A, B, C, etc.)
+  const queryId = logger.startNewQuery();
+  
+  logger.info('Starting agent loop', { 
+    queryId,
+    query, 
+    model, 
+    session_id, 
+    user_id, 
+    max_iterations 
+  });
   
   const executionTrace = [];
   const toolResults = {};
@@ -83,7 +237,7 @@ async function executeAgentLoop(opts) {
     chatSession = await getChatSession(session_id);
     if (include_history && chatSession?.messages) {
       history = chatSession.messages;
-      console.log(`[Agent] Loaded ${history.length} messages from session history`);
+      logger.info(`Loaded ${history.length} messages from session history`);
     }
   }
   
@@ -93,7 +247,7 @@ async function executeAgentLoop(opts) {
   try {
     while (iteration < max_iterations) {
       iteration++;
-      console.log(`[Agent] Iteration ${iteration}/${max_iterations}`);
+      logger.info(`=== Iteration ${iteration}/${max_iterations} ===`);
       
       // Plan next action (with optional history)
       const nextAction = await planNextAction(
@@ -102,11 +256,74 @@ async function executeAgentLoop(opts) {
         executionTrace,
         toolResults,
         model,
-        history
+        history,
+        logger
       );
       
-      console.log(`[Agent] Planned action:`, nextAction.action);
-      console.log(`[Agent] Reasoning:`, nextAction.reasoning);
+      logger.info('Planned action', { 
+        action: nextAction.action, 
+        reasoning: nextAction.reasoning 
+      });
+      
+      // PRE-EXECUTION DUPLICATE DETECTION
+      // Check if this action is a duplicate before executing
+      const duplicateCheck = isDuplicateAction(nextAction, executionTrace);
+      
+      if (duplicateCheck.isDuplicate) {
+        logger.warn('Duplicate action detected', {
+          action: duplicateCheck.action,
+          duplicateIteration: duplicateCheck.duplicateIteration,
+          currentIteration: iteration,
+          message: duplicateCheck.message
+        });
+        
+        // Emit SSE event for duplicate detection
+        if (stream && responseStream) {
+          emitSSE(responseStream, 'duplicate_detected', {
+            iteration,
+            action: duplicateCheck.action,
+            duplicateIteration: duplicateCheck.duplicateIteration,
+            message: duplicateCheck.message
+          });
+        }
+        
+        // If we already have sufficient data, force finalization
+        if (hasSufficientData(toolResults)) {
+          logger.info('Forcing finalization due to duplicate action with sufficient data');
+          
+          // Override action to FINALIZE
+          nextAction = {
+            action: 'FINALIZE',
+            reasoning: `Duplicate action detected (already executed in iteration ${duplicateCheck.duplicateIteration}). Finalizing with existing data.`,
+            parameters: {}
+          };
+          
+          // Emit SSE event
+          if (stream && responseStream) {
+            emitSSE(responseStream, 'forced_finalize', {
+              reason: 'duplicate_with_data',
+              message: 'Preventing duplicate execution - sufficient data already available'
+            });
+          }
+        } else {
+          // No sufficient data yet, but still a duplicate
+          logger.warn('Duplicate action detected but insufficient data - continuing to let planner adapt');
+          
+          // Add a warning to trace
+          const warningEntry = {
+            iteration,
+            action: 'DUPLICATE_DETECTED',
+            reasoning: duplicateCheck.message,
+            parameters: {},
+            timestamp: new Date().toISOString(),
+            status: 'warning'
+          };
+          executionTrace.push(warningEntry);
+          
+          // Continue to next iteration to replan
+          continue;
+        }
+      }
       
       // Add to trace
       const traceEntry = {
@@ -130,7 +347,7 @@ async function executeAgentLoop(opts) {
       
       // Check if we should finalize
       if (nextAction.action === 'FINALIZE') {
-        console.log('[Agent] Planner decided to finalize');
+        logger.info('Planner decided to finalize');
         finalResponse = await generateFinalResponse(
           query,
           system_prompt,
@@ -139,14 +356,15 @@ async function executeAgentLoop(opts) {
           model,
           history,
           stream,
-          responseStream
+          responseStream,
+          logger
         );
         break;
       }
       
       // Check if this is a workflow creation request (terminal action)
       if (nextAction.action === 'local.create_workflow') {
-        console.log('[Agent] Creating workflow plan (terminal action)');
+        logger.info('Creating workflow plan (terminal action)');
         
         try {
           const workflowPlan = await executeMcpTool(
@@ -156,11 +374,13 @@ async function executeAgentLoop(opts) {
             {
               query,
               model,
-              system_prompt
-            }
+              system_prompt,
+              session_id
+            },
+            logger
           );
           
-          console.log('[Agent] Workflow plan received:', JSON.stringify(workflowPlan, null, 2));
+          logger.info('Workflow plan received', { workflowPlan });
           
           traceEntry.result = workflowPlan;
           traceEntry.status = 'success';
@@ -176,10 +396,10 @@ async function executeAgentLoop(opts) {
           // Format workflow as final response
           finalResponse = await formatWorkflowResponse(workflowPlan, query);
           
-          console.log('[Agent] Workflow plan created, ending agent loop');
+          logger.info('Workflow plan created, ending agent loop');
           break;
         } catch (error) {
-          console.error('[Agent] Workflow creation failed:', error);
+          logger.error('Workflow creation failed', { error: error.message, stack: error.stack });
           traceEntry.error = error.message;
           traceEntry.status = 'failed';
           toolResults[nextAction.action] = { error: error.message };
@@ -199,16 +419,31 @@ async function executeAgentLoop(opts) {
           {
             query,
             model,
-            system_prompt
-          }
+            system_prompt,
+            session_id
+          },
+          logger
         );
         
         toolResults[nextAction.action] = result;
         traceEntry.result = result;
         traceEntry.status = 'success';
         
-        console.log(`[Agent] Tool executed successfully`);
-        console.log(`[Agent] Result received:`, JSON.stringify(result, null, 2));
+        logger.logToolExecution(
+          nextAction.action,
+          nextAction.parameters,
+          result,
+          'success'
+        );
+        
+        logger.logAgentIteration(
+          iteration,
+          nextAction.action,
+          nextAction.reasoning,
+          nextAction.parameters,
+          result,
+          'success'
+        );
         
         // Emit SSE event for tool execution result
         if (stream && responseStream) {
@@ -220,7 +455,28 @@ async function executeAgentLoop(opts) {
           });
         }
       } catch (error) {
-        console.error(`[Agent] Tool execution failed:`, error.message);
+        logger.error('Tool execution failed', { 
+          tool: nextAction.action, 
+          error: error.message,
+          stack: error.stack 
+        });
+        
+        logger.logToolExecution(
+          nextAction.action,
+          nextAction.parameters,
+          null,
+          'failed',
+          error
+        );
+        
+        logger.logAgentIteration(
+          iteration,
+          nextAction.action,
+          nextAction.reasoning,
+          nextAction.parameters,
+          { error: error.message },
+          'failed'
+        );
         
         traceEntry.error = error.message;
         traceEntry.status = 'failed';
@@ -241,7 +497,8 @@ async function executeAgentLoop(opts) {
           nextAction,
           error,
           executionTrace,
-          toolResults
+          toolResults,
+          logger
         );
         
         if (!shouldContinue) {
@@ -254,7 +511,8 @@ async function executeAgentLoop(opts) {
             model,
             history,
             stream,
-            responseStream
+            responseStream,
+            logger
           );
           break;
         }
@@ -263,7 +521,7 @@ async function executeAgentLoop(opts) {
     
     // Safety net: hit max iterations
     if (!finalResponse) {
-      console.log('[Agent] Max iterations reached, finalizing');
+      logger.warn('Max iterations reached, finalizing');
       finalResponse = await generateFinalResponse(
         query,
         system_prompt,
@@ -272,11 +530,15 @@ async function executeAgentLoop(opts) {
         model,
         history,
         stream,
-        responseStream
+        responseStream,
+        logger
       );
     }
     
-    console.log('[Agent] Agent loop complete');
+    logger.info('Agent loop complete', { 
+      iterations: iteration, 
+      toolsUsed: Object.keys(toolResults).length 
+    });
     
     // Create assistant message with the final response
     const assistantMessage = createMessage('assistant', finalResponse);
@@ -311,9 +573,9 @@ async function executeAgentLoop(opts) {
           : [userMessage, assistantMessage];
         
         await addMessagesToSession(session_id, messagesToSave);
-        console.log(`[Agent] Saved ${messagesToSave.length} messages to session ${session_id}`);
+        logger.info(`Saved ${messagesToSave.length} messages to session ${session_id}`);
       } catch (saveError) {
-        console.error('[Agent] Failed to save chat:', saveError);
+        logger.error('Failed to save chat', { error: saveError.message, stack: saveError.stack });
         // Don't fail the whole request if save fails
       }
     }
@@ -341,7 +603,7 @@ async function executeAgentLoop(opts) {
       }
     };
   } catch (error) {
-    console.error('[Agent] Agent loop failed:', error);
+    logger.error('Agent loop failed', { error: error.message, stack: error.stack });
     throw new LLMServiceError('Agent loop failed', error);
   }
 }
@@ -349,8 +611,10 @@ async function executeAgentLoop(opts) {
 /**
  * Plan the next action using LLM
  */
-async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, history = []) {
+async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, history = [], logger = null) {
   try {
+    const log = logger || createLogger('Agent-Planner');
+    
     // Load available tools
     const toolsDescription = await loadToolsForPrompt();
     
@@ -359,23 +623,59 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       ? `\n\nCONVERSATION HISTORY (for context):\n${history.slice(-5).map(m => `${m.role}: ${m.content.substring(0, 200)}${m.content.length > 200 ? '...' : ''}`).join('\n')}`
       : '';
     
-    // Format execution trace for prompt
-    const traceStr = executionTrace.length > 0
-      ? JSON.stringify(executionTrace.map(t => ({
-          iteration: t.iteration,
-          action: t.action,
-          reasoning: t.reasoning,
-          status: t.status,
-          error: t.error
-        })), null, 2)
-      : 'No actions executed yet';
+    // Format execution trace for prompt with duplicate detection
+    let traceStr = 'No actions executed yet';
+    if (executionTrace.length > 0) {
+      const formattedTrace = executionTrace.map(t => ({
+        iteration: t.iteration,
+        action: t.action,
+        reasoning: t.reasoning,
+        status: t.status,
+        error: t.error,
+        parameters: t.parameters // Include parameters for visibility
+      }));
+      
+      traceStr = JSON.stringify(formattedTrace, null, 2);
+      
+      // Add duplicate warning section if there are duplicates
+      const duplicateWarnings = [];
+      const actionCounts = {};
+      
+      for (const trace of executionTrace) {
+        if (trace.status === 'success') {
+          const key = trace.action;
+          actionCounts[key] = (actionCounts[key] || 0) + 1;
+        }
+      }
+      
+      for (const [action, count] of Object.entries(actionCounts)) {
+        if (count > 1) {
+          duplicateWarnings.push(`⚠️  WARNING: "${action}" has been executed ${count} times!`);
+        }
+      }
+      
+      if (duplicateWarnings.length > 0) {
+        traceStr = `${traceStr}\n\n=== DUPLICATE ACTION WARNINGS ===\n${duplicateWarnings.join('\n')}\n\nDO NOT repeat these actions with the same parameters!`;
+      }
+    }
     
-    // Format tool results for prompt (truncate large results)
+    // Format tool results for prompt (handle file references and truncate large results)
     const resultsStr = Object.keys(toolResults).length > 0
       ? JSON.stringify(
           Object.fromEntries(
             Object.entries(toolResults).map(([key, value]) => {
-              // Truncate large results
+              // Check if this is a file reference
+              if (value && value.type === 'file_reference') {
+                return [key, {
+                  type: 'FILE_SAVED',
+                  fileId: value.fileId,
+                  summary: value.summary,
+                  message: value.message,
+                  note: 'Large result saved to file. Use local.get_file_info to see details, then use copilotmcp file tools to query/extract data.'
+                }];
+              }
+              
+              // Truncate large inline results
               const resultStr = JSON.stringify(value);
               if (resultStr.length > 2000) {
                 return [key, `[Result truncated - ${resultStr.length} chars]`];
@@ -403,6 +703,12 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
     // Get model data
     const modelData = await getModelData(model);
     
+    // Log the prompt being sent
+    log.logPrompt('Task Planning', planningPrompt, model, {
+      executionTraceLength: executionTrace.length,
+      toolResultsCount: Object.keys(toolResults).length
+    });
+    
     // Call LLM
     const response = await queryChatOnly({
       query: planningPrompt,
@@ -411,16 +717,19 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       modelData
     });
     
-    console.log('[Agent] Raw LLM response:', response);
+    // Log the response
+    log.logResponse('Task Planning', response, model);
+    log.debug('Raw LLM planning response', { response });
     
     // Parse JSON response
     const parsed = safeParseJson(response);
-    console.log('[Agent] Parsed JSON:', parsed);
+    log.debug('Parsed planning JSON', { parsed });
     
     if (!parsed || !parsed.action) {
-      console.error('[Agent] JSON parsing failed or missing action field');
-      console.error('[Agent] Raw response was:', response);
-      console.error('[Agent] Parsed result was:', parsed);
+      log.error('JSON parsing failed or missing action field', { 
+        rawResponse: response, 
+        parsedResult: parsed 
+      });
       throw new Error('Invalid planning response: missing action field');
     }
     
@@ -430,7 +739,8 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       parameters: parsed.parameters || {}
     };
   } catch (error) {
-    console.error('[Agent] Planning failed:', error);
+    const log = logger || createLogger('Agent-Planner');
+    log.error('Planning failed', { error: error.message, stack: error.stack });
     throw new LLMServiceError('Failed to plan next action', error);
   }
 }
@@ -438,10 +748,17 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 /**
  * Generate final response to user
  */
-async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, history = [], stream = false, responseStream = null) {
+async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, history = [], stream = false, responseStream = null, logger = null) {
   try {
+    const log = logger || createLogger('Agent-FinalResponse');
+    
     // Check if this is a direct response (no tools used)
     const isDirectResponse = Object.keys(toolResults).length === 0;
+    log.info('Generating final response', { 
+      isDirectResponse, 
+      toolResultsCount: Object.keys(toolResults).length,
+      stream 
+    });
     
     // Format conversation history if available
     const historyStr = history.length > 0
@@ -466,8 +783,19 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         `Iteration ${t.iteration}: ${t.action} - ${t.reasoning} [${t.status || 'pending'}]`
       ).join('\n');
       
-      // Format tool results (with truncation for large results)
+      // Format tool results (handle file references and truncate large results)
       const resultsStr = Object.entries(toolResults).map(([tool, result]) => {
+        // Check if this is a file reference
+        if (result && result.type === 'file_reference') {
+          return `${tool}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
+                 `Data Type: ${result.summary.dataType}\n` +
+                 `Fields: ${result.summary.fields.join(', ')}\n` +
+                 `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
+                 `File ID: ${result.fileId}\n` +
+                 `Use local.get_file_info to get full details, then use copilotmcp file tools to query/extract data.\n`;
+        }
+        
+        // Format inline results with truncation
         const resultStr = JSON.stringify(result, null, 2);
         if (resultStr.length > 3000) {
           return `${tool}:\n[Large result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
@@ -490,9 +818,15 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
     // Get model data
     const modelData = await getModelData(model);
     
+    // Log the prompt being sent
+    log.logPrompt('Final Response Generation', promptToUse, model, {
+      isDirectResponse,
+      stream
+    });
+    
     // If streaming is enabled, stream the response
     if (stream && responseStream) {
-      return await streamFinalResponse(promptToUse, model, modelData, responseStream);
+      return await streamFinalResponse(promptToUse, model, modelData, responseStream, log);
     }
     
     // Non-streaming: Call LLM to generate final response
@@ -503,9 +837,13 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       modelData
     });
     
+    // Log the response
+    log.logResponse('Final Response Generation', response, model);
+    
     return response;
   } catch (error) {
-    console.error('[Agent] Response generation failed:', error);
+    const log = logger || createLogger('Agent-FinalResponse');
+    log.error('Response generation failed', { error: error.message, stack: error.stack });
     throw new LLMServiceError('Failed to generate final response', error);
   }
 }
@@ -513,9 +851,12 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 /**
  * Stream final response to user via SSE
  */
-async function streamFinalResponse(prompt, model, modelData, responseStream) {
+async function streamFinalResponse(prompt, model, modelData, responseStream, logger = null) {
   try {
+    const log = logger || createLogger('Agent-StreamResponse');
     const systemPromptText = 'You are a helpful BV-BRC AI assistant.';
+    
+    log.info('Starting streaming response', { model });
     
     // Handle client-based models (OpenAI)
     if (modelData.queryType === 'client') {
@@ -537,6 +878,10 @@ async function streamFinalResponse(prompt, model, modelData, responseStream) {
           emitSSE(responseStream, 'final_response', { chunk: text });
         }
       }
+      
+      // Log the complete streamed response
+      log.logResponse('Streaming Final Response', fullResponse, model);
+      
       return fullResponse;
     }
     
@@ -559,12 +904,17 @@ async function streamFinalResponse(prompt, model, modelData, responseStream) {
       };
       
       await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+      
+      // Log the complete streamed response
+      log.logResponse('Streaming Final Response', fullResponse, model);
+      
       return fullResponse;
     }
     
     throw new LLMServiceError(`Invalid queryType for streaming: ${modelData.queryType}`);
   } catch (error) {
-    console.error('[Agent] Streaming response generation failed:', error);
+    const log = logger || createLogger('Agent-StreamResponse');
+    log.error('Streaming response generation failed', { error: error.message, stack: error.stack });
     throw new LLMServiceError('Failed to stream final response', error);
   }
 }
@@ -573,8 +923,12 @@ async function streamFinalResponse(prompt, model, modelData, responseStream) {
  * Handle tool execution error
  * Returns true if agent should continue, false if should finalize
  */
-async function handleToolError(failedAction, error, executionTrace, toolResults) {
-  console.log('[Agent] Handling tool error...');
+async function handleToolError(failedAction, error, executionTrace, toolResults, logger = null) {
+  const log = logger || createLogger('Agent-ErrorHandler');
+  log.info('Handling tool error', { 
+    failedAction: failedAction.action, 
+    error: error.message 
+  });
   
   // For now, simple logic: continue if we have some results, otherwise stop
   const hasResults = Object.keys(toolResults).length > 0;
@@ -584,7 +938,7 @@ async function handleToolError(failedAction, error, executionTrace, toolResults)
   
   // If critical error and no results yet, stop
   if (isCriticalError && !hasResults) {
-    console.log('[Agent] Critical error with no results, stopping');
+    log.warn('Critical error with no results, stopping');
     return false;
   }
   
@@ -594,12 +948,12 @@ async function handleToolError(failedAction, error, executionTrace, toolResults)
     .filter(t => t.status === 'failed').length;
   
   if (recentFailures >= 2) {
-    console.log('[Agent] Multiple consecutive failures, stopping');
+    log.warn('Multiple consecutive failures, stopping', { recentFailures });
     return false;
   }
   
   // Otherwise, continue and let planner try alternative approach
-  console.log('[Agent] Continuing after error, planner will adapt');
+  log.info('Continuing after error, planner will adapt');
   return true;
 }
 

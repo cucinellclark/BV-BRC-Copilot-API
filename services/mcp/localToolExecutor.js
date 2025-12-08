@@ -5,6 +5,8 @@ const { loadToolsForPrompt } = require('./toolDiscovery');
 const { queryChatOnly } = require('../llmServices');
 const { getModelData } = require('../dbUtils');
 const { safeParseJson } = require('../jsonUtils');
+const { fileManager } = require('../fileManager');
+const { createLogger } = require('../logger');
 const promptManager = require('../../prompts');
 
 /**
@@ -12,17 +14,23 @@ const promptManager = require('../../prompts');
  * @param {string} toolId - Full tool ID (e.g., "local.create_workflow")
  * @param {object} parameters - Tool parameters
  * @param {object} context - Additional context (query, model, etc.)
+ * @param {Logger} logger - Optional logger instance
  * @returns {Promise<object>} Tool execution result
  */
-async function executeLocalTool(toolId, parameters = {}, context = {}) {
-  console.log(`[Local Tool Executor] Executing: ${toolId}`);
-  console.log(`[Local Tool Executor] Parameters:`, JSON.stringify(parameters, null, 2));
+async function executeLocalTool(toolId, parameters = {}, context = {}, logger = null) {
+  const log = logger || createLogger('LocalTool', context.session_id);
+  
+  log.info('Executing local tool', { toolId, parameters });
   
   switch (toolId) {
     case 'local.create_workflow':
-      return await createWorkflowPlan(parameters, context);
+      return await createWorkflowPlan(parameters, context, log);
+    
+    case 'local.get_file_info':
+      return await getFileInfo(parameters, context, log);
     
     default:
+      log.error('Unknown local tool', { toolId });
       throw new Error(`Unknown local tool: ${toolId}`);
   }
 }
@@ -31,15 +39,17 @@ async function executeLocalTool(toolId, parameters = {}, context = {}) {
  * Create a detailed workflow plan without executing anything
  * @param {object} parameters - Tool parameters from LLM
  * @param {object} context - Execution context (query, model, etc.)
+ * @param {Logger} logger - Logger instance
  * @returns {Promise<object>} Workflow plan structure
  */
-async function createWorkflowPlan(parameters, context) {
-  console.log('[Local Tool] Creating workflow plan...');
+async function createWorkflowPlan(parameters, context, logger) {
+  logger.info('Creating workflow plan', { parameters });
   
   const { query, model, system_prompt = '' } = context;
   const { query_summary, complexity_estimate = 'moderate' } = parameters;
   
   if (!query || !model) {
+    logger.error('Workflow creation requires query and model in context');
     throw new Error('Workflow creation requires query and model in context');
   }
   
@@ -58,6 +68,12 @@ async function createWorkflowPlan(parameters, context) {
     }
   );
   
+  // Log the prompt
+  logger.logPrompt('Workflow Planning', workflowPrompt, model, {
+    query_summary,
+    complexity_estimate
+  });
+  
   // Get model data
   const modelData = await getModelData(model);
   
@@ -69,10 +85,15 @@ async function createWorkflowPlan(parameters, context) {
     modelData
   });
   
+  // Log the response
+  logger.logResponse('Workflow Planning', response, model);
+  
   // Parse JSON response
   const workflowPlan = safeParseJson(response);
   
-  console.log(`[Local Tool] Workflow plan created`);
+  logger.info('Workflow plan created', { 
+    stepsCount: workflowPlan?.steps?.length 
+  });
   
   // Return the workflow plan as-is without validation
   return {
@@ -80,6 +101,90 @@ async function createWorkflowPlan(parameters, context) {
     created_at: new Date().toISOString(),
     ...workflowPlan
   };
+}
+
+/**
+ * Get detailed information about a saved file
+ * @param {object} parameters - Tool parameters from LLM
+ * @param {object} context - Execution context (session_id, etc.)
+ * @param {Logger} logger - Logger instance
+ * @returns {Promise<object>} File metadata
+ */
+async function getFileInfo(parameters, context, logger) {
+  logger.info('Getting file info', { parameters });
+  
+  const { fileId } = parameters;
+  const { session_id } = context;
+  
+  if (!fileId) {
+    logger.error('fileId is required');
+    throw new Error('fileId is required');
+  }
+  
+  if (!session_id) {
+    logger.error('session_id is required in context');
+    throw new Error('session_id is required in context');
+  }
+  
+  try {
+    const fileInfo = await fileManager.getFileInfo(session_id, fileId);
+    
+    logger.info('File info retrieved', { 
+      fileId, 
+      fileName: fileInfo.fileName,
+      dataType: fileInfo.dataType 
+    });
+    
+    // Format response with helpful context
+    return {
+      ...fileInfo,
+      availableActions: getAvailableActionsForDataType(fileInfo.dataType),
+      note: 'Use copilotmcp file tools to query, search, or extract data from this file'
+    };
+  } catch (error) {
+    logger.error('Failed to get file info', { 
+      fileId, 
+      error: error.message, 
+      stack: error.stack 
+    });
+    throw new Error(`Failed to get file info: ${error.message}`);
+  }
+}
+
+/**
+ * Get available copilotmcp actions based on data type
+ * @param {string} dataType - The data type from file metadata
+ * @returns {Array<string>} List of available action tools
+ */
+function getAvailableActionsForDataType(dataType) {
+  const baseActions = [
+    'copilotmcp.read_file_lines',
+    'copilotmcp.search_file'
+  ];
+
+  switch (dataType) {
+    case 'json_array':
+    case 'json_object':
+      return [
+        ...baseActions,
+        'copilotmcp.query_json',
+        'copilotmcp.get_file_statistics'
+      ];
+    
+    case 'csv':
+    case 'tsv':
+      return [
+        ...baseActions,
+        'copilotmcp.extract_csv_columns',
+        'copilotmcp.get_file_statistics'
+      ];
+    
+    case 'text':
+      return baseActions;
+    
+    default:
+      return baseActions;
+  }
 }
 
 /**
@@ -94,5 +199,6 @@ function isLocalTool(toolId) {
 module.exports = {
   executeLocalTool,
   createWorkflowPlan,
+  getFileInfo,
   isLocalTool
 };

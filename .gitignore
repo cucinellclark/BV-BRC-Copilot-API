@@ -12,6 +12,8 @@ test_streaming.py
 
 *.nfs*
 
+logs/
+
 services/mcp/tools.json
 services/mcp/tools-for-prompt.txt
 
