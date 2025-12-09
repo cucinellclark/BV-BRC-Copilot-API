@@ -67,6 +67,8 @@ function normalizeToolResult(result) {
         }
       } catch (e) {
         console.warn('[FileUtils] Failed to parse structuredContent.result:', e.message);
+        // Treat the raw structuredContent.result as the data (plain text or unknown)
+        data = result.structuredContent.result;
       }
     }
     // Future: Add other source handlers here

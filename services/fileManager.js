@@ -104,20 +104,21 @@ class FileManager {
     const downloadsDir = this.getDownloadsDir(sessionId);
     await fs.mkdir(downloadsDir, { recursive: true });
 
+    // Normalize the result - handles API-specific formats
+    const normalized = normalizeToolResult(result);
+
     // Generate unique file ID and name
     const fileId = crypto.randomUUID();
     const sanitizedToolId = toolId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const fileName = `${sanitizedToolId}_${fileId.substring(0, 8)}.json`;
+    const extension = this.getFileExtension(normalized.dataType);
+    const fileName = `${sanitizedToolId}_${fileId.substring(0, 8)}.${extension}`;
     const filePath = path.join(downloadsDir, fileName);
-
-    // Normalize the result - handles API-specific formats
-    const normalized = normalizeToolResult(result);
     
     // Create summary from normalized data
     const summary = createSummary(normalized, size);
     
     // Save the normalized data (unwrapped if applicable)
-    const dataToSave = JSON.stringify(normalized.data);
+    const dataToSave = this.serializeForStorage(normalized.data, normalized.dataType);
     await fs.writeFile(filePath, dataToSave, 'utf8');
     
     if (normalized.metadata) {
@@ -318,10 +319,21 @@ class FileManager {
     
     try {
       const content = await fs.readFile(fileInfo.filePath, 'utf8');
+      let parsed = null;
+
+      // Only attempt JSON parse for JSON-like data
+      if (['json_array', 'json_object', 'array', 'object', 'null', 'empty_array'].includes(fileInfo.dataType)) {
+        try {
+          parsed = JSON.parse(content);
+        } catch (err) {
+          console.warn(`[FileManager] Failed to parse JSON for file ${fileId}:`, err.message);
+        }
+      }
+
       return {
         fileInfo,
         content,
-        parsed: JSON.parse(content) // Assume JSON for now
+        parsed
       };
     } catch (error) {
       console.error(`[FileManager] Error loading file ${fileId}:`, error);
@@ -347,6 +359,33 @@ class FileManager {
   async getSessionSize(sessionId) {
     const metadata = await getSessionMetadata(sessionId);
     return metadata ? metadata.totalSize : 0;
+  }
+
+  /**
+   * Choose an extension based on detected data type
+   */
+  getFileExtension(dataType) {
+    switch (dataType) {
+      case 'csv':
+        return 'csv';
+      case 'tsv':
+        return 'tsv';
+      case 'text':
+        return 'txt';
+      default:
+        return 'json';
+    }
+  }
+
+  /**
+   * Serialize data for storage based on type
+   */
+  serializeForStorage(data, dataType) {
+    if (dataType === 'text' || dataType === 'csv' || dataType === 'tsv') {
+      return typeof data === 'string' ? data : String(data);
+    }
+    // Default to JSON for structured types
+    return JSON.stringify(data);
   }
 }
 

@@ -1,7 +1,7 @@
 // services/agentOrchestrator.js
 
 const { v4: uuidv4 } = require('uuid');
-const { executeMcpTool } = require('./mcp/mcpExecutor');
+const { executeMcpTool, isFinalizeTool, isRagTool } = require('./mcp/mcpExecutor');
 const { loadToolsForPrompt } = require('./mcp/toolDiscovery');
 const { 
   getModelData, 
@@ -19,6 +19,38 @@ const { safeParseJson } = require('./jsonUtils');
 const promptManager = require('../prompts');
 const mcpConfig = require('./mcp/config.json');
 const { createLogger } = require('./logger');
+
+function prepareToolResult(toolId, result, ragMaxDocs = 5) {
+  // Check if this is a RAG result (has documents and summary)
+  const isRagResult = result && result.documents && result.summary;
+  
+  if (isRagResult) {
+    const docs = Array.isArray(result.documents) ? result.documents.slice(0, ragMaxDocs) : [];
+    const count = result.count ?? docs.length;
+
+    return {
+      storage: {
+        tool: toolId,
+        query: result.query,
+        index: result.index,
+        summary: result.summary,
+        count,
+        documents: docs
+      },
+      safeResult: {
+        type: 'rag_result',
+        query: result.query,
+        index: result.index,
+        count,
+        summary: result.summary,
+        documents_included: false,
+        documents_count: docs.length
+      }
+    };
+  }
+
+  return { storage: null, safeResult: result };
+}
 
 /**
  * Helper function to create message objects with consistent structure
@@ -233,6 +265,7 @@ async function executeAgentLoop(opts) {
   
   const executionTrace = [];
   const toolResults = {};
+  const collectedRagDocs = [];
   let iteration = 0;
   let finalResponse = null;
   
@@ -433,15 +466,34 @@ async function executeAgentLoop(opts) {
           },
           logger
         );
+
+        const { storage: ragStorage, safeResult } = prepareToolResult(
+          nextAction.action,
+          result,
+          mcpConfig.global_settings?.rag_max_docs
+        );
+
+        if (ragStorage) {
+          collectedRagDocs.push(ragStorage);
+        }
         
-        toolResults[nextAction.action] = result;
-        traceEntry.result = result;
+        // Log what we got from prepareToolResult for debugging
+        logger.debug('Tool result prepared', {
+          tool: nextAction.action,
+          hasRagStorage: !!ragStorage,
+          safeResultType: safeResult?.type,
+          hasSummary: !!safeResult?.summary,
+          summaryPreview: typeof safeResult?.summary === 'string' ? safeResult.summary.substring(0, 100) : null
+        });
+        
+        toolResults[nextAction.action] = safeResult;
+        traceEntry.result = safeResult;
         traceEntry.status = 'success';
         
         logger.logToolExecution(
           nextAction.action,
           nextAction.parameters,
-          result,
+          safeResult,
           'success'
         );
         
@@ -450,7 +502,7 @@ async function executeAgentLoop(opts) {
           nextAction.action,
           nextAction.reasoning,
           nextAction.parameters,
-          result,
+          safeResult,
           'success'
         );
         
@@ -460,8 +512,47 @@ async function executeAgentLoop(opts) {
             iteration,
             tool: nextAction.action,
             status: 'success',
-            result: result
+            result: safeResult
           });
+        }
+
+        // Tools marked as FINALIZE should finalize immediately
+        const shouldFinalizeNow = isFinalizeTool(nextAction.action);
+        if (shouldFinalizeNow) {
+          logger.info('Finalize-category tool executed, finalizing immediately');
+          
+          // Check if result has a summary field - if so, use it directly
+          const hasSummary = safeResult && typeof safeResult.summary === 'string' && safeResult.summary.length > 0;
+          if (hasSummary) {
+            logger.info('Using tool summary directly as final response', { 
+              tool: nextAction.action,
+              summaryLength: safeResult.summary.length 
+            });
+            finalResponse = safeResult.summary;
+            
+            // If streaming, emit the summary as chunks
+            if (stream && responseStream) {
+              emitSSE(responseStream, 'final_response', { chunk: finalResponse });
+            }
+          } else {
+            // Otherwise, generate a final response using LLM
+            logger.info('No summary in result, generating final response via LLM', {
+              tool: nextAction.action,
+              resultKeys: Object.keys(safeResult || {})
+            });
+            finalResponse = await generateFinalResponse(
+              query,
+              system_prompt,
+              executionTrace,
+              toolResults,
+              model,
+              history,
+              stream,
+              responseStream,
+              logger
+            );
+          }
+          break;
         }
       } catch (error) {
         logger.error('Tool execution failed', { 
@@ -567,6 +658,21 @@ async function executeAgentLoop(opts) {
       systemMessage.agent_trace = executionTrace;
       systemMessage.tool_results_summary = Object.keys(toolResults);
     }
+
+    // Clone system message for DB vs response to avoid streaming stored docs
+    let dbSystemMessage = systemMessage ? JSON.parse(JSON.stringify(systemMessage)) : null;
+    let responseSystemMessage = systemMessage ? JSON.parse(JSON.stringify(systemMessage)) : null;
+
+    if (collectedRagDocs.length > 0) {
+      if (!dbSystemMessage) {
+        dbSystemMessage = createMessage('system', system_prompt || '');
+      }
+      dbSystemMessage.documents = collectedRagDocs;
+    }
+
+    if (responseSystemMessage && responseSystemMessage.documents) {
+      delete responseSystemMessage.documents;
+    }
     
     // Save conversation to database (for both streaming and non-streaming)
     if (save_chat && session_id) {
@@ -577,8 +683,8 @@ async function executeAgentLoop(opts) {
         }
         
         // Save messages
-        const messagesToSave = systemMessage 
-          ? [userMessage, systemMessage, assistantMessage]
+        const messagesToSave = dbSystemMessage 
+          ? [userMessage, dbSystemMessage, assistantMessage]
           : [userMessage, assistantMessage];
         
         await addMessagesToSession(session_id, messagesToSave);
@@ -604,7 +710,7 @@ async function executeAgentLoop(opts) {
       message: 'success',
       userMessage,
       assistantMessage,
-      ...(systemMessage && { systemMessage }),
+      ...(responseSystemMessage && { systemMessage: responseSystemMessage }),
       agent_metadata: {
         iterations: iteration,
         tools_used: Object.keys(toolResults).length,

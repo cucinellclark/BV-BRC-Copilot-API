@@ -8,6 +8,34 @@ const { fileManager } = require('../fileManager');
 const { createLogger } = require('../logger');
 const config = require('./config.json');
 
+const DEFAULT_RAG_FRAGMENTS = ['helpdesk_service_usage'];
+
+function isRagTool(toolId) {
+  if (!toolId) return false;
+  const ragList = config.global_settings?.rag_tools || DEFAULT_RAG_FRAGMENTS;
+  return ragList.some(fragment => toolId.includes(fragment));
+}
+
+function isFinalizeTool(toolId) {
+  if (!toolId) return false;
+  const finalizeList = config.global_settings?.finalize_tools || [];
+  return finalizeList.some(fragment => toolId.includes(fragment));
+}
+
+function normalizeRagResult(rawResult, maxDocs = 5) {
+  const docs = rawResult?.used_documents || rawResult?.results || [];
+  const limitedDocs = Array.isArray(docs) ? docs.slice(0, maxDocs) : [];
+
+  return {
+    type: 'rag_result',
+    query: rawResult?.query,
+    index: rawResult?.index,
+    count: rawResult?.count ?? limitedDocs.length,
+    summary: rawResult?.summary,
+    documents: limitedDocs
+  };
+}
+
 // Initialize file manager on module load
 const initLogger = createLogger('MCP-Init');
 fileManager.init().catch(err => {
@@ -39,15 +67,17 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     // Load tool definition
     let toolDef = await getToolDefinition(toolId);
     
-    // If tool not found and toolId doesn't contain a dot, try to find it by name
-    if (!toolDef && !toolId.includes('.')) {
-      log.debug('Tool ID missing server prefix, searching by name', { toolId });
+    // If tool not found, try to find it by name across all servers (even if a prefix was provided)
+    if (!toolDef) {
       const manifest = await loadToolsManifest();
       if (manifest && manifest.tools) {
+        const toolName = toolId.includes('.') ? toolId.split('.').pop() : toolId;
+        
         // Find tool by name across all servers
         const foundTool = Object.entries(manifest.tools).find(
-          ([fullToolId, tool]) => tool.name === toolId
+          ([fullToolId, tool]) => tool.name === toolName
         );
+        
         if (foundTool) {
           const [fullToolId, tool] = foundTool;
           log.info('Found tool by name, using full ID', { originalId: toolId, fullToolId });
@@ -111,6 +141,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       headers,
       withCredentials: true
     });
+    console.log('**********MCP TOOL RESPONSE:***********\n', response.data);
     
     // Parse SSE format response if needed
     let responseData = response.data;
@@ -130,8 +161,78 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       throw new Error(`Tool execution failed: ${responseData.error.message || JSON.stringify(responseData.error)}`);
     }
     
-    const result = responseData.result;
+    let result = responseData.result;
     log.info('Tool executed successfully', { toolId });
+
+    // Special-case RAG tools: extract actual data from MCP content wrapper
+    if (isRagTool(toolId)) {
+      // MCP tools return results wrapped in content structure - extract the actual data
+      let extractedData = null;
+      
+      // Try structuredContent.result first (preferred)
+      if (result?.structuredContent?.result) {
+        try {
+          extractedData = JSON.parse(result.structuredContent.result);
+          log.debug('Extracted RAG data from structuredContent.result');
+        } catch (parseError) {
+          log.warn('Failed to parse structuredContent.result', { error: parseError.message });
+        }
+      }
+      
+      // Fallback to content[0].text
+      if (!extractedData && result?.content && Array.isArray(result.content) && result.content[0]?.text) {
+        try {
+          extractedData = JSON.parse(result.content[0].text);
+          log.debug('Extracted RAG data from content[0].text');
+        } catch (parseError) {
+          log.warn('Failed to parse content[0].text', { error: parseError.message });
+        }
+      }
+      
+      if (extractedData) {
+        result = extractedData;
+      } else {
+        log.warn('Could not extract RAG data from MCP wrapper, using result as-is');
+      }
+      
+      // Log raw helpdesk/RAG response for debugging
+      log.info('RAG tool raw result', {
+        toolId,
+        keys: Object.keys(result || {}),
+        count: result?.count,
+        resultsLength: Array.isArray(result?.results) ? result.results.length : null,
+        usedDocsLength: Array.isArray(result?.used_documents) ? result.used_documents.length : null,
+        documentsLength: Array.isArray(result?.documents) ? result.documents.length : null,
+        summaryPreview: typeof result?.summary === 'string' ? result.summary.substring(0, 200) : null
+      });
+      // Also emit to stdout for immediate visibility
+      console.log('[RAG raw result]', {
+        toolId,
+        keys: Object.keys(result || {}),
+        count: result?.count,
+        resultsLength: Array.isArray(result?.results) ? result.results.length : null,
+        usedDocsLength: Array.isArray(result?.used_documents) ? result.used_documents.length : null,
+        documentsLength: Array.isArray(result?.documents) ? result.documents.length : null,
+        summaryPreview: typeof result?.summary === 'string' ? result.summary.substring(0, 200) : null
+      });
+
+      log.debug('Normalizing RAG tool result', {
+        toolId,
+        hasResults: !!result?.results,
+        hasUsedDocuments: !!result?.used_documents,
+        hasSummary: !!result?.summary,
+        summaryPreview: typeof result?.summary === 'string' ? result.summary.substring(0, 100) : null
+      });
+      const normalized = normalizeRagResult(result, config.global_settings?.rag_max_docs);
+      log.debug('RAG result normalized', {
+        type: normalized.type,
+        hasDocuments: !!normalized.documents,
+        documentsCount: normalized.documents?.length,
+        hasSummary: !!normalized.summary,
+        summaryPreview: typeof normalized.summary === 'string' ? normalized.summary.substring(0, 100) : null
+      });
+      return normalized;
+    }
     
     // Process result through file manager if session_id is available
     // This will save large results to disk and return a file reference
@@ -219,6 +320,8 @@ function validateToolParameters(toolDef, parameters) {
 module.exports = {
   executeMcpTool,
   validateToolParameters,
-  sessionManager
+  sessionManager,
+  isRagTool,
+  isFinalizeTool
 };
 
