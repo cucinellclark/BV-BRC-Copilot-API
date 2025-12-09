@@ -23,7 +23,7 @@
     },
     "local.get_file_info": {
       "name": "get_file_info",
-      "description": "Get detailed metadata about a file that was saved from a large MCP tool result. This returns information about the file including its data type, size, field names, record count, and sample data. Use this FIRST when you receive a file reference to understand what data is available, then use the appropriate copilotmcp file tools to query, search, or extract data from the file.",
+      "description": "Get detailed metadata about a file that was saved from a large MCP tool result. This returns information about the file including its data type, size, field names, record count, and sample data. Use this FIRST when you receive a file reference to understand what data is available, then use the appropriate internal_server file tools to query, search, or extract data from the file.",
       "inputSchema": {
         "type": "object",
         "properties": {

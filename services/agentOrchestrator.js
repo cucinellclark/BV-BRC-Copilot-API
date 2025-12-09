@@ -127,6 +127,15 @@ function isDuplicateAction(plannedAction, executionTrace) {
     return { isDuplicate: false };
   }
   
+  // Only track duplicates for actions where re-running is costly or redundant
+  const duplicateTrackedActions = new Set([
+    'bvbrc_server.query_collection'
+  ]);
+
+  if (!duplicateTrackedActions.has(plannedAction.action)) {
+    return { isDuplicate: false };
+  }
+
   // Don't check FINALIZE actions
   if (plannedAction.action === 'FINALIZE') {
     return { isDuplicate: false };
@@ -250,7 +259,7 @@ async function executeAgentLoop(opts) {
       logger.info(`=== Iteration ${iteration}/${max_iterations} ===`);
       
       // Plan next action (with optional history)
-      const nextAction = await planNextAction(
+      let nextAction = await planNextAction(
         query,
         system_prompt,
         executionTrace,
@@ -671,7 +680,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
                   fileId: value.fileId,
                   summary: value.summary,
                   message: value.message,
-                  note: 'Large result saved to file. Use local.get_file_info to see details, then use copilotmcp file tools to query/extract data.'
+                  note: 'Large result saved to file. Use local.get_file_info to see details, then use internal_server file tools to query/extract data.'
                 }];
               }
               
@@ -792,7 +801,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
                  `Fields: ${result.summary.fields.join(', ')}\n` +
                  `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
                  `File ID: ${result.fileId}\n` +
-                 `Use local.get_file_info to get full details, then use copilotmcp file tools to query/extract data.\n`;
+                 `Use local.get_file_info to get full details, then use internal_server file tools to query/extract data.\n`;
         }
         
         // Format inline results with truncation

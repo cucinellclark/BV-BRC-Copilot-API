@@ -139,7 +139,7 @@ async function getFileInfo(parameters, context, logger) {
     return {
       ...fileInfo,
       availableActions: getAvailableActionsForDataType(fileInfo.dataType),
-      note: 'Use copilotmcp file tools to query, search, or extract data from this file'
+      note: 'Use internal_server file tools to query, search, or extract data from this file'
     };
   } catch (error) {
     logger.error('Failed to get file info', { 
@@ -152,14 +152,14 @@ async function getFileInfo(parameters, context, logger) {
 }
 
 /**
- * Get available copilotmcp actions based on data type
+ * Get available internal_server actions based on data type
  * @param {string} dataType - The data type from file metadata
  * @returns {Array<string>} List of available action tools
  */
 function getAvailableActionsForDataType(dataType) {
   const baseActions = [
-    'copilotmcp.read_file_lines',
-    'copilotmcp.search_file'
+    'internal_server.read_file_lines',
+    'internal_server.search_file'
   ];
 
   switch (dataType) {
@@ -167,16 +167,16 @@ function getAvailableActionsForDataType(dataType) {
     case 'json_object':
       return [
         ...baseActions,
-        'copilotmcp.query_json',
-        'copilotmcp.get_file_statistics'
+        'internal_server.query_json',
+        'internal_server.get_file_statistics'
       ];
     
     case 'csv':
     case 'tsv':
       return [
         ...baseActions,
-        'copilotmcp.extract_csv_columns',
-        'copilotmcp.get_file_statistics'
+        'internal_server.extract_csv_columns',
+        'internal_server.get_file_statistics'
       ];
     
     case 'text':

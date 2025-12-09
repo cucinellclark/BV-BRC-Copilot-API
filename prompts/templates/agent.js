@@ -30,9 +30,9 @@ This summary IS the result - you have successfully retrieved the data!
 DO NOT repeat the same query just because you received a file_reference.
 If you need to access or analyze the saved file data further, use:
   - local.get_file_info: Get complete metadata about the file
-  - copilotmcp.query_json: Filter/query the data
-  - copilotmcp.read_file_lines: Read specific portions
-  - copilotmcp.search_file: Search within the data
+  - internal_server.query_json: Filter/query the data
+  - internal_server.read_file_lines: Read specific portions
+  - internal_server.search_file: Search within the data
 
 If the file_reference summary contains enough information to answer the user's query, FINALIZE immediately.
 
