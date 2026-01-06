@@ -8,6 +8,7 @@ const {
   createSummary,
   formatSize
 } = require('./fileUtils');
+const { workspaceService } = require('./workspaceService');
 
 /**
  * FileManager - Handles storage and retrieval of large tool results
@@ -18,15 +19,27 @@ class FileManager {
     // Read inlineSizeThreshold from config.json, default to 2KB
     const defaultThreshold = 2000; // 2KB
     let configThreshold = defaultThreshold;
+    let uploadToWorkspace = false;
+    let workspaceUploadDir = 'CopilotDownloads';
+    
     try {
       const config = require('../config.json');
       if (config.fileManager?.inlineSizeThreshold !== undefined) {
         configThreshold = config.fileManager.inlineSizeThreshold;
       }
+      if (config.fileManager?.uploadToWorkspace !== undefined) {
+        uploadToWorkspace = config.fileManager.uploadToWorkspace;
+      }
+      if (config.fileManager?.workspaceUploadDir !== undefined) {
+        workspaceUploadDir = config.fileManager.workspaceUploadDir;
+      }
     } catch (error) {
       // Config file doesn't exist or can't be loaded, use default
     }
+    
     this.inlineSizeThreshold = configThreshold;
+    this.uploadToWorkspace = uploadToWorkspace;
+    this.workspaceUploadDir = workspaceUploadDir;
     this.maxSessionSize = 500 * 1024 * 1024; // 500MB per session
     this.useDatabase = options.useDatabase !== undefined ? options.useDatabase : true; // Default to MongoDB
     
@@ -74,8 +87,13 @@ class FileManager {
   /**
    * Process and potentially save a tool result
    * Returns either inline data or a file reference
+   * 
+   * @param {string} sessionId - Session ID
+   * @param {string} toolId - Tool ID
+   * @param {any} result - Tool execution result
+   * @param {object} context - Optional context with authToken and user_id for workspace upload
    */
-  async processToolResult(sessionId, toolId, result) {
+  async processToolResult(sessionId, toolId, result, context = {}) {
     try {
       // Serialize result to check size
       const resultStr = JSON.stringify(result);
@@ -94,7 +112,7 @@ class FileManager {
 
       // Large result - save to file
       console.log(`[FileManager] Result is large (${formatSize(size)}), saving to file`);
-      return await this.saveToolResult(sessionId, toolId, result, resultStr, size);
+      return await this.saveToolResult(sessionId, toolId, result, resultStr, size, context);
     } catch (error) {
       console.error('[FileManager] Error processing tool result:', error);
       // On error, fall back to returning inline (truncated if necessary)
@@ -109,8 +127,16 @@ class FileManager {
   /**
    * Save a tool result to disk and return a file reference
    * Automatically normalizes API-specific formats (e.g., BV-BRC)
+   * Optionally uploads to BV-BRC workspace
+   * 
+   * @param {string} sessionId - Session ID
+   * @param {string} toolId - Tool ID
+   * @param {any} result - Tool execution result
+   * @param {string} resultStr - Serialized result
+   * @param {number} size - Size in bytes
+   * @param {object} context - Context with authToken and user_id for workspace upload
    */
-  async saveToolResult(sessionId, toolId, result, resultStr, size) {
+  async saveToolResult(sessionId, toolId, result, resultStr, size, context = {}) {
     // Create session directories
     const downloadsDir = this.getDownloadsDir(sessionId);
     await fs.mkdir(downloadsDir, { recursive: true });
@@ -152,10 +178,88 @@ class FileManager {
       lastAccessed: new Date().toISOString()
     };
 
+    // Upload to workspace if enabled
+    // This ensures all files saved to /tmp are automatically uploaded to workspace
+    let workspaceInfo = null;
+    if (this.uploadToWorkspace) {
+      if (context.authToken && context.user_id) {
+        try {
+          // Extract userId from token (may include domain like user@domain.com)
+          // Use token-extracted userId as it's the authoritative source
+          const userId = workspaceService.extractUserId(context.authToken) || context.user_id;
+          
+          console.log(`[FileManager] Auto-uploading file to workspace`, {
+            fileName,
+            filePath,
+            fileSize: formatSize(size),
+            contextUserId: context.user_id,
+            tokenExtractedUserId: workspaceService.extractUserId(context.authToken),
+            usingUserId: userId
+          });
+          
+          // Resolve workspace directory path using token-extracted userId
+          const uploadDir = workspaceService.resolveWorkspacePath(
+            this.workspaceUploadDir,
+            userId
+          );
+          
+          // Upload file to workspace
+          const uploadResult = await workspaceService.uploadFile(
+            filePath,
+            uploadDir,
+            context.authToken,
+            sessionId
+          );
+          
+          if (uploadResult.success) {
+            workspaceInfo = {
+              workspacePath: uploadResult.workspacePath,
+              uploadedAt: new Date().toISOString()
+            };
+            metadata.workspacePath = uploadResult.workspacePath;
+            metadata.workspaceUploadedAt = workspaceInfo.uploadedAt;
+            
+            console.log(`[FileManager] Successfully uploaded to workspace: ${uploadResult.workspacePath}`, {
+              fileName,
+              duration: `${uploadResult.duration}ms`,
+              uploadSpeed: uploadResult.uploadSpeed ? `${uploadResult.uploadSpeed.toFixed(2)} MB/s` : 'N/A'
+            });
+          } else {
+            console.warn(`[FileManager] Workspace upload failed: ${uploadResult.error}`, {
+              fileName,
+              filePath
+            });
+            metadata.workspaceUploadError = uploadResult.error;
+          }
+        } catch (error) {
+          console.error(`[FileManager] Workspace upload error:`, {
+            fileName,
+            filePath,
+            error: error.message,
+            stack: error.stack
+          });
+          metadata.workspaceUploadError = error.message;
+          // Don't fail the entire operation if workspace upload fails
+        }
+      } else {
+        // Log when upload is skipped due to missing auth
+        const missingAuth = [];
+        if (!context.authToken) missingAuth.push('authToken');
+        if (!context.user_id) missingAuth.push('user_id');
+        console.warn(`[FileManager] Workspace upload skipped - missing authentication: ${missingAuth.join(', ')}`, {
+          fileName,
+          filePath,
+          hasAuthToken: !!context.authToken,
+          hasUserId: !!context.user_id
+        });
+        metadata.workspaceUploadSkipped = `Missing: ${missingAuth.join(', ')}`;
+      }
+    }
+
     await this.updateMetadata(sessionId, metadata);
 
     // Return file reference
-    return {
+    const fileReference = {
       type: 'file_reference',
       fileId,
       fileName,
@@ -170,6 +274,14 @@ class FileManager {
       },
       message: `Large result saved to file (${formatSize(size)}, ${summary.recordCount} records)`
     };
+
+    // Add workspace info if uploaded
+    if (workspaceInfo) {
+      fileReference.workspace = workspaceInfo;
+      fileReference.message += ` and uploaded to workspace at ${workspaceInfo.workspacePath}`;
+    }
+
+    return fileReference;
   }
 
 

@@ -417,7 +417,8 @@ async function executeAgentLoop(opts) {
               query,
               model,
               system_prompt,
-              session_id
+              session_id,
+              user_id
             },
             logger
           );
@@ -462,7 +463,8 @@ async function executeAgentLoop(opts) {
             query,
             model,
             system_prompt,
-            session_id
+            session_id,
+            user_id
           },
           logger
         );

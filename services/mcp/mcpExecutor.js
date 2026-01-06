@@ -238,16 +238,26 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     // This will save large results to disk and return a file reference
     if (context.session_id) {
       log.debug('Processing result for session', { session_id: context.session_id });
+      
+      // Build context for file manager (includes workspace upload info)
+      const fileManagerContext = {
+        authToken: authToken,
+        user_id: context.user_id,
+        session_id: context.session_id
+      };
+      
       const processedResult = await fileManager.processToolResult(
         context.session_id,
         toolId,
-        result
+        result,
+        fileManagerContext
       );
       
       if (processedResult.type === 'file_reference') {
         log.info('Large result saved to file', { 
           fileName: processedResult.fileName,
-          recordCount: processedResult.summary?.recordCount 
+          recordCount: processedResult.summary?.recordCount,
+          workspacePath: processedResult.workspace?.workspacePath
         });
         return processedResult;
       } else if (processedResult.type === 'inline') {
