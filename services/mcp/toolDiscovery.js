@@ -248,6 +248,9 @@ async function writeToolsForPrompt(manifest) {
     promptText += `${localToolsConfig.description}\n\n`;
     
     Object.entries(localToolsConfig.tools).forEach(([toolId, tool]) => {
+      // Skip disabled tools
+      if (tool.disabled) return;
+      
       promptText += `### ${toolId}\n`;
       promptText += `Tool Name: ${tool.name}\n`;
       promptText += `${tool.description}\n`;
@@ -305,7 +308,12 @@ async function getToolDefinition(toolId) {
     try {
       const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
       const localToolsConfig = JSON.parse(localToolsFile);
-      return localToolsConfig.tools[toolId] || null;
+      const tool = localToolsConfig.tools[toolId];
+      // Return null if tool doesn't exist or is disabled
+      if (!tool || tool.disabled) {
+        return null;
+      }
+      return tool;
     } catch (error) {
       console.warn('[MCP] Failed to load local tool definition');
       return null;

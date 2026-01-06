@@ -521,7 +521,7 @@ async function executeAgentLoop(opts) {
         if (shouldFinalizeNow) {
           logger.info('Finalize-category tool executed, finalizing immediately');
           
-          // Check if result has a summary field - if so, use it directly
+          // Check if result has a summary field - if so, use it directly (for RAG tools)
           const hasSummary = safeResult && typeof safeResult.summary === 'string' && safeResult.summary.length > 0;
           if (hasSummary) {
             logger.info('Using tool summary directly as final response', { 
@@ -531,6 +531,37 @@ async function executeAgentLoop(opts) {
             finalResponse = safeResult.summary;
             
             // If streaming, emit the summary as chunks
+            if (stream && responseStream) {
+              emitSSE(responseStream, 'final_response', { chunk: finalResponse });
+            }
+          } else if (nextAction.action.includes('generate_workflow_manifest')) {
+            // For workflow manifest tools, return the result directly
+            logger.info('Using workflow manifest result directly as final response', {
+              tool: nextAction.action,
+              resultKeys: Object.keys(safeResult || {})
+            });
+            
+            // Extract workflow manifest - could be in result field or the whole object
+            let workflowManifest = safeResult;
+            if (safeResult?.result) {
+              // If result is a string, try to parse it
+              if (typeof safeResult.result === 'string') {
+                try {
+                  workflowManifest = JSON.parse(safeResult.result);
+                } catch (e) {
+                  workflowManifest = safeResult.result; // Use as-is if not JSON
+                }
+              } else {
+                workflowManifest = safeResult.result;
+              }
+            }
+            
+            // Format as JSON string for response
+            finalResponse = typeof workflowManifest === 'string' 
+              ? workflowManifest 
+              : JSON.stringify(workflowManifest, null, 2);
+            
+            // If streaming, emit the manifest as chunks
             if (stream && responseStream) {
               emitSSE(responseStream, 'final_response', { chunk: finalResponse });
             }

@@ -22,6 +22,14 @@ async function executeLocalTool(toolId, parameters = {}, context = {}, logger = 
   
   log.info('Executing local tool', { toolId, parameters });
   
+  // Check if tool is disabled
+  const { getToolDefinition } = require('./toolDiscovery');
+  const toolDef = await getToolDefinition(toolId);
+  if (!toolDef || toolDef.disabled) {
+    log.error('Tool is disabled or not found', { toolId });
+    throw new Error(`Tool ${toolId} is disabled or not available`);
+  }
+  
   switch (toolId) {
     case 'local.create_workflow':
       return await createWorkflowPlan(parameters, context, log);

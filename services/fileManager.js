@@ -15,7 +15,18 @@ const {
 class FileManager {
   constructor(baseDir = '/tmp/copilot', options = {}) {
     this.baseDir = baseDir;
-    this.inlineSizeThreshold = 2000; // 2KB - results smaller than this are returned inline
+    // Read inlineSizeThreshold from config.json, default to 2KB
+    const defaultThreshold = 2000; // 2KB
+    let configThreshold = defaultThreshold;
+    try {
+      const config = require('../config.json');
+      if (config.fileManager?.inlineSizeThreshold !== undefined) {
+        configThreshold = config.fileManager.inlineSizeThreshold;
+      }
+    } catch (error) {
+      // Config file doesn't exist or can't be loaded, use default
+    }
+    this.inlineSizeThreshold = configThreshold;
     this.maxSessionSize = 500 * 1024 * 1024; // 500MB per session
     this.useDatabase = options.useDatabase !== undefined ? options.useDatabase : true; // Default to MongoDB
     
