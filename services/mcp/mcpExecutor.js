@@ -4,8 +4,12 @@ const axios = require('axios');
 const { getToolDefinition, loadToolsManifest } = require('./toolDiscovery');
 const { sessionManager } = require('./mcpSessionManager');
 const { isLocalTool, executeLocalTool } = require('./localToolExecutor');
+const { McpStreamHandler } = require('./mcpStreamHandler');
 const { fileManager } = require('../fileManager');
 const { createLogger } = require('../logger');
+
+// Initialize stream handler
+const streamHandler = new McpStreamHandler(fileManager);
 const config = require('./config.json');
 
 const DEFAULT_RAG_FRAGMENTS = ['helpdesk_service_usage'];
@@ -121,6 +125,17 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       headers['Authorization'] = serverConfig.auth.startsWith('Bearer ') ? serverConfig.auth : `Bearer ${serverConfig.auth}`;
     }
     
+    // Auto-enable streaming if tool has streamingHint annotation
+    // Force streaming when streamingHint is present, regardless of parameter value
+    const autoEnableStreaming = config.streaming?.autoEnableOnHint !== false;
+    if (autoEnableStreaming && toolDef.annotations?.streamingHint === true) {
+      if (parameters.stream === false) {
+        log.info('Overriding stream=false due to streamingHint annotation', { toolId });
+      }
+      parameters.stream = true;
+      log.debug('Streaming enabled based on streamingHint annotation', { toolId });
+    }
+    
     // Build JSON-RPC request
     const jsonRpcRequest = {
       jsonrpc: '2.0',
@@ -135,33 +150,69 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     const mcpEndpoint = `${serverConfig.url}/mcp`;
     const timeout = config.global_settings?.tool_execution_timeout || 60000;
     
-    // Execute tool
-    const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
-      timeout,
+    // Execute tool with streaming support
+    const executionResult = await streamHandler.executeWithStreaming(
+      mcpEndpoint,
+      jsonRpcRequest,
       headers,
-      withCredentials: true
-    });
-    console.log('**********MCP TOOL RESPONSE:***********\n', response.data);
+      timeout,
+      context,
+      toolId,
+      log
+    );
     
-    // Parse SSE format response if needed
-    let responseData = response.data;
-    if (typeof responseData === 'string') {
-      const dataMatch = responseData.match(/data: (.+?)(?:\r?\n|$)/);
-      if (dataMatch && dataMatch[1]) {
-        responseData = JSON.parse(dataMatch[1]);
+    let responseData = executionResult.data;
+    const isStreamingResponse = executionResult.streaming;
+    
+    if (isStreamingResponse) {
+      log.info('Streaming response received and merged', {
+        totalBatches: responseData._batchCount,
+        totalResults: responseData.count
+      });
+    } else {
+      // Parse SSE format response if needed (non-streaming)
+      if (typeof responseData === 'string') {
+        const dataMatch = responseData.match(/data: (.+?)(?:\r?\n|$)/);
+        if (dataMatch && dataMatch[1]) {
+          responseData = JSON.parse(dataMatch[1]);
+        }
       }
     }
     
-    // Check for JSON-RPC error
+    // Check for JSON-RPC error or MCP error
     if (responseData.error) {
       log.error('Tool execution error', { 
         toolId, 
-        error: responseData.error 
+        error: responseData.error,
+        partial: responseData.partial,
+        mcpError: responseData.mcpError
       });
+      
+      // If MCP error (not partial data), throw immediately
+      if (responseData.mcpError) {
+        throw new Error(`MCP tool error: ${responseData.error}`);
+      }
+      
+      // If partial results from streaming, return what we have with error flag
+      if (responseData.partial && responseData.batchesReceived > 0) {
+        log.warn('Returning partial streaming results', {
+          batchesReceived: responseData.batchesReceived,
+          totalResults: responseData.totalResults
+        });
+        return {
+          error: responseData.error,
+          partial: true,
+          results: responseData.results || [],
+          count: responseData.totalResults || 0,
+          batchesReceived: responseData.batchesReceived,
+          message: `Partial results: ${responseData.error}`
+        };
+      }
+      
       throw new Error(`Tool execution failed: ${responseData.error.message || JSON.stringify(responseData.error)}`);
     }
     
-    let result = responseData.result;
+    let result = isStreamingResponse ? responseData : responseData.result;
     log.info('Tool executed successfully', { toolId });
 
     // Special-case RAG tools: extract actual data from MCP content wrapper
@@ -235,7 +286,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     }
     
     // Process result through file manager if session_id is available
-    // This will save large results to disk and return a file reference
+    // All results are now saved to disk and return a file reference
     if (context.session_id) {
       log.debug('Processing result for session', { session_id: context.session_id });
       
@@ -246,26 +297,35 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         session_id: context.session_id
       };
       
+      // Pass batch count as estimated pages for streaming responses
+      const estimatedPages = isStreamingResponse && responseData._batchCount 
+        ? responseData._batchCount 
+        : null;
+      
       const processedResult = await fileManager.processToolResult(
         context.session_id,
         toolId,
         result,
-        fileManagerContext
+        fileManagerContext,
+        estimatedPages
       );
       
+      // All results are now saved to file (no inline results)
       if (processedResult.type === 'file_reference') {
-        log.info('Large result saved to file', { 
+        log.info('Result saved to file', { 
           fileName: processedResult.fileName,
           recordCount: processedResult.summary?.recordCount,
+          size: processedResult.summary?.sizeFormatted,
           workspacePath: processedResult.workspace?.workspacePath
         });
         return processedResult;
-      } else if (processedResult.type === 'inline') {
-        log.debug('Result returned inline');
-        return processedResult.data;
+      } else {
+        // Should not happen, but handle gracefully
+        log.warn('Unexpected result type from fileManager', { type: processedResult.type });
+        return processedResult;
       }
     } else {
-      log.debug('No session_id in context, returning result inline');
+      log.debug('No session_id in context, returning result directly (not saved to file)');
     }
     
     return result;

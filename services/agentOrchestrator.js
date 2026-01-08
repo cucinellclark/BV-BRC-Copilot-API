@@ -218,7 +218,7 @@ function hasSufficientData(toolResults) {
         return true;
       }
     }
-    // Check for inline results
+    // Check for other result types (should be rare now that all results are file references)
     else if (result && typeof result === 'object' && !result.error) {
       return true;
     }
@@ -807,23 +807,23 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       }
     }
     
-    // Format tool results for prompt (handle file references and truncate large results)
+    // Format tool results for prompt (all results are now file references)
     const resultsStr = Object.keys(toolResults).length > 0
       ? JSON.stringify(
           Object.fromEntries(
             Object.entries(toolResults).map(([key, value]) => {
-              // Check if this is a file reference
+              // Check if this is a file reference (expected for all results)
               if (value && value.type === 'file_reference') {
                 return [key, {
                   type: 'FILE_SAVED',
                   fileId: value.fileId,
                   summary: value.summary,
                   message: value.message,
-                  note: 'Large result saved to file. Use local.get_file_info to see details, then use internal_server file tools to query/extract data.'
+                  note: 'Result saved to file. Use local.get_file_info to see details, then use internal_server file tools to query/extract data.'
                 }];
               }
               
-              // Truncate large inline results
+              // Fallback for non-file-reference results (should be rare/error cases)
               const resultStr = JSON.stringify(value);
               if (resultStr.length > 2000) {
                 return [key, `[Result truncated - ${resultStr.length} chars]`];
@@ -931,9 +931,9 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         `Iteration ${t.iteration}: ${t.action} - ${t.reasoning} [${t.status || 'pending'}]`
       ).join('\n');
       
-      // Format tool results (handle file references and truncate large results)
+      // Format tool results (all results are now file references)
       const resultsStr = Object.entries(toolResults).map(([tool, result]) => {
-        // Check if this is a file reference
+        // Check if this is a file reference (expected for all results)
         if (result && result.type === 'file_reference') {
           return `${tool}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
                  `Data Type: ${result.summary.dataType}\n` +
@@ -943,10 +943,10 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
                  `Use local.get_file_info to get full details, then use internal_server file tools to query/extract data.\n`;
         }
         
-        // Format inline results with truncation
+        // Fallback for non-file-reference results (should be rare/error cases)
         const resultStr = JSON.stringify(result, null, 2);
         if (resultStr.length > 3000) {
-          return `${tool}:\n[Large result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
+          return `${tool}:\n[Result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
         }
         return `${tool}:\n${resultStr}\n`;
       }).join('\n---\n');

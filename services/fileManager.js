@@ -16,16 +16,22 @@ const { workspaceService } = require('./workspaceService');
 class FileManager {
   constructor(baseDir = '/tmp/copilot', options = {}) {
     this.baseDir = baseDir;
-    // Read inlineSizeThreshold from config.json, default to 2KB
-    const defaultThreshold = 2000; // 2KB
-    let configThreshold = defaultThreshold;
+    // Read thresholds from config.json
+    const defaultAccumulateThreshold = 10 * 1024 * 1024; // 10MB
+    const defaultMaxPages = 100;
+    
+    let accumulateThreshold = defaultAccumulateThreshold;
+    let maxPages = defaultMaxPages;
     let uploadToWorkspace = false;
     let workspaceUploadDir = 'CopilotDownloads';
     
     try {
       const config = require('../config.json');
-      if (config.fileManager?.inlineSizeThreshold !== undefined) {
-        configThreshold = config.fileManager.inlineSizeThreshold;
+      if (config.fileManager?.accumulateSizeThreshold !== undefined) {
+        accumulateThreshold = config.fileManager.accumulateSizeThreshold;
+      }
+      if (config.fileManager?.maxAccumulatePages !== undefined) {
+        maxPages = config.fileManager.maxAccumulatePages;
       }
       if (config.fileManager?.uploadToWorkspace !== undefined) {
         uploadToWorkspace = config.fileManager.uploadToWorkspace;
@@ -34,10 +40,11 @@ class FileManager {
         workspaceUploadDir = config.fileManager.workspaceUploadDir;
       }
     } catch (error) {
-      // Config file doesn't exist or can't be loaded, use default
+      // Config file doesn't exist or can't be loaded, use defaults
     }
     
-    this.inlineSizeThreshold = configThreshold;
+    this.accumulateSizeThreshold = accumulateThreshold;
+    this.maxAccumulatePages = maxPages;
     this.uploadToWorkspace = uploadToWorkspace;
     this.workspaceUploadDir = workspaceUploadDir;
     this.maxSessionSize = 500 * 1024 * 1024; // 500MB per session
@@ -85,15 +92,17 @@ class FileManager {
   }
 
   /**
-   * Process and potentially save a tool result
-   * Returns either inline data or a file reference
+   * Process and save a tool result to file
+   * Always saves to file (Tier 2: accumulate then save, or Tier 3: stream to file)
+   * Returns a file reference
    * 
    * @param {string} sessionId - Session ID
    * @param {string} toolId - Tool ID
    * @param {any} result - Tool execution result
    * @param {object} context - Optional context with authToken and user_id for workspace upload
+   * @param {number} estimatedPages - Optional estimated number of pages (for streaming decision)
    */
-  async processToolResult(sessionId, toolId, result, context = {}) {
+  async processToolResult(sessionId, toolId, result, context = {}, estimatedPages = null) {
     try {
       // Serialize result to check size
       const resultStr = JSON.stringify(result);
@@ -101,26 +110,25 @@ class FileManager {
 
       console.log(`[FileManager] Processing result from ${toolId}: ${formatSize(size)}`);
 
-      // If small enough, return inline
-      if (size < this.inlineSizeThreshold) {
-        console.log(`[FileManager] Result is small (${formatSize(size)}), returning inline`);
-        return {
-          type: 'inline',
-          data: result
-        };
+      // Always save to file - no inline results
+      // Determine if we should use Tier 2 (accumulate) or Tier 3 (stream to file)
+      const shouldStream = size >= this.accumulateSizeThreshold || 
+                          (estimatedPages !== null && estimatedPages > this.maxAccumulatePages);
+
+      if (shouldStream) {
+        console.log(`[FileManager] Result exceeds threshold (${formatSize(size)}), will stream to file`);
+        // For now, still use saveToolResult (Tier 3 streaming implementation will come later)
+        // This maintains current behavior while preparing for streaming
+      } else {
+        console.log(`[FileManager] Result size (${formatSize(size)}), saving to file`);
       }
 
-      // Large result - save to file
-      console.log(`[FileManager] Result is large (${formatSize(size)}), saving to file`);
       return await this.saveToolResult(sessionId, toolId, result, resultStr, size, context);
     } catch (error) {
       console.error('[FileManager] Error processing tool result:', error);
-      // On error, fall back to returning inline (truncated if necessary)
-      return {
-        type: 'inline',
-        data: result,
-        error: `Failed to save to file: ${error.message}`
-      };
+      // On error, still try to save (don't return inline)
+      // Re-throw to let caller handle the error appropriately
+      throw new Error(`Failed to save tool result to file: ${error.message}`);
     }
   }
 
@@ -198,10 +206,18 @@ class FileManager {
           });
           
           // Resolve workspace directory path using token-extracted userId
+          // Organize by session: CopilotDownloads/{sessionId}/
+          const sessionUploadDir = `${this.workspaceUploadDir}/${sessionId}`;
           const uploadDir = workspaceService.resolveWorkspacePath(
-            this.workspaceUploadDir,
+            sessionUploadDir,
             userId
           );
+          
+          console.log(`[FileManager] Uploading to session-specific folder`, {
+            sessionId,
+            sessionUploadDir,
+            resolvedUploadDir: uploadDir
+          });
           
           // Upload file to workspace
           const uploadResult = await workspaceService.uploadFile(
@@ -501,14 +517,64 @@ class FileManager {
   }
 
   /**
+   * Recursively parse JSON strings in 'text' fields
+   * This handles FastMCP format where data is wrapped as { type: "text", text: "..." }
+   */
+  parseNestedJsonStrings(obj) {
+    if (obj === null || obj === undefined) {
+      return obj;
+    }
+
+    // If it's an array, process each element
+    if (Array.isArray(obj)) {
+      return obj.map(item => this.parseNestedJsonStrings(item));
+    }
+
+    // If it's an object, check for 'text' field with JSON string
+    if (typeof obj === 'object') {
+      const parsed = {};
+      for (const [key, value] of Object.entries(obj)) {
+        // If this is a 'text' field and it's a string that looks like JSON, parse it
+        if (key === 'text' && typeof value === 'string') {
+          const trimmed = value.trim();
+          // Check if it looks like JSON (starts with { or [)
+          if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+              const parsedValue = JSON.parse(value);
+              // Recursively parse the parsed JSON in case it has nested text fields
+              parsed[key] = this.parseNestedJsonStrings(parsedValue);
+            } catch (e) {
+              // Not valid JSON, keep as string
+              parsed[key] = value;
+            }
+          } else {
+            // Not JSON-like, keep as string
+            parsed[key] = value;
+          }
+        } else {
+          // Recursively process nested objects/arrays
+          parsed[key] = this.parseNestedJsonStrings(value);
+        }
+      }
+      return parsed;
+    }
+
+    // Primitive value, return as-is
+    return obj;
+  }
+
+  /**
    * Serialize data for storage based on type
    */
   serializeForStorage(data, dataType) {
+    // Parse nested JSON strings in text fields before serialization
+    const parsedData = this.parseNestedJsonStrings(data);
+    
     if (dataType === 'text' || dataType === 'csv' || dataType === 'tsv') {
-      return typeof data === 'string' ? data : String(data);
+      return typeof parsedData === 'string' ? parsedData : String(parsedData);
     }
     // Default to JSON for structured types
-    return JSON.stringify(data);
+    return JSON.stringify(parsedData, null, 2);
   }
 }
 
