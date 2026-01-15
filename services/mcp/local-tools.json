@@ -2,26 +2,6 @@
   "version": "1.0.0",
   "description": "Local pseudo-tools for meta-operations within the Copilot API",
   "tools": {
-    "local.create_workflow": {
-      "name": "create_workflow",
-      "disabled": false,
-      "description": "Create a detailed multi-step workflow plan for complex queries requiring multiple coordinated tools. Use this when the user's request needs a comprehensive plan outlined BEFORE execution. This will generate a workflow using the available tools and return the plan without executing anything. Choose this INSTEAD OF executing regular tools when: (1) The user explicitly asks for a 'plan', 'workflow', or 'steps', or (2) The task is complex enough that showing a coordinated approach first provides value. The workflow will be composed from the other available MCP tools. After calling this, the conversation will end with the workflow plan as the response.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "query_summary": {
-            "type": "string",
-            "description": "Brief summary of what the workflow should accomplish"
-          },
-          "complexity_estimate": {
-            "type": "string",
-            "description": "Estimated workflow complexity",
-            "enum": ["moderate", "high"]
-          }
-        },
-        "required": ["query_summary"]
-      }
-    },
     "local.get_file_info": {
       "name": "get_file_info",
       "description": "Get detailed metadata about a file that was saved from a large MCP tool result. This returns information about the file including its data type, size, field names, record count, and sample data. Use this FIRST when you receive a file reference to understand what data is available, then use the appropriate internal_server file tools to query, search, or extract data from the file.",

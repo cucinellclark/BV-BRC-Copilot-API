@@ -49,7 +49,7 @@ fileManager.init().catch(err => {
 /**
  * Execute an MCP tool or local pseudo-tool
  * 
- * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection" or "local.create_workflow")
+ * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection" or "local.get_file_info")
  * @param {object} parameters - Tool parameters
  * @param {string} authToken - Authentication token
  * @param {object} context - Additional context for local tools (query, model, etc.)

@@ -1,17 +1,12 @@
 // services/mcp/localToolExecutor.js
 // Handles execution of local pseudo-tools (meta-operations)
 
-const { loadToolsForPrompt } = require('./toolDiscovery');
-const { queryChatOnly } = require('../llmServices');
-const { getModelData } = require('../dbUtils');
-const { safeParseJson } = require('../jsonUtils');
 const { fileManager } = require('../fileManager');
 const { createLogger } = require('../logger');
-const promptManager = require('../../prompts');
 
 /**
  * Execute a local pseudo-tool
- * @param {string} toolId - Full tool ID (e.g., "local.create_workflow")
+ * @param {string} toolId - Full tool ID (e.g., "local.get_file_info")
  * @param {object} parameters - Tool parameters
  * @param {object} context - Additional context (query, model, etc.)
  * @param {Logger} logger - Optional logger instance
@@ -31,9 +26,6 @@ async function executeLocalTool(toolId, parameters = {}, context = {}, logger = 
   }
   
   switch (toolId) {
-    case 'local.create_workflow':
-      return await createWorkflowPlan(parameters, context, log);
-    
     case 'local.get_file_info':
       return await getFileInfo(parameters, context, log);
     
@@ -41,74 +33,6 @@ async function executeLocalTool(toolId, parameters = {}, context = {}, logger = 
       log.error('Unknown local tool', { toolId });
       throw new Error(`Unknown local tool: ${toolId}`);
   }
-}
-
-/**
- * Create a detailed workflow plan without executing anything
- * @param {object} parameters - Tool parameters from LLM
- * @param {object} context - Execution context (query, model, etc.)
- * @param {Logger} logger - Logger instance
- * @returns {Promise<object>} Workflow plan structure
- */
-async function createWorkflowPlan(parameters, context, logger) {
-  logger.info('Creating workflow plan', { parameters });
-  
-  const { query, model, system_prompt = '' } = context;
-  const { query_summary, complexity_estimate = 'moderate' } = parameters;
-  
-  if (!query || !model) {
-    logger.error('Workflow creation requires query and model in context');
-    throw new Error('Workflow creation requires query and model in context');
-  }
-  
-  // Load available tools for the planning prompt
-  const toolsDescription = await loadToolsForPrompt();
-  
-  // Build workflow planning prompt
-  const workflowPrompt = promptManager.formatPrompt(
-    promptManager.getAgentPrompt('workflowPlanning'),
-    {
-      tools: toolsDescription,
-      query: query,
-      query_summary: query_summary || query,
-      complexity: complexity_estimate,
-      systemPrompt: system_prompt || 'No additional context'
-    }
-  );
-  
-  // Log the prompt
-  logger.logPrompt('Workflow Planning', workflowPrompt, model, {
-    query_summary,
-    complexity_estimate
-  });
-  
-  // Get model data
-  const modelData = await getModelData(model);
-  
-  // Call LLM to generate workflow plan
-  const response = await queryChatOnly({
-    query: workflowPrompt,
-    model,
-    system_prompt: 'You are a workflow planning expert for the BV-BRC platform. Always respond with valid JSON.',
-    modelData
-  });
-  
-  // Log the response
-  logger.logResponse('Workflow Planning', response, model);
-  
-  // Parse JSON response
-  const workflowPlan = safeParseJson(response);
-  
-  logger.info('Workflow plan created', { 
-    stepsCount: workflowPlan?.steps?.length 
-  });
-  
-  // Return the workflow plan as-is without validation
-  return {
-    type: 'workflow_plan',
-    created_at: new Date().toISOString(),
-    ...workflowPlan
-  };
 }
 
 /**
@@ -206,7 +130,6 @@ function isLocalTool(toolId) {
 
 module.exports = {
   executeLocalTool,
-  createWorkflowPlan,
   getFileInfo,
   isLocalTool
 };
