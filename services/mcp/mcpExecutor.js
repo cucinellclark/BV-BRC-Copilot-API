@@ -148,7 +148,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     };
     
     const mcpEndpoint = `${serverConfig.url}/mcp`;
-    const timeout = config.global_settings?.tool_execution_timeout || 60000;
+    const timeout = config.global_settings?.tool_execution_timeout || 120000;
     
     // Execute tool with streaming support
     const executionResult = await streamHandler.executeWithStreaming(
