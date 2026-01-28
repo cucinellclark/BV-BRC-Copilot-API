@@ -8,6 +8,7 @@ const { OpenAI } = require('openai');
 
 const chatRoutes = require('./routes/chatRoutes'); // chat-related routes
 const dbRoutes = require('./routes/dbRoutes');
+const healthRoutes = require('./routes/healthRoutes'); // health check routes
 
 const app = express();
 
@@ -23,7 +24,8 @@ app.get('/copilot-api/test', (req, res) => {
     res.send('Welcome to my API');
 });
 
-// Register chat-related routes with the Express app
+// Register routes with the Express app
+app.use('/copilot-api/health', healthRoutes);
 app.use('/copilot-api/chatbrc', chatRoutes);
 app.use('/copilot-api/db', dbRoutes);
 

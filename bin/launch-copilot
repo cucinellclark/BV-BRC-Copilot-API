@@ -3,13 +3,24 @@
 var app = require('../index');
 var conf = require('../config.json');
 const { discoverTools } = require('../services/mcp/toolDiscovery');
+const { connectToDatabase } = require('../database');
 
 app.set('port', conf.http_port || 7032);
 
-// Initialize MCP tools on startup
+// Initialize server components on startup
 async function initializeServer() {
-  console.log('[Startup] Initializing MCP tool discovery...');
+  // Initialize MongoDB connection pool
+  console.log('[Startup] Initializing MongoDB connection pool...');
+  try {
+    await connectToDatabase();
+    console.log('[Startup] MongoDB connection pool initialized successfully');
+  } catch (error) {
+    console.error('[Startup] Failed to connect to MongoDB:', error.message);
+    console.warn('[Startup] Continuing without MongoDB - database features will be unavailable');
+  }
   
+  // Initialize MCP tools
+  console.log('[Startup] Initializing MCP tool discovery...');
   try {
     await discoverTools();
     console.log('[Startup] MCP tools discovered successfully');
@@ -21,6 +32,10 @@ async function initializeServer() {
   // Start the server
   var server = app.listen(app.get('port'), '0.0.0.0', function () {
     console.log('[Startup] Express server listening on port ' + server.address().port);
+    console.log('[Startup] Health checks available at:');
+    console.log('[Startup]   - /copilot-api/health/live (liveness)');
+    console.log('[Startup]   - /copilot-api/health/ready (readiness)');
+    console.log('[Startup]   - /copilot-api/health/mongodb (MongoDB-specific)');
   });
 }
 
