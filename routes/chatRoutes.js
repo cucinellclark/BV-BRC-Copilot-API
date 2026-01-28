@@ -20,6 +20,7 @@ const {
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
+const { addAgentJob, getJobStatus, getQueueStats } = require('../services/queueService');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -78,7 +79,7 @@ router.post('/copilot', authenticate, async (req, res) => {
     }
 });
 
-// ========== AGENT COPILOT ROUTE ==========
+// ========== AGENT COPILOT ROUTE (QUEUED) ==========
 router.post('/copilot-agent', authenticate, async (req, res) => {
     const logger = createLogger('AgentRoute', req.body.session_id);
     
@@ -91,8 +92,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             system_prompt = '', 
             save_chat = true,
             include_history = true,
-            auth_token = null,
-            stream = true  // Default to streaming
+            auth_token = null
         } = req.body;
 
         // Validate required fields
@@ -111,55 +111,17 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
         // Get max_iterations from config (system-level setting)
         const max_iterations = config.agent?.max_iterations || 8;
 
-        logger.info('Agent request received', { 
+        logger.info('Agent request received - adding to queue', { 
             query_preview: query.substring(0, 100),
             model, 
             session_id, 
             user_id, 
             save_chat,
-            max_iterations,
-            stream
+            max_iterations
         });
 
-        // Streaming is default, only disable if explicitly set to false
-        if (stream !== false) {
-            // -------- Streaming (SSE) path --------
-            logger.debug('Using streaming response for agent');
-            res.set({
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no'
-            });
-            
-            if (typeof res.flushHeaders === 'function') {
-                res.flushHeaders();
-            }
-
-            // Execute agent loop with streaming
-            await AgentOrchestrator.executeAgentLoop({
-                query,
-                model,
-                session_id,
-                user_id,
-                system_prompt,
-                save_chat,
-                include_history,
-                max_iterations,
-                auth_token,
-                stream: stream,
-                responseStream: res
-            });
-
-            logger.info('Agent streaming request completed');
-            // The stream handler is responsible for ending the response
-            return;
-        }
-
-        // -------- Standard JSON path --------
-        logger.debug('Using standard JSON response for agent');
-        // Execute agent loop
-        const response = await AgentOrchestrator.executeAgentLoop({
+        // Add job to queue
+        const job = await addAgentJob({
             query,
             model,
             session_id,
@@ -171,26 +133,99 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             auth_token
         });
 
-        logger.info('Agent request completed successfully');
-        res.status(200).json(response);
+        logger.info('Agent job queued successfully', { 
+            jobId: job.id,
+            session_id,
+            user_id
+        });
+
+        // Return 202 Accepted with job ID
+        res.status(202).json({
+            message: 'Agent job queued successfully',
+            job_id: job.id,
+            session_id: session_id,
+            status_endpoint: `/copilot-api/chatbrc/job/${job.id}/status`,
+            poll_interval_ms: config.agent?.job_poll_interval || 1000
+        });
+
     } catch (error) {
-        logger.error('Agent request failed', { 
+        logger.error('Failed to queue agent job', { 
             error: error.message, 
             stack: error.stack 
         });
         
-        // If this was a streaming request, send error over SSE, else JSON
-        // Default is streaming, so check if stream is not explicitly false
-        if (req.body.stream !== false) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
-            res.end();
-        } else {
-            res.status(500).json({ 
-                message: 'Internal server error', 
-                error: error.message,
-                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        res.status(500).json({ 
+            message: 'Failed to queue agent job', 
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});
+
+// ========== JOB STATUS ROUTE ==========
+router.get('/job/:jobId/status', authenticate, async (req, res) => {
+    const logger = createLogger('JobStatus');
+    
+    try {
+        const { jobId } = req.params;
+        
+        logger.info('Job status request', { jobId });
+        
+        const jobStatus = await getJobStatus(jobId);
+        
+        if (!jobStatus.found) {
+            logger.warn('Job not found', { jobId });
+            return res.status(404).json({
+                message: 'Job not found',
+                job_id: jobId
             });
         }
+        
+        logger.info('Job status retrieved', { 
+            jobId, 
+            status: jobStatus.status,
+            progress: jobStatus.progress?.percentage || 0
+        });
+        
+        res.status(200).json(jobStatus);
+        
+    } catch (error) {
+        logger.error('Failed to get job status', { 
+            error: error.message,
+            jobId: req.params.jobId
+        });
+        
+        res.status(500).json({
+            message: 'Failed to retrieve job status',
+            error: error.message
+        });
+    }
+});
+
+// ========== QUEUE STATS ROUTE (for monitoring) ==========
+router.get('/queue/stats', authenticate, async (req, res) => {
+    const logger = createLogger('QueueStats');
+    
+    try {
+        logger.info('Queue stats request');
+        
+        const stats = await getQueueStats();
+        
+        res.status(200).json({
+            message: 'Queue statistics',
+            timestamp: new Date().toISOString(),
+            stats
+        });
+        
+    } catch (error) {
+        logger.error('Failed to get queue stats', { 
+            error: error.message
+        });
+        
+        res.status(500).json({
+            message: 'Failed to retrieve queue statistics',
+            error: error.message
+        });
     }
 });
 
