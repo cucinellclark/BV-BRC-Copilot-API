@@ -48,7 +48,14 @@ const jobStreamCallbacks = new Map();
  */
 function safeStreamEmit(jobId, eventType, data) {
     const callback = jobStreamCallbacks.get(jobId);
+    // Only log non-content events to reduce noise
+    if (eventType !== 'final_response' && eventType !== 'content') {
+        console.log('[QUEUE DEBUG] safeStreamEmit called - jobId:', jobId, 'eventType:', eventType, 'hasCallback:', !!callback);
+    }
     if (!callback) {
+        if (eventType !== 'final_response' && eventType !== 'content') {
+            console.log('[QUEUE DEBUG] No callback found for jobId:', jobId);
+        }
         return;
     }
     

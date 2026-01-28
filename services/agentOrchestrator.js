@@ -72,6 +72,10 @@ function emitSSE(responseStream, eventType, data) {
   
   try {
     const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+    // Only log non-content events to reduce noise
+    if (eventType !== 'final_response' && eventType !== 'content') {
+      console.log('[Agent SSE] Emitting event:', eventType, 'with data:', dataStr.substring(0, 100) + (dataStr.length > 100 ? '...' : ''));
+    }
     responseStream.write(`event: ${eventType}\ndata: ${dataStr}\n\n`);
   } catch (error) {
     console.error('[Agent] Failed to emit SSE event:', error);

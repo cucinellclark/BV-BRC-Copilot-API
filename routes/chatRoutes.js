@@ -121,8 +121,11 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             streaming: stream
         });
 
+        console.log('[ROUTE DEBUG] Stream parameter value:', stream, 'type:', typeof stream);
+
         if (stream) {
             // ========== STREAMING PATH ==========
+            console.log('[ROUTE DEBUG] Entering streaming path');
             logger.debug('Using streaming response with queue');
             
             // Set SSE headers
@@ -138,29 +141,51 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 res.flushHeaders();
             }
 
-            // Track if connection is still open
-            let connectionClosed = false;
+            console.log('[ROUTE DEBUG] SSE headers set and flushed');
 
-            // Handle client disconnect
+            // Track if connection is still open
+            let contentChunkCount = 0;
+            let callbackInvocations = 0;
+            let heartbeatInterval = null;
+            console.log('[ROUTE DEBUG] Initial state - res.writableEnded:', res.writableEnded, 'res.destroyed:', res.destroyed);
+
+            // Handle client disconnect (for cleanup only)
             req.on('close', () => {
+                console.log('[ROUTE DEBUG] req.on(close) fired. Content chunks sent:', contentChunkCount, 'callback invocations:', callbackInvocations);
                 logger.info('Client disconnected from stream', { session_id });
-                connectionClosed = true;
+                if (heartbeatInterval) {
+                    clearInterval(heartbeatInterval);
+                    heartbeatInterval = null;
+                }
                 // Job continues in background, result saved to DB
             });
 
             // Create streaming callback
             const streamCallback = (eventType, data) => {
-                if (connectionClosed || res.writableEnded) {
+                callbackInvocations++;
+                
+                // Only check response object state, not req events (which can be unreliable for SSE)
+                if (res.writableEnded || res.destroyed) {
+                    // Only log non-content events to reduce noise
+                    if (eventType !== 'final_response' && eventType !== 'content') {
+                        console.log('[ROUTE DEBUG] Response ended or destroyed, skipping write for event:', eventType);
+                    }
                     return; // Connection closed, stop trying to write
                 }
                 
                 try {
                     // Write SSE event
+                    if (eventType === 'final_response' || eventType === 'content') {
+                        contentChunkCount++;
+                    } else {
+                        console.log('[ROUTE DEBUG] Writing SSE event to response:', eventType);
+                    }
                     res.write(`event: ${eventType}\n`);
                     res.write(`data: ${JSON.stringify(data)}\n\n`);
                     
                     // Close stream if done or error
                     if (eventType === 'done' || eventType === 'error') {
+                        console.log('[ROUTE DEBUG] Stream ending. Total content chunks sent:', contentChunkCount);
                         res.end();
                     }
                 } catch (error) {
@@ -168,14 +193,16 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                         error: error.message,
                         eventType 
                     });
-                    connectionClosed = true;
+                    // Stream will be closed naturally, no need to track state
                 }
             };
 
             // Send initial connection confirmation
             res.write(': connected\n\n');
+            console.log('[ROUTE DEBUG] Initial connection confirmation sent');
 
             // Add job to queue with streaming callback
+            console.log('[ROUTE DEBUG] About to add job to queue');
             const job = await addAgentJob({
                 query,
                 model,
@@ -190,6 +217,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 streamCallback
             });
 
+            console.log('[ROUTE DEBUG] Job added to queue, jobId:', job.id);
             logger.info('Streaming job queued', { 
                 jobId: job.id,
                 session_id,
@@ -197,8 +225,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             });
 
             // Set up heartbeat to keep connection alive
-            const heartbeatInterval = setInterval(() => {
-                if (connectionClosed || res.writableEnded) {
+            heartbeatInterval = setInterval(() => {
+                if (res.writableEnded || res.destroyed) {
                     clearInterval(heartbeatInterval);
                     return;
                 }
@@ -206,21 +234,17 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 try {
                     res.write(': heartbeat\n\n');
                 } catch (error) {
+                    console.log('[ROUTE DEBUG] Heartbeat write failed:', error.message);
                     clearInterval(heartbeatInterval);
-                    connectionClosed = true;
                 }
             }, 15000); // Every 15 seconds
-
-            // Clean up on connection close
-            req.on('close', () => {
-                clearInterval(heartbeatInterval);
-            });
 
             // Note: Don't call res.end() here - stream stays open
             // The streamCallback will call res.end() when job completes
 
         } else {
             // ========== NON-STREAMING PATH (ORIGINAL) ==========
+            console.log('[ROUTE DEBUG] Entering NON-streaming path (stream is false or undefined)');
             logger.debug('Using non-streaming response with queue');
             
             const job = await addAgentJob({
@@ -416,10 +440,9 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         // Job is waiting or active, attach new stream callback
         logger.info('Attaching new stream to active/waiting job', { jobId, state });
         
-        let connectionClosed = false;
-        
         const streamCallback = (eventType, data) => {
-            if (connectionClosed || res.writableEnded) return;
+            // Only check response object state, not req events
+            if (res.writableEnded || res.destroyed) return;
             
             try {
                 res.write(`event: ${eventType}\n`);
@@ -430,7 +453,6 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
                 }
             } catch (error) {
                 logger.error('Stream write failed', { error: error.message });
-                connectionClosed = true;
             }
         };
 
@@ -448,8 +470,8 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         })}\n\n`);
 
         // Heartbeat
-        const heartbeatInterval = setInterval(() => {
-            if (connectionClosed || res.writableEnded) {
+        let heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
                 clearInterval(heartbeatInterval);
                 return;
             }
@@ -457,13 +479,11 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
                 res.write(': heartbeat\n\n');
             } catch (error) {
                 clearInterval(heartbeatInterval);
-                connectionClosed = true;
             }
         }, 15000);
 
         req.on('close', () => {
             clearInterval(heartbeatInterval);
-            connectionClosed = true;
             logger.info('Stream reconnection closed', { jobId });
         });
 
