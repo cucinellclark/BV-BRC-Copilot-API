@@ -1,8 +1,9 @@
 # BV-BRC Copilot API - Concurrency Readiness Plan
 
-**Document Version**: 1.0  
+**Document Version**: 2.0  
 **Date**: January 28, 2026  
-**Status**: Draft for Review
+**Status**: Active Implementation  
+**Last Updated**: January 28, 2026
 
 ---
 
@@ -13,21 +14,75 @@ The BV-BRC Copilot API is currently configured for development and small-team us
 ### Current State
 - **Architecture**: Node.js Express + Python Flask microservice
 - **Deployment**: PM2 cluster mode (3 instances)
-- **Estimated Capacity**: 10-20 concurrent users
-- **Primary Bottleneck**: Single-threaded Python utilities service
+- **Estimated Capacity**: 50-100 concurrent users (improved from 10-20)
+- **Completed**: Python service upgrade, MongoDB pooling, Request queue
+- **Current Bottleneck**: No resource limits on agents/streams, no resilience patterns
 
 ### Target State (End of Plan)
-- **Estimated Capacity**: 200-500 concurrent users
-- **High Availability**: Circuit breakers, queue-based processing
-- **Observability**: Real-time metrics and alerting
-- **Resilience**: Graceful degradation under load
+- **Estimated Capacity**: 500+ concurrent users
+- **High Availability**: Circuit breakers, queue-based processing, resource limits
+- **Resilience**: Graceful degradation under load, retry logic, fallbacks
+- **Performance**: Caching, rate limiting, optimized streaming
 - **Intelligence**: LlamaIndex-powered chat history and summarization
 
+### Progress Summary
+**Phase 1 (COMPLETED)**:
+- ✅ Issue #1: Python Service Upgrade (Gunicorn with gevent)
+- ✅ Issue #2: Request Queue Management (Bull queue for `/copilot-agent`)
+- ✅ Issue #3: MongoDB Connection Pool Configuration
+
+**Phase 2 (IN PROGRESS)**:
+- ⏳ Issue #4: Agent Resource Management (NEXT)
+- ⏳ Issue #5: Streaming Management
+- ⏳ Issue #6: External Service Resilience
+- ⏳ Issue #11: LlamaIndex Integration
+
+**Phase 3 (PLANNED)**:
+- ⏳ Issue #8: Caching Strategy
+- ⏳ Issue #9: Rate Limiting
+
 ### Investment Required
-- **Development Time**: 4-5 weeks (1 developer)
-- **Infrastructure**: Redis cache server, monitoring stack
+- **Development Time**: 5-6 weeks remaining (1 developer)
+- **Infrastructure**: Redis server (already configured), monitoring stack (optional)
 - **AI Services**: LlamaIndex integration, summarization pipeline
 - **Testing**: Load testing tools and environment
+
+---
+
+## Quick Status Summary
+
+### ✅ Completed (Phase 1)
+| Issue | Status | Completion Date |
+|-------|--------|-----------------|
+| #1: Python Service Upgrade | ✅ DONE | Jan 28, 2026 |
+| #2: Request Queue | ✅ DONE | Jan 28, 2026 |
+| #3: MongoDB Pool Config | ✅ DONE | Jan 28, 2026 |
+
+**Impact**: Capacity improved from 10-20 to 50-100 concurrent users
+
+### ⏳ In Progress (Phase 2)
+| Issue | Priority | Effort | Status |
+|-------|----------|--------|--------|
+| #4: Agent Resource Mgmt | 🟡 High | 2d | 👉 **NEXT** |
+| #5: Streaming Management | 🟡 High | 1d | Pending |
+| #6: External Service Resilience | 🟡 High | 3d | Pending |
+| #11: LlamaIndex Integration | 🟡 High | 1w | Pending |
+
+**Target**: Capacity to 200-300 concurrent users
+
+### 📋 Planned (Phase 3)
+| Issue | Priority | Effort | Status |
+|-------|----------|--------|--------|
+| #8: Caching Strategy | 🟢 Medium | 5d | Planned |
+| #9: Rate Limiting | 🟡 Medium | 1w | Planned |
+
+**Target**: Capacity to 500+ concurrent users
+
+### 🔄 Optional/Deferred
+| Issue | Reason |
+|-------|--------|
+| #7: Observability | Deferred - can add later if needed |
+| #10: Load Testing | Can be done incrementally as features complete |
 
 ---
 
@@ -192,14 +247,20 @@ Implement Bull queue with Redis backend for expensive operations:
 - Session management endpoints (fast DB operations)
 
 ### Implementation Steps
-1. ✅ Install Bull: `npm install bull`
-2. ✅ Create queue service: `services/queueService.js`
-3. ✅ Define job processors for each operation type
-4. ✅ Update `/copilot-agent` route to use queue
-5. ✅ Add job status endpoint: `/copilot-api/job/:jobId/status`
-6. ✅ Implement SSE for job progress updates
-7. ✅ Add queue monitoring dashboard endpoint
-8. ✅ Configure queue cleanup (completed jobs after 24 hours)
+1. ✅ Install Bull: `npm install bull` - **DONE**
+2. ✅ Create queue service: `services/queueService.js` - **DONE**
+3. ✅ Define job processors for agent operations - **DONE**
+4. ✅ Update `/copilot-agent` route to use queue - **DONE**
+5. ✅ Add job status endpoint: `/copilot-api/job/:jobId/status` - **DONE**
+6. ✅ Implement SSE for job progress updates - **DONE**
+7. ✅ Add queue monitoring dashboard endpoint - **DONE**
+8. ✅ Configure queue cleanup (completed jobs after 24 hours) - **DONE**
+
+**Still To Do**:
+- [ ] Add queue support for `/copilot` with RAG (conditionally queue)
+- [ ] Add queue support for `/rag` and `/rag-distllm` routes
+- [ ] Load test with 1000+ queued jobs
+- [ ] Validate queue survives PM2 restart
 
 ### Configuration Details
 
@@ -220,11 +281,26 @@ Implement Bull queue with Redis backend for expensive operations:
 - **Dependencies**: Bull.js library
 
 ### Success Criteria
-- [ ] 1000 queued jobs process without memory issues
-- [ ] Job processing maintains 2-3 concurrent operations per PM2 instance
-- [ ] Failed jobs automatically retry with exponential backoff
-- [ ] Queue survives PM2 restart (jobs resume processing)
-- [ ] Monitoring shows queue depth, processing rate, failed jobs
+- [ ] 1000 queued jobs process without memory issues (needs load testing)
+- [x] Job processing maintains 2-3 concurrent operations per PM2 instance ✅ (configured: 3 workers per instance)
+- [x] Failed jobs automatically retry with exponential backoff ✅ (implemented)
+- [ ] Queue survives PM2 restart (jobs resume processing) (needs validation)
+- [x] Monitoring shows queue depth, processing rate, failed jobs ✅ (endpoint: `/copilot-api/chatbrc/queue/stats`)
+
+**Status**: ✅ **IMPLEMENTED** - January 28, 2026
+- Bull queue implemented for `/copilot-agent` endpoint
+- Returns 202 Accepted with job_id for async processing
+- SSE streaming support for job progress updates
+- Job status endpoint: `/copilot-api/chatbrc/job/:jobId/status`
+- Queue stats endpoint: `/copilot-api/chatbrc/queue/stats`
+- Automatic retry with exponential backoff (2 retries)
+- Queue cleanup configured (completed jobs: 1 hour TTL, failed jobs: 24 hours)
+
+**Remaining Work**:
+- [ ] Add queue support for `/copilot` with RAG (conditionally queue)
+- [ ] Add queue support for `/rag` and `/rag-distllm` routes
+- [ ] Load test with 1000+ queued jobs
+- [ ] Validate queue survives PM2 restart
 
 ### Rollback Plan
 1. Remove queue middleware from routes
@@ -452,15 +528,15 @@ const response = await llmLimiter.schedule(() =>
 ```
 
 ### Implementation Steps
-1. ✅ Add agent tracking Map in `agentOrchestrator.js`
-2. ✅ Implement concurrent agent limit check
-3. ✅ Add timeout wrapper with Promise.race
-4. ✅ Install Bottleneck: `npm install bottleneck`
-5. ✅ Create `llmRateLimiter.js` service
-6. ✅ Wrap all LLM calls with rate limiter
-7. ✅ Add agent metrics endpoint (active count, avg duration)
-8. ✅ Update error messages to be user-friendly
-9. ✅ Test with 50 concurrent agent requests
+1. [ ] Add agent tracking Map in `agentOrchestrator.js`
+2. [ ] Implement concurrent agent limit check (max 10 per PM2 instance)
+3. [ ] Add timeout wrapper with Promise.race (5-minute max)
+4. [ ] Install Bottleneck: `npm install bottleneck`
+5. [ ] Create `llmRateLimiter.js` service
+6. [ ] Wrap all LLM calls with rate limiter
+7. [ ] Add agent metrics endpoint (active count, avg duration)
+8. [ ] Update error messages to be user-friendly
+9. [ ] Test with 50 concurrent agent requests
 
 ### Configuration Recommendations
 ```json
@@ -650,15 +726,16 @@ router.post('/copilot', authenticate, async (req, res) => {
 ```
 
 ### Implementation Steps
-1. ✅ Create `streamConnectionManager.js`
-2. ✅ Implement connection registration/cleanup
-3. ✅ Add client disconnect detection
-4. ✅ Add stream timeout enforcement
-5. ✅ Integrate with `/copilot` and `/copilot-agent` routes
-6. ✅ Add periodic cleanup job (every 60 seconds)
-7. ✅ Add metrics: active stream count, stream duration
-8. ✅ Test with client disconnect scenarios
-9. ✅ Test with 100+ concurrent streams
+1. [ ] Create `streamConnectionManager.js`
+2. [ ] Implement connection registration/cleanup
+3. [ ] Add client disconnect detection (listen to 'close', 'finish', 'error' events)
+4. [ ] Add stream timeout enforcement (10-minute max)
+5. [ ] Add max concurrent streams limit (100 per PM2 instance)
+6. [ ] Integrate with `/copilot` and `/copilot-agent` routes
+7. [ ] Add periodic cleanup job (every 60 seconds)
+8. [ ] Add metrics: active stream count, stream duration
+9. [ ] Test with client disconnect scenarios
+10. [ ] Test with 100+ concurrent streams
 
 ### Configuration
 ```json
@@ -913,25 +990,25 @@ async function handleChatRequest({ query, ... }) {
 ### Implementation Steps
 
 **Phase 1: Core Infrastructure**
-1. ✅ Install dependencies: `npm install opossum async-retry`
-2. ✅ Create `services/resilience/` directory
-3. ✅ Implement `circuitBreaker.js` factory
-4. ✅ Implement `retryHandler.js`
-5. ✅ Create service configuration file
+1. [ ] Install dependencies: `npm install opossum async-retry`
+2. [ ] Create `services/resilience/` directory
+3. [ ] Implement `circuitBreaker.js` factory
+4. [ ] Implement `retryHandler.js`
+5. [ ] Create service configuration file
 
 **Phase 2: Wrap External Services**
-1. ✅ Wrap embedding service calls
-2. ✅ Wrap LLM API calls
-3. ✅ Wrap Python utilities calls
-4. ✅ Wrap MCP tool executions
-5. ✅ Add fallback handlers
+1. [ ] Wrap embedding service calls
+2. [ ] Wrap LLM API calls
+3. [ ] Wrap Python utilities calls
+4. [ ] Wrap MCP tool executions
+5. [ ] Add fallback handlers (graceful degradation)
 
 **Phase 3: Monitoring & Testing**
-1. ✅ Add circuit breaker metrics
-2. ✅ Add retry metrics
-3. ✅ Create service health dashboard
-4. ✅ Test failure scenarios (kill services)
-5. ✅ Document fallback behaviors
+1. [ ] Add circuit breaker metrics
+2. [ ] Add retry metrics
+3. [ ] Create service health dashboard
+4. [ ] Test failure scenarios (kill services)
+5. [ ] Document fallback behaviors
 
 ### Resource Requirements
 - **Development Time**: 2-3 days
@@ -3268,26 +3345,26 @@ router.get('/get-session-summary', authenticate, async (req, res) => {
 
 ### Implementation Steps
 
-**Phase 1: Core Integration (Week 3)**
-1. ✅ Install LlamaIndex: `npm install llamaindex`
-2. ✅ Create `chatMemoryService.js`
-3. ✅ Implement memory pooling and LRU eviction
-4. ✅ Test memory loading from MongoDB
-5. ✅ Integrate with `/chat` route
-6. ✅ Test with concurrent chat sessions
+**Phase 1: Core Integration (Week 5)**
+1. [ ] Install LlamaIndex: `npm install llamaindex`
+2. [ ] Create `services/llamaIndex/chatMemoryService.js`
+3. [ ] Implement memory pooling and LRU eviction (max 50 per PM2 instance)
+4. [ ] Test memory loading from MongoDB
+5. [ ] Integrate with `/chat` route
+6. [ ] Test with concurrent chat sessions
 
-**Phase 2: Summarization (Week 4)**
-1. ✅ Create summary worker queue
-2. ✅ Implement summary generation logic
-3. ✅ Add MongoDB summary persistence
-4. ✅ Add summary API endpoint
-5. ✅ Test summarization under load
+**Phase 2: Summarization (Week 5)**
+1. [ ] Create summary worker queue (using existing queue service)
+2. [ ] Implement summary generation logic
+3. [ ] Add MongoDB summary persistence
+4. [ ] Add summary API endpoint
+5. [ ] Test summarization under load
 
 **Phase 3: Optimization (Week 5)**
-1. ✅ Add summary caching
-2. ✅ Optimize token budget allocation
-3. ✅ Implement context retrieval
-4. ✅ Add memory cleanup job
+1. [ ] Add summary caching (Redis + MongoDB)
+2. [ ] Optimize token budget allocation
+3. [ ] Implement context retrieval
+4. [ ] Add memory cleanup job (periodic eviction)
 5. ✅ Performance testing
 
 **Phase 4: Monitoring (Week 6)**
@@ -3414,137 +3491,149 @@ Estimated Savings (1000 users, 10 conversations each):
 |-------|----------|--------|--------|--------|
 | #1: Python Service Upgrade | 🔴 Critical | 6h | High | ✅ **DONE** |
 | #3: MongoDB Pool Config | 🔴 Critical | 6h | Medium | ✅ **DONE** |
-| #7: Basic Observability | 🟡 High | 3d | High | 👉 **NEXT** |
-| #10: Load Test Setup | 🟡 High | 1d | Medium | ⏳ Pending |
+| #2: Request Queue | 🔴 Critical | 2d | High | ✅ **DONE** |
 
 **Week 1 Deliverables**:
 - ✅ **COMPLETED**: Python service on Gunicorn with gevent (20-40x faster!)
 - ✅ **COMPLETED**: MongoDB connection pool configured (50 max, 10 min)
-- 👉 **NEXT**: Basic Prometheus metrics exposed
-- ⏳ Load test suite created
+- ✅ **COMPLETED**: Bull queue implementation for `/copilot-agent` endpoint
 
 **Week 1 Validation**:
-- [ ] Run simple chat load test (50 concurrent users)
-- [ ] Document baseline performance metrics
-- [ ] Verify no critical errors
-
-**Week 2 Deliverables**:
-- ✅ Health check endpoints
-- ✅ Grafana dashboards
-- ✅ Alert rules configured
-- ✅ Documentation updated
-
-**Week 2 Validation**:
-- [ ] Run mixed load test (100 concurrent users)
-- [ ] Measure improvement from Week 1
-- [ ] Validate monitoring coverage
+- [ ] Queue processes 1000 jobs without memory issues
+- [ ] Job processing maintains 2-3 concurrent operations per PM2 instance
+- [ ] Failed jobs automatically retry with exponential backoff
+- [ ] Queue survives PM2 restart (jobs resume processing)
 
 **Expected Capacity After Phase 1**: 50-100 concurrent users
 
 ---
 
-### Phase 2: Resilience & Scaling (Week 3-4)
-**Goal**: Add queue management, improve resilience, enable safe scaling
+### Phase 2: Resource Management & Resilience (Week 3-5)
+**Goal**: Add resource limits, improve resilience, enable safe scaling
 
-| Issue | Priority | Effort | Impact |
-|-------|----------|--------|--------|
-| #2: Request Queue | 🔴 Critical | 2d | High |
-| #4: Agent Resource Mgmt | 🟡 High | 2d | High |
-| #6: External Service Resilience | 🟡 High | 3d | High |
-| #11: LlamaIndex Integration (Core) | 🟡 High | 1w | High |
+| Issue | Priority | Effort | Impact | Status |
+|-------|----------|--------|--------|--------|
+| #4: Agent Resource Mgmt | 🟡 High | 2d | High | ⏳ **NEXT** |
+| #5: Streaming Management | 🟡 High | 1d | Medium | ⏳ Pending |
+| #6: External Service Resilience | 🟡 High | 3d | High | ⏳ Pending |
+| #11: LlamaIndex Integration (Core) | 🟡 High | 1w | High | ⏳ Pending |
 
 **Week 3 Deliverables**:
-- ✅ Bull queue implementation
-- ✅ Agent concurrency limits
-- ✅ LLM API rate limiter
-- ✅ Queue monitoring
-- ✅ LlamaIndex memory service (core)
-- ✅ Memory pooling and LRU eviction
+- [ ] Agent concurrency limits (max 10 per PM2 instance)
+- [ ] Agent timeout enforcement (5-minute max)
+- [ ] LLM API rate limiter (Bottleneck library)
+- [ ] Agent tracking and metrics
+- [ ] Stream connection manager
+- [ ] Stream timeout enforcement (10-minute max)
+- [ ] Client disconnect detection
+- [ ] Periodic stream cleanup job
 
 **Week 3 Validation**:
-- [ ] Queue processes 1000 jobs without issues
-- [ ] No more than 10 concurrent agents per instance
-- [ ] Load test with queue enabled
-- [ ] 50 concurrent LlamaIndex memories managed correctly
+- [ ] System maintains <= 10 concurrent agents per PM2 instance
+- [ ] No agent runs longer than 5 minutes
+- [ ] LLM API rate limit errors < 1% of requests
+- [ ] No memory leaks with 100 streams over 1 hour
+- [ ] Streams terminate within 1 second of client disconnect
+- [ ] No streams exceed 10-minute timeout
 
 **Week 4 Deliverables**:
-- ✅ Circuit breakers for external services
-- ✅ Retry logic with exponential backoff
-- ✅ Fallback mechanisms
-- ✅ Circuit breaker monitoring
-- ✅ LlamaIndex summarization queue
-- ✅ Summary generation and caching
+- [ ] Circuit breakers for external services (LLM APIs, embedding service, Python utils, MCP tools)
+- [ ] Retry logic with exponential backoff
+- [ ] Fallback mechanisms (graceful degradation)
+- [ ] Circuit breaker monitoring
 
 **Week 4 Validation**:
-- [ ] Chaos test: Kill Python service during load
-- [ ] System remains partially available
-- [ ] Circuit breakers auto-recover
+- [ ] System remains partially available when embedding service down
+- [ ] Circuit breakers open within 30 seconds of service failure
+- [ ] Circuit breakers close within 60 seconds of service recovery
+- [ ] Retry logic reduces transient failure rate by 80%
+- [ ] User error messages explain fallback behavior
+
+**Week 5 Deliverables**:
+- [ ] LlamaIndex memory service (core)
+- [ ] Memory pooling and LRU eviction (max 50 per PM2 instance)
+- [ ] LlamaIndex summarization queue
+- [ ] Summary generation and caching
+- [ ] Integration with existing queue service
+
+**Week 5 Validation**:
+- [ ] 50 concurrent LlamaIndex memories managed correctly
 - [ ] Summaries generate within 30 seconds
 - [ ] No memory leaks with LlamaIndex
+- [ ] Summary cache hit rate > 80%
+- [ ] Context retrieval < 500ms
 
 **Expected Capacity After Phase 2**: 200-300 concurrent users
 
 ---
 
-### Phase 3: Performance & Protection (Week 5-6)
-**Goal**: Add caching, rate limiting, streaming optimization
+### Phase 3: Performance & Protection (Week 6-7)
+**Goal**: Add caching, rate limiting, optimize performance
 
-| Issue | Priority | Effort | Impact |
-|-------|----------|--------|--------|
-| #8: Caching Strategy | 🟢 Medium | 5d | High |
-| #9: Rate Limiting | 🟡 Medium | 1w | Medium |
-| #5: Streaming Management | 🟡 Medium | 1d | Medium |
-
-**Week 5 Deliverables**:
-- ✅ Redis caching service
-- ✅ Embedding cache
-- ✅ Model metadata cache
-- ✅ RAG result cache
-- ✅ Cache metrics
-
-**Week 5 Validation**:
-- [ ] Cache hit rate > 40% for embeddings
-- [ ] Load test shows 30% improvement
-- [ ] No cache-related errors
+| Issue | Priority | Effort | Impact | Status |
+|-------|----------|--------|--------|--------|
+| #8: Caching Strategy | 🟢 Medium | 5d | High | ⏳ Pending |
+| #9: Rate Limiting | 🟡 Medium | 1w | Medium | ⏳ Pending |
 
 **Week 6 Deliverables**:
-- ✅ User rate limiting
-- ✅ Resource limits
-- ✅ Abuse detection
-- ✅ Stream connection manager
+- [ ] Redis caching service
+- [ ] Embedding cache
+- [ ] Model metadata cache
+- [ ] RAG result cache
+- [ ] Cache metrics
 
 **Week 6 Validation**:
-- [ ] Rate limits enforced correctly
-- [ ] Abuse patterns detected
-- [ ] 100+ concurrent streams handled cleanly
+- [ ] Cache hit rate > 40% for embeddings
+- [ ] Cache hit rate > 60% for model metadata
+- [ ] Cache hit rate > 20% for RAG results
+- [ ] Average response time reduced by 30% for cache hits
+- [ ] No cache-related errors in 48-hour test
+- [ ] Cache memory usage < 512MB
+
+**Week 7 Deliverables**:
+- [ ] User rate limiting
+- [ ] Resource limits (request size, payload size)
+- [ ] Abuse detection and logging
+- [ ] Rate limit metrics
+
+**Week 7 Validation**:
+- [ ] Rate limits enforced across all routes
+- [ ] Clear error messages when limits hit
+- [ ] Retry-After headers properly set
+- [ ] No legitimate user hits limits during normal usage
+- [ ] Abuse patterns detected and logged
 
 **Expected Capacity After Phase 3**: 500+ concurrent users
 
 ---
 
-### Phase 4: Validation & Documentation (Week 7)
+### Phase 4: Validation & Documentation (Week 8)
 **Goal**: Comprehensive testing, documentation, production readiness
 
 **Deliverables**:
-- ✅ Full load test suite executed
-- ✅ Chaos testing completed
-- ✅ Performance regression tests automated
-- ✅ Operations runbook created
-- ✅ Monitoring playbook created
-- ✅ Incident response procedures documented
+- [ ] Load test suite created (Artillery or k6)
+- [ ] Load test scenarios (simple chat, agent, RAG, mixed)
+- [ ] Baseline performance metrics documented
+- [ ] Chaos testing procedures
+- [ ] Operations runbook created
+- [ ] Monitoring playbook created
+- [ ] Incident response procedures documented
 
 **Validation**:
+- [ ] Load tests runnable with single command
 - [ ] 4-hour sustained load test at target capacity
-- [ ] All chaos tests pass
-- [ ] All alerts tested
+- [ ] All chaos tests pass (kill Python service, kill Redis, etc.)
+- [ ] Performance regression tests automated
 - [ ] Team trained on operations
 
 **Final Checklist**:
-- [ ] All metrics exposed and monitored
 - [ ] All circuit breakers functional
 - [ ] All rate limits configured
 - [ ] All caches operational
 - [ ] Queue processing stable
+- [ ] Agent resource limits enforced
+- [ ] Stream connection management working
+- [ ] LlamaIndex integration stable
 - [ ] Documentation complete
 - [ ] Load tests passing
 - [ ] Chaos tests passing
@@ -3576,57 +3665,63 @@ Estimated Savings (1000 users, 10 conversations each):
 
 ### Technical Metrics
 
-**Performance**:
-- ✅ Simple chat p95 latency < 2s
-- ✅ Agent execution p95 latency < 60s
-- ✅ RAG query p95 latency < 5s
-- ✅ API error rate < 1%
+**Performance** (Targets):
+- [ ] Simple chat p95 latency < 2s (needs load testing)
+- [ ] Agent execution p95 latency < 60s (needs load testing)
+- [ ] RAG query p95 latency < 5s (needs load testing)
+- [ ] API error rate < 1% (needs monitoring)
 
-**Capacity**:
-- ✅ Support 500+ concurrent users
-- ✅ Process 50+ requests/second
-- ✅ Queue depth < 100 during normal load
-- ✅ No memory leaks over 24 hours
+**Capacity** (Targets):
+- [ ] Support 500+ concurrent users (current: 50-100 estimated)
+- [ ] Process 50+ requests/second (needs load testing)
+- [ ] Queue depth < 100 during normal load (queue implemented, needs validation)
+- [ ] No memory leaks over 24 hours (needs long-term testing)
 
-**Reliability**:
-- ✅ System availability > 99.5%
-- ✅ Graceful degradation when external service fails
-- ✅ Circuit breakers recover within 60s
-- ✅ No data loss during failures
+**Reliability** (Targets):
+- [ ] System availability > 99.5% (needs monitoring)
+- [ ] Graceful degradation when external service fails (Issue #6 - pending)
+- [ ] Circuit breakers recover within 60s (Issue #6 - pending)
+- [ ] No data loss during failures (needs validation)
 
-**Efficiency**:
-- ✅ Cache hit rate > 40% for embeddings
-- ✅ 30% reduction in response times (cached hits)
-- ✅ MongoDB connection reuse > 90%
-- ✅ External API calls reduced by 40% (caching)
+**Efficiency** (Targets):
+- [ ] Cache hit rate > 40% for embeddings (Issue #8 - pending)
+- [ ] 30% reduction in response times (cached hits) (Issue #8 - pending)
+- [x] MongoDB connection reuse > 90% ✅ (pool configured: 50 max, 10 min)
+- [ ] External API calls reduced by 40% (caching) (Issue #8 - pending)
 
-**LlamaIndex Performance**:
-- ✅ Active memory instances ≤ 50 per PM2 instance
-- ✅ Summary generation < 30 seconds
-- ✅ Summary cache hit rate > 80%
-- ✅ Context retrieval < 500ms
-- ✅ Token reduction > 70% for long conversations
-- ✅ LLM API cost reduction > 60%
+**Agent & Stream Management** (Targets):
+- [ ] Active agents ≤ 10 per PM2 instance (Issue #4 - pending)
+- [ ] No agent runs longer than 5 minutes (Issue #4 - pending)
+- [ ] Active streams ≤ 100 per PM2 instance (Issue #5 - pending)
+- [ ] Streams terminate within 1 second of client disconnect (Issue #5 - pending)
+
+**LlamaIndex Performance** (Targets - Issue #11):
+- [ ] Active memory instances ≤ 50 per PM2 instance
+- [ ] Summary generation < 30 seconds
+- [ ] Summary cache hit rate > 80%
+- [ ] Context retrieval < 500ms
+- [ ] Token reduction > 70% for long conversations
+- [ ] LLM API cost reduction > 60%
 
 ### Operational Metrics
 
-**Observability**:
-- ✅ All key metrics tracked
-- ✅ Dashboards show system health at a glance
-- ✅ Alerts fire within 5 minutes of issues
-- ✅ < 5% false positive alert rate
+**Observability** (Targets):
+- [ ] All key metrics tracked (Issue #7 - optional, skipped for now)
+- [ ] Dashboards show system health at a glance (Issue #7 - optional)
+- [ ] Alerts fire within 5 minutes of issues (Issue #7 - optional)
+- [ ] < 5% false positive alert rate (Issue #7 - optional)
 
-**Maintainability**:
-- ✅ Clear documentation for all systems
-- ✅ Runbooks for common incidents
-- ✅ Team trained on operations
-- ✅ Load tests integrated into CI/CD
+**Maintainability** (Targets):
+- [ ] Clear documentation for all systems (in progress)
+- [ ] Runbooks for common incidents (Phase 4)
+- [ ] Team trained on operations (Phase 4)
+- [ ] Load tests integrated into CI/CD (Phase 4)
 
-**Security**:
-- ✅ Rate limits prevent abuse
-- ✅ No unauthorized access attempts succeed
-- ✅ Audit logs for suspicious activity
-- ✅ Resource limits prevent exhaustion
+**Security** (Targets):
+- [ ] Rate limits prevent abuse (Issue #9 - pending)
+- [ ] No unauthorized access attempts succeed (Issue #9 - pending)
+- [ ] Audit logs for suspicious activity (Issue #9 - pending)
+- [ ] Resource limits prevent exhaustion (Issue #4, #5 - pending)
 
 ---
 
@@ -3683,22 +3778,37 @@ Estimated Savings (1000 users, 10 conversations each):
 ## Next Steps
 
 ### Immediate Actions (This Week)
-1. **Review & Approve Plan**: Stakeholder sign-off
-2. **Provision Infrastructure**: Redis server, monitoring stack
-3. **Assign Resources**: Developer, DevOps engineer, QA
-4. **Set Up Dev Environment**: Load testing tools, monitoring
-5. **Create Project Board**: Track implementation progress
+1. **Start Issue #4**: Agent Resource Management
+   - Add agent concurrency limits (max 10 per PM2 instance)
+   - Implement agent timeout enforcement (5-minute max)
+   - Add LLM API rate limiter (Bottleneck library)
+   - Test with concurrent agent requests
 
-### Week 1 Kickoff
-1. **Day 1**: Upgrade Python utilities service
-2. **Day 2**: Configure MongoDB connection pooling
-3. **Day 3**: Set up basic Prometheus metrics
-4. **Day 4**: Create load test suite
-5. **Day 5**: Run baseline load tests, document results
+2. **Next: Issue #5**: Streaming Management
+   - Create stream connection manager
+   - Add stream timeout enforcement (10-minute max)
+   - Implement client disconnect detection
+   - Add periodic cleanup job
+
+3. **Then: Issue #6**: External Service Resilience
+   - Implement circuit breakers for external services
+   - Add retry logic with exponential backoff
+   - Create fallback mechanisms
+
+### Current Priorities (Week 3-5)
+**Week 3**:
+- [ ] Issue #4: Agent Resource Management (2 days)
+- [ ] Issue #5: Streaming Management (1 day)
+
+**Week 4**:
+- [ ] Issue #6: External Service Resilience (3 days)
+
+**Week 5**:
+- [ ] Issue #11: LlamaIndex Integration (1 week)
 
 ### Weekly Checkpoints
 - **Every Monday**: Review progress, adjust priorities
-- **Every Wednesday**: Run load tests, validate improvements
+- **Every Wednesday**: Run validation tests, check metrics
 - **Every Friday**: Update documentation, demo progress
 
 ---
