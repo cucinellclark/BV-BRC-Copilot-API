@@ -479,13 +479,19 @@ async function executeAgentLoop(opts) {
           if (hasSummary) {
             logger.info('Using tool summary directly as final response', { 
               tool: nextAction.action,
-              summaryLength: safeResult.summary.length 
+              summaryLength: safeResult.summary.length,
+              streaming: stream && !!responseStream
             });
             finalResponse = safeResult.summary;
             
-            // If streaming, emit the summary as chunks
+            // If streaming, emit the summary in smaller chunks for better UX
             if (stream && responseStream) {
-              emitSSE(responseStream, 'final_response', { chunk: finalResponse });
+              // Split into words and stream them
+              const words = finalResponse.split(' ');
+              for (let i = 0; i < words.length; i++) {
+                const word = i === 0 ? words[i] : ' ' + words[i];
+                emitSSE(responseStream, 'final_response', { chunk: word });
+              }
             }
           } else {
             // Otherwise, generate a final response using LLM
@@ -656,7 +662,12 @@ async function executeAgentLoop(opts) {
         message_id: assistantMessage.message_id
       });
       responseStream.end();
-      return; // Don't return response object in streaming mode
+      // Return minimal metadata for queue service
+      return {
+        iterations: iteration,
+        toolsUsed: Object.keys(toolResults),
+        message_id: assistantMessage.message_id
+      };
     }
     
     return {

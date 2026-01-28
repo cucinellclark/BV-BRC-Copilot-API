@@ -20,7 +20,7 @@ const {
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
-const { addAgentJob, getJobStatus, getQueueStats } = require('../services/queueService');
+const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback } = require('../services/queueService');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -79,7 +79,7 @@ router.post('/copilot', authenticate, async (req, res) => {
     }
 });
 
-// ========== AGENT COPILOT ROUTE (QUEUED) ==========
+// ========== AGENT COPILOT ROUTE (QUEUED WITH STREAMING) ==========
 router.post('/copilot-agent', authenticate, async (req, res) => {
     const logger = createLogger('AgentRoute', req.body.session_id);
     
@@ -92,7 +92,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             system_prompt = '', 
             save_chat = true,
             include_history = true,
-            auth_token = null
+            auth_token = null,
+            stream = true  // Default to streaming
         } = req.body;
 
         // Validate required fields
@@ -108,45 +109,146 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             });
         }
 
-        // Get max_iterations from config (system-level setting)
         const max_iterations = config.agent?.max_iterations || 8;
 
-        logger.info('Agent request received - adding to queue', { 
+        logger.info('Agent request received', { 
             query_preview: query.substring(0, 100),
             model, 
             session_id, 
             user_id, 
             save_chat,
-            max_iterations
-        });
-
-        // Add job to queue
-        const job = await addAgentJob({
-            query,
-            model,
-            session_id,
-            user_id,
-            system_prompt,
-            save_chat,
-            include_history,
             max_iterations,
-            auth_token
+            streaming: stream
         });
 
-        logger.info('Agent job queued successfully', { 
-            jobId: job.id,
-            session_id,
-            user_id
-        });
+        if (stream) {
+            // ========== STREAMING PATH ==========
+            logger.debug('Using streaming response with queue');
+            
+            // Set SSE headers
+            res.set({
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no'
+            });
+            
+            // Flush headers immediately
+            if (typeof res.flushHeaders === 'function') {
+                res.flushHeaders();
+            }
 
-        // Return 202 Accepted with job ID
-        res.status(202).json({
-            message: 'Agent job queued successfully',
-            job_id: job.id,
-            session_id: session_id,
-            status_endpoint: `/copilot-api/chatbrc/job/${job.id}/status`,
-            poll_interval_ms: config.agent?.job_poll_interval || 1000
-        });
+            // Track if connection is still open
+            let connectionClosed = false;
+
+            // Handle client disconnect
+            req.on('close', () => {
+                logger.info('Client disconnected from stream', { session_id });
+                connectionClosed = true;
+                // Job continues in background, result saved to DB
+            });
+
+            // Create streaming callback
+            const streamCallback = (eventType, data) => {
+                if (connectionClosed || res.writableEnded) {
+                    return; // Connection closed, stop trying to write
+                }
+                
+                try {
+                    // Write SSE event
+                    res.write(`event: ${eventType}\n`);
+                    res.write(`data: ${JSON.stringify(data)}\n\n`);
+                    
+                    // Close stream if done or error
+                    if (eventType === 'done' || eventType === 'error') {
+                        res.end();
+                    }
+                } catch (error) {
+                    logger.error('Failed to write to stream', { 
+                        error: error.message,
+                        eventType 
+                    });
+                    connectionClosed = true;
+                }
+            };
+
+            // Send initial connection confirmation
+            res.write(': connected\n\n');
+
+            // Add job to queue with streaming callback
+            const job = await addAgentJob({
+                query,
+                model,
+                session_id,
+                user_id,
+                system_prompt,
+                save_chat,
+                include_history,
+                max_iterations,
+                auth_token
+            }, {
+                streamCallback
+            });
+
+            logger.info('Streaming job queued', { 
+                jobId: job.id,
+                session_id,
+                user_id
+            });
+
+            // Set up heartbeat to keep connection alive
+            const heartbeatInterval = setInterval(() => {
+                if (connectionClosed || res.writableEnded) {
+                    clearInterval(heartbeatInterval);
+                    return;
+                }
+                
+                try {
+                    res.write(': heartbeat\n\n');
+                } catch (error) {
+                    clearInterval(heartbeatInterval);
+                    connectionClosed = true;
+                }
+            }, 15000); // Every 15 seconds
+
+            // Clean up on connection close
+            req.on('close', () => {
+                clearInterval(heartbeatInterval);
+            });
+
+            // Note: Don't call res.end() here - stream stays open
+            // The streamCallback will call res.end() when job completes
+
+        } else {
+            // ========== NON-STREAMING PATH (ORIGINAL) ==========
+            logger.debug('Using non-streaming response with queue');
+            
+            const job = await addAgentJob({
+                query,
+                model,
+                session_id,
+                user_id,
+                system_prompt,
+                save_chat,
+                include_history,
+                max_iterations,
+                auth_token
+            });
+
+            logger.info('Agent job queued successfully', { 
+                jobId: job.id,
+                session_id,
+                user_id
+            });
+
+            res.status(202).json({
+                message: 'Agent job queued successfully',
+                job_id: job.id,
+                session_id: session_id,
+                status_endpoint: `/copilot-api/chatbrc/job/${job.id}/status`,
+                poll_interval_ms: config.agent?.job_poll_interval || 1000
+            });
+        }
 
     } catch (error) {
         logger.error('Failed to queue agent job', { 
@@ -154,11 +256,26 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             stack: error.stack 
         });
         
-        res.status(500).json({ 
-            message: 'Failed to queue agent job', 
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-        });
+        if (req.body.stream !== false && res.headersSent) {
+            // Streaming: Send error event
+            try {
+                res.write(`event: error\n`);
+                res.write(`data: ${JSON.stringify({ 
+                    message: 'Failed to queue job', 
+                    error: error.message 
+                })}\n\n`);
+                res.end();
+            } catch (e) {
+                // Connection already closed
+            }
+        } else {
+            // Non-streaming: Return 500
+            res.status(500).json({ 
+                message: 'Failed to queue agent job', 
+                error: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            });
+        }
     }
 });
 
@@ -226,6 +343,146 @@ router.get('/queue/stats', authenticate, async (req, res) => {
             message: 'Failed to retrieve queue statistics',
             error: error.message
         });
+    }
+});
+
+// ========== STREAM RECONNECTION ENDPOINT ==========
+router.get('/job/:jobId/stream', authenticate, async (req, res) => {
+    const logger = createLogger('JobStream');
+    const { jobId } = req.params;
+    
+    try {
+        logger.info('Stream reconnection requested', { jobId });
+        
+        // Set SSE headers
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        
+        res.flushHeaders();
+        res.write(': connected\n\n');
+
+        // Get job status
+        const jobStatus = await getJobStatus(jobId);
+        
+        if (!jobStatus.found) {
+            res.write(`event: error\n`);
+            res.write(`data: ${JSON.stringify({ message: 'Job not found' })}\n\n`);
+            res.end();
+            return;
+        }
+
+        // Check job state
+        const state = jobStatus.status;
+        
+        if (state === 'completed') {
+            // Job already done
+            logger.info('Job already completed', { jobId });
+            
+            res.write(`event: started\n`);
+            res.write(`data: ${JSON.stringify({ 
+                job_id: jobId,
+                message: 'Job already completed'
+            })}\n\n`);
+            
+            res.write(`event: done\n`);
+            res.write(`data: ${JSON.stringify({ 
+                job_id: jobId,
+                session_id: jobStatus.data.session_id,
+                message: 'Fetch result from /get-session-messages',
+                iterations: 0,
+                tools_used: [],
+                duration_seconds: 0
+            })}\n\n`);
+            
+            res.end();
+            return;
+        }
+        
+        if (state === 'failed') {
+            // Job failed
+            res.write(`event: error\n`);
+            res.write(`data: ${JSON.stringify({ 
+                job_id: jobId,
+                error: jobStatus.error?.message || 'Job failed'
+            })}\n\n`);
+            res.end();
+            return;
+        }
+
+        // Job is waiting or active, attach new stream callback
+        logger.info('Attaching new stream to active/waiting job', { jobId, state });
+        
+        let connectionClosed = false;
+        
+        const streamCallback = (eventType, data) => {
+            if (connectionClosed || res.writableEnded) return;
+            
+            try {
+                res.write(`event: ${eventType}\n`);
+                res.write(`data: ${JSON.stringify(data)}\n\n`);
+                
+                if (eventType === 'done' || eventType === 'error') {
+                    res.end();
+                }
+            } catch (error) {
+                logger.error('Stream write failed', { error: error.message });
+                connectionClosed = true;
+            }
+        };
+
+        // Register the new callback
+        registerStreamCallback(jobId, streamCallback);
+
+        // Send current status
+        res.write(`event: ${state === 'active' ? 'started' : 'queued'}\n`);
+        res.write(`data: ${JSON.stringify({ 
+            job_id: jobId,
+            status: state,
+            progress: jobStatus.progress,
+            message: state === 'active' ? 'Processing' : 'Waiting in queue',
+            session_id: jobStatus.data.session_id
+        })}\n\n`);
+
+        // Heartbeat
+        const heartbeatInterval = setInterval(() => {
+            if (connectionClosed || res.writableEnded) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            try {
+                res.write(': heartbeat\n\n');
+            } catch (error) {
+                clearInterval(heartbeatInterval);
+                connectionClosed = true;
+            }
+        }, 15000);
+
+        req.on('close', () => {
+            clearInterval(heartbeatInterval);
+            connectionClosed = true;
+            logger.info('Stream reconnection closed', { jobId });
+        });
+
+    } catch (error) {
+        logger.error('Stream reconnection failed', { 
+            jobId,
+            error: error.message 
+        });
+        
+        try {
+            res.write(`event: error\n`);
+            res.write(`data: ${JSON.stringify({ 
+                message: 'Stream reconnection failed',
+                error: error.message
+            })}\n\n`);
+            res.end();
+        } catch (e) {
+            // Connection already closed
+        }
     }
 });
 

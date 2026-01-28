@@ -37,17 +37,48 @@ const agentQueue = new Queue('agent-operations', {
 // Track job progress for status endpoint
 const jobProgress = new Map();
 
+// Map to store streaming callbacks (shared across workers in same process)
+const jobStreamCallbacks = new Map();
+
+/**
+ * Safely emit to stream, handling connection errors
+ * @param {string} jobId - Job ID
+ * @param {string} eventType - SSE event type
+ * @param {Object} data - Event data
+ */
+function safeStreamEmit(jobId, eventType, data) {
+    const callback = jobStreamCallbacks.get(jobId);
+    if (!callback) {
+        return;
+    }
+    
+    try {
+        callback(eventType, data);
+    } catch (error) {
+        logger.warn('Stream callback failed', {
+            jobId,
+            eventType,
+            error: error.message
+        });
+        // Remove dead callback
+        jobStreamCallbacks.delete(jobId);
+    }
+}
+
 /**
  * Process agent jobs
  */
 agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
     const jobLogger = createLogger('AgentWorker', job.data.session_id);
+    const jobId = job.id;
+    const hasStreamCallback = jobStreamCallbacks.has(jobId);
     
     try {
         jobLogger.info('Starting agent job processing', {
             jobId: job.id,
             userId: job.data.user_id,
-            query: job.data.query.substring(0, 100)
+            query: job.data.query.substring(0, 100),
+            streaming: hasStreamCallback
         });
 
         // Initialize progress tracking
@@ -61,12 +92,76 @@ agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
             updatedAt: new Date()
         });
 
-        // Update job progress
+        // Emit started event
+        safeStreamEmit(jobId, 'started', {
+            job_id: jobId,
+            session_id: job.data.session_id,
+            message: 'Processing started',
+            timestamp: new Date().toISOString()
+        });
+
         await job.progress(10);
 
-        // Execute agent loop (non-streaming, save results to DB)
-        // Note: Progress tracking could be enhanced by modifying AgentOrchestrator
-        // to accept a progress callback in the future
+        // Create progress callback for iterations/tools
+        const progressCallback = (iteration, tool, status) => {
+            const progress = jobProgress.get(job.id);
+            if (progress) {
+                progress.currentIteration = iteration;
+                progress.currentTool = tool;
+                progress.status = status || 'active';
+                progress.updatedAt = new Date();
+                jobProgress.set(job.id, progress);
+            }
+            
+            // Stream progress event
+            const percentage = Math.min(90, 10 + (iteration / job.data.max_iterations) * 80);
+            safeStreamEmit(jobId, 'progress', {
+                iteration,
+                max_iterations: job.data.max_iterations,
+                tool,
+                status,
+                percentage: Math.floor(percentage),
+                timestamp: new Date().toISOString()
+            });
+            
+            job.progress(percentage);
+        };
+
+        // Get streaming callback if exists
+        const streamCallback = jobStreamCallbacks.get(jobId);
+        
+        // Create response stream wrapper for agent if streaming
+        const responseStream = streamCallback ? {
+            write: (data) => {
+                // Agent writes SSE format, parse and re-emit
+                if (typeof data === 'string' && data.startsWith('event:')) {
+                    const lines = data.split('\n');
+                    const eventLine = lines.find(l => l.startsWith('event:'));
+                    const dataLine = lines.find(l => l.startsWith('data:'));
+                    
+                    if (eventLine && dataLine) {
+                        const eventType = eventLine.replace('event:', '').trim();
+                        const eventData = dataLine.replace('data:', '').trim();
+                        
+                        try {
+                            const parsed = JSON.parse(eventData);
+                            safeStreamEmit(jobId, eventType, parsed);
+                        } catch (e) {
+                            // Not JSON, treat as plain text content
+                            safeStreamEmit(jobId, 'content', { delta: eventData });
+                        }
+                    }
+                }
+            },
+            end: () => {
+                // Agent calls end() when done streaming
+                // We don't actually end here - we'll send 'done' event later
+            },
+            writableEnded: false,
+            flushHeaders: () => {} // No-op
+        } : null;
+
+        // Execute agent loop with streaming support
         const result = await AgentOrchestrator.executeAgentLoop({
             query: job.data.query,
             model: job.data.model,
@@ -77,10 +172,11 @@ agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
             include_history: job.data.include_history,
             max_iterations: job.data.max_iterations,
             auth_token: job.data.auth_token,
-            stream: false // Always non-streaming in queue
+            stream: !!streamCallback,
+            responseStream: responseStream,
+            progressCallback: progressCallback
         });
 
-        // Mark as completed
         await job.progress(100);
         
         const progress = jobProgress.get(job.id);
@@ -90,12 +186,24 @@ agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
             jobProgress.set(job.id, progress);
         }
 
+        // Emit completion event
+        safeStreamEmit(jobId, 'done', {
+            job_id: jobId,
+            session_id: job.data.session_id,
+            iterations: result.iterations || 0,
+            tools_used: result.toolsUsed || [],
+            duration_seconds: Math.floor((Date.now() - job.timestamp) / 1000),
+            timestamp: new Date().toISOString()
+        });
+
         jobLogger.info('Agent job completed successfully', {
             jobId: job.id,
             iterations: result.iterations || 0
         });
 
-        // Return minimal data (actual result is saved to DB)
+        // Clean up callback
+        jobStreamCallbacks.delete(jobId);
+
         return {
             success: true,
             session_id: job.data.session_id,
@@ -110,7 +218,6 @@ agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
             stack: error.stack
         });
 
-        // Update progress with error
         const progress = jobProgress.get(job.id);
         if (progress) {
             progress.status = 'failed';
@@ -122,7 +229,18 @@ agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
             jobProgress.set(job.id, progress);
         }
 
-        // Re-throw to mark job as failed
+        // Emit error event
+        safeStreamEmit(jobId, 'error', {
+            job_id: jobId,
+            error: error.message,
+            retry_attempt: job.attemptsMade,
+            will_retry: job.attemptsMade < job.opts.attempts,
+            timestamp: new Date().toISOString()
+        });
+
+        // Clean up callback
+        jobStreamCallbacks.delete(jobId);
+
         throw error;
     }
 });
@@ -161,20 +279,38 @@ agentQueue.on('error', (error) => {
 /**
  * Add a new agent job to the queue
  * @param {Object} jobData - Job data containing query, model, user_id, etc.
- * @param {Object} options - Optional job options (priority, delay, etc.)
+ * @param {Object} options - Optional job options
+ * @param {Function} options.streamCallback - Optional streaming callback(eventType, data)
+ * @param {Number} options.priority - Job priority (default: 0)
  * @returns {Object} Job object with job.id
  */
 async function addAgentJob(jobData, options = {}) {
+    const { streamCallback = null, priority = 0, ...bullOptions } = options;
+    
     logger.info('Adding agent job to queue', {
         userId: jobData.user_id,
         sessionId: jobData.session_id,
-        priority: options.priority || 'normal'
+        streaming: !!streamCallback,
+        priority
     });
 
     const job = await agentQueue.add(jobData, {
-        priority: options.priority || 0, // Lower number = higher priority
-        ...options
+        priority,
+        ...bullOptions
     });
+
+    // Store callback reference for worker to access
+    if (streamCallback) {
+        jobStreamCallbacks.set(job.id, streamCallback);
+        
+        // Emit queued event immediately
+        safeStreamEmit(job.id, 'queued', {
+            job_id: job.id,
+            session_id: jobData.session_id,
+            message: 'Job queued successfully',
+            timestamp: new Date().toISOString()
+        });
+    }
 
     // Initialize progress tracking
     jobProgress.set(job.id, {
@@ -276,12 +412,24 @@ async function cleanOldJobs(graceMs = 3600000) {
 }
 
 /**
+ * Register or update streaming callback for an existing job
+ * Used for reconnection support
+ * @param {string} jobId - Job ID
+ * @param {Function} callback - Streaming callback(eventType, data)
+ */
+function registerStreamCallback(jobId, callback) {
+    logger.info('Registering stream callback for job', { jobId });
+    jobStreamCallbacks.set(jobId, callback);
+}
+
+/**
  * Graceful shutdown
  */
 async function shutdown() {
     logger.info('Shutting down queue service...');
     await agentQueue.close();
     jobProgress.clear();
+    jobStreamCallbacks.clear();
     logger.info('Queue service shut down');
 }
 
@@ -295,6 +443,7 @@ module.exports = {
     getJobStatus,
     getQueueStats,
     cleanOldJobs,
+    registerStreamCallback,
     shutdown
 };
 

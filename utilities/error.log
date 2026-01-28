@@ -31,3 +31,66 @@
 [2026-01-28 12:39:38 -0600] [2475944] [INFO] Booting worker with pid: 2475944
 [2026-01-28 12:39:38 -0600] [2475945] [INFO] Booting worker with pid: 2475945
 [2026-01-28 12:39:38 -0600] [2475946] [INFO] Booting worker with pid: 2475946
+[2026-01-28 14:19:42 -0600] [2475931] [INFO] Handling signal: int
+[2026-01-28 14:19:42 -0600] [2475945] [INFO] Worker exiting (pid: 2475945)
+[2026-01-28 14:19:42 -0600] [2475944] [INFO] Worker exiting (pid: 2475944)
+[2026-01-28 14:19:42 -0600] [2475946] [INFO] Worker exiting (pid: 2475946)
+[2026-01-28 14:19:42 -0600] [2475943] [INFO] Worker exiting (pid: 2475943)
+[2026-01-28 14:19:47 -0600] [2513725] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 14:19:47 -0600] [2513725] [INFO] Listening at: http://0.0.0.0:5000 (2513725)
+[2026-01-28 14:19:47 -0600] [2513725] [INFO] Using worker: gevent
+[2026-01-28 14:19:47 -0600] [2513733] [INFO] Booting worker with pid: 2513733
+[2026-01-28 14:19:48 -0600] [2513734] [INFO] Booting worker with pid: 2513734
+[2026-01-28 14:19:48 -0600] [2513735] [INFO] Booting worker with pid: 2513735
+[2026-01-28 14:19:48 -0600] [2513736] [INFO] Booting worker with pid: 2513736
+[2026-01-28 14:20:35 -0600] [2513725] [INFO] Handling signal: int
+[2026-01-28 14:20:35 -0600] [2513733] [INFO] Worker exiting (pid: 2513733)
+[2026-01-28 14:20:35 -0600] [2513734] [INFO] Worker exiting (pid: 2513734)
+[2026-01-28 14:20:35 -0600] [2513736] [INFO] Worker exiting (pid: 2513736)
+[2026-01-28 14:20:35 -0600] [2513735] [INFO] Worker exiting (pid: 2513735)
+[2026-01-28 14:20:36 -0600] [2513725] [INFO] Shutting down: Master
+[2026-01-28 14:20:43 -0600] [2514231] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 14:20:43 -0600] [2514231] [INFO] Listening at: http://0.0.0.0:5000 (2514231)
+[2026-01-28 14:20:43 -0600] [2514231] [INFO] Using worker: gevent
+[2026-01-28 14:20:43 -0600] [2514250] [INFO] Booting worker with pid: 2514250
+[2026-01-28 14:20:43 -0600] [2514251] [INFO] Booting worker with pid: 2514251
+[2026-01-28 14:20:43 -0600] [2514252] [INFO] Booting worker with pid: 2514252
+[2026-01-28 14:20:43 -0600] [2514253] [INFO] Booting worker with pid: 2514253
+[2026-01-28 14:22:47 -0600] [2514231] [INFO] Handling signal: int
+[2026-01-28 14:22:47 -0600] [2514252] [INFO] Worker exiting (pid: 2514252)
+[2026-01-28 14:22:47 -0600] [2514250] [INFO] Worker exiting (pid: 2514250)
+[2026-01-28 14:22:47 -0600] [2514253] [INFO] Worker exiting (pid: 2514253)
+[2026-01-28 14:22:47 -0600] [2514251] [INFO] Worker exiting (pid: 2514251)
+[2026-01-28 14:22:49 -0600] [2514231] [INFO] Shutting down: Master
+[2026-01-28 14:22:52 -0600] [2515201] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 14:22:52 -0600] [2515201] [INFO] Listening at: http://0.0.0.0:5000 (2515201)
+[2026-01-28 14:22:52 -0600] [2515201] [INFO] Using worker: gevent
+[2026-01-28 14:22:52 -0600] [2515214] [INFO] Booting worker with pid: 2515214
+[2026-01-28 14:22:52 -0600] [2515215] [INFO] Booting worker with pid: 2515215
+[2026-01-28 14:22:53 -0600] [2515216] [INFO] Booting worker with pid: 2515216
+[2026-01-28 14:22:53 -0600] [2515221] [INFO] Booting worker with pid: 2515221
+[2026-01-28 14:25:11 -0600] [2515201] [INFO] Handling signal: int
+[2026-01-28 14:25:11 -0600] [2515214] [INFO] Worker exiting (pid: 2515214)
+[2026-01-28 14:25:11 -0600] [2515221] [INFO] Worker exiting (pid: 2515221)
+[2026-01-28 14:25:11 -0600] [2515216] [INFO] Worker exiting (pid: 2515216)
+[2026-01-28 14:25:11 -0600] [2515215] [INFO] Worker exiting (pid: 2515215)
+[2026-01-28 14:25:13 -0600] [2515201] [INFO] Shutting down: Master
+[2026-01-28 14:25:57 -0600] [2516585] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 14:25:57 -0600] [2516585] [INFO] Listening at: http://0.0.0.0:5000 (2516585)
+[2026-01-28 14:25:57 -0600] [2516585] [INFO] Using worker: gevent
+[2026-01-28 14:25:57 -0600] [2516594] [INFO] Booting worker with pid: 2516594
+[2026-01-28 14:25:57 -0600] [2516595] [INFO] Booting worker with pid: 2516595
+[2026-01-28 14:25:57 -0600] [2516596] [INFO] Booting worker with pid: 2516596
+[2026-01-28 14:25:57 -0600] [2516599] [INFO] Booting worker with pid: 2516599
+[2026-01-28 14:29:17 -0600] [2516585] [INFO] Handling signal: int
+[2026-01-28 14:29:17 -0600] [2516596] [INFO] Worker exiting (pid: 2516596)
+[2026-01-28 14:29:17 -0600] [2516595] [INFO] Worker exiting (pid: 2516595)
+[2026-01-28 14:29:17 -0600] [2516599] [INFO] Worker exiting (pid: 2516599)
+[2026-01-28 14:29:17 -0600] [2516594] [INFO] Worker exiting (pid: 2516594)
+[2026-01-28 14:29:20 -0600] [2517855] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 14:29:20 -0600] [2517855] [INFO] Listening at: http://0.0.0.0:5000 (2517855)
+[2026-01-28 14:29:20 -0600] [2517855] [INFO] Using worker: gevent
+[2026-01-28 14:29:20 -0600] [2517866] [INFO] Booting worker with pid: 2517866
+[2026-01-28 14:29:20 -0600] [2517867] [INFO] Booting worker with pid: 2517867
+[2026-01-28 14:29:20 -0600] [2517868] [INFO] Booting worker with pid: 2517868
+[2026-01-28 14:29:20 -0600] [2517869] [INFO] Booting worker with pid: 2517869
