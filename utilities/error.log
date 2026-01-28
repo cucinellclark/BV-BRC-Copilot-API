@@ -1,0 +1,33 @@
+[2026-01-28 12:34:50 -0600] [2473843] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 12:34:50 -0600] [2473843] [INFO] Listening at: http://0.0.0.0:5000 (2473843)
+[2026-01-28 12:34:50 -0600] [2473843] [INFO] Using worker: gevent
+[2026-01-28 12:34:50 -0600] [2473852] [INFO] Booting worker with pid: 2473852
+[2026-01-28 12:34:50 -0600] [2473853] [INFO] Booting worker with pid: 2473853
+[2026-01-28 12:34:50 -0600] [2473854] [INFO] Booting worker with pid: 2473854
+[2026-01-28 12:34:50 -0600] [2473857] [INFO] Booting worker with pid: 2473857
+[2026-01-28 12:37:22 -0600] [2473843] [INFO] Handling signal: int
+[2026-01-28 12:37:22 -0600] [2473853] [INFO] Worker exiting (pid: 2473853)
+[2026-01-28 12:37:22 -0600] [2473857] [INFO] Worker exiting (pid: 2473857)
+[2026-01-28 12:37:22 -0600] [2473854] [INFO] Worker exiting (pid: 2473854)
+[2026-01-28 12:37:22 -0600] [2473852] [INFO] Worker exiting (pid: 2473852)
+[2026-01-28 12:37:24 -0600] [2473843] [INFO] Shutting down: Master
+[2026-01-28 12:37:27 -0600] [2474868] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 12:37:27 -0600] [2474868] [INFO] Listening at: http://0.0.0.0:5000 (2474868)
+[2026-01-28 12:37:27 -0600] [2474868] [INFO] Using worker: gevent
+[2026-01-28 12:37:27 -0600] [2474879] [INFO] Booting worker with pid: 2474879
+[2026-01-28 12:37:27 -0600] [2474880] [INFO] Booting worker with pid: 2474880
+[2026-01-28 12:37:27 -0600] [2474882] [INFO] Booting worker with pid: 2474882
+[2026-01-28 12:37:27 -0600] [2474883] [INFO] Booting worker with pid: 2474883
+[2026-01-28 12:39:15 -0600] [2474868] [INFO] Handling signal: int
+[2026-01-28 12:39:15 -0600] [2474883] [INFO] Worker exiting (pid: 2474883)
+[2026-01-28 12:39:15 -0600] [2474880] [INFO] Worker exiting (pid: 2474880)
+[2026-01-28 12:39:15 -0600] [2474879] [INFO] Worker exiting (pid: 2474879)
+[2026-01-28 12:39:15 -0600] [2474882] [INFO] Worker exiting (pid: 2474882)
+[2026-01-28 12:39:16 -0600] [2474868] [INFO] Shutting down: Master
+[2026-01-28 12:39:38 -0600] [2475931] [INFO] Starting gunicorn 23.0.0
+[2026-01-28 12:39:38 -0600] [2475931] [INFO] Listening at: http://0.0.0.0:5000 (2475931)
+[2026-01-28 12:39:38 -0600] [2475931] [INFO] Using worker: gevent
+[2026-01-28 12:39:38 -0600] [2475943] [INFO] Booting worker with pid: 2475943
+[2026-01-28 12:39:38 -0600] [2475944] [INFO] Booting worker with pid: 2475944
+[2026-01-28 12:39:38 -0600] [2475945] [INFO] Booting worker with pid: 2475945
+[2026-01-28 12:39:38 -0600] [2475946] [INFO] Booting worker with pid: 2475946
