@@ -19,6 +19,7 @@ const { safeParseJson } = require('./jsonUtils');
 const promptManager = require('../prompts');
 const mcpConfig = require('./mcp/config.json');
 const { createLogger } = require('./logger');
+const fs = require('fs').promises;
 
 function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   // Check if this is a RAG result (has documents and summary)
@@ -271,6 +272,7 @@ async function executeAgentLoop(opts) {
   const toolResults = {};
   const collectedRagDocs = [];
   let iteration = 0;
+  let finalResponseSourceTool = null; // Track which tool generated the final response
   let finalResponse = null;
   
   // Get auth token (from opts or config)
@@ -403,7 +405,8 @@ async function executeAgentLoop(opts) {
           history,
           stream,
           responseStream,
-          logger
+          logger,
+          null // No specific tool for FINALIZE action
         );
         break;
       }
@@ -487,22 +490,55 @@ async function executeAgentLoop(opts) {
               streaming: stream && !!responseStream
             });
             finalResponse = safeResult.summary;
+            finalResponseSourceTool = nextAction.action; // Track the source tool
             
-            // If streaming, emit the summary in smaller chunks for better UX
+            // If streaming, emit the complete summary at once
             if (stream && responseStream) {
-              // Split into words and stream them
-              const words = finalResponse.split(' ');
-              for (let i = 0; i < words.length; i++) {
-                const word = i === 0 ? words[i] : ' ' + words[i];
-                emitSSE(responseStream, 'final_response', { chunk: word });
+              emitSSE(responseStream, 'final_response', { chunk: finalResponse, tool: nextAction.action });
+            }
+          } else if (safeResult && safeResult.type === 'file_reference' && safeResult.filePath) {
+            // For FINALIZE tools that return file_reference (e.g., workflow generation),
+            // read the file content and send it directly to the user
+            try {
+              logger.info('Reading file content for direct submission', {
+                tool: nextAction.action,
+                filePath: safeResult.filePath
+              });
+              const fileContent = await fs.readFile(safeResult.filePath, 'utf8');
+              finalResponse = fileContent;
+              finalResponseSourceTool = nextAction.action; // Track the source tool
+              
+              // If streaming, emit the complete file content at once
+              if (stream && responseStream) {
+                emitSSE(responseStream, 'final_response', { chunk: finalResponse, tool: nextAction.action });
               }
+            } catch (fileError) {
+              logger.error('Failed to read file content for direct submission', {
+                tool: nextAction.action,
+                filePath: safeResult.filePath,
+                error: fileError.message
+              });
+              // Fall back to LLM generation if file read fails
+              finalResponse = await generateFinalResponse(
+                query,
+                system_prompt,
+                executionTrace,
+                toolResults,
+                model,
+                history,
+                stream,
+                responseStream,
+                logger
+              );
             }
           } else {
             // Otherwise, generate a final response using LLM
-            logger.info('No summary in result, generating final response via LLM', {
+            logger.info('No summary or file_reference in result, generating final response via LLM', {
               tool: nextAction.action,
-              resultKeys: Object.keys(safeResult || {})
+              resultKeys: Object.keys(safeResult || {}),
+              resultType: safeResult?.type
             });
+            finalResponseSourceTool = nextAction.action; // Track the source tool
             finalResponse = await generateFinalResponse(
               query,
               system_prompt,
@@ -512,7 +548,8 @@ async function executeAgentLoop(opts) {
               history,
               stream,
               responseStream,
-              logger
+              logger,
+              nextAction.action // Pass tool name for tracking
             );
           }
           break;
@@ -575,7 +612,8 @@ async function executeAgentLoop(opts) {
             history,
             stream,
             responseStream,
-            logger
+            logger,
+            null // Error case, no specific tool
           );
           break;
         }
@@ -594,7 +632,8 @@ async function executeAgentLoop(opts) {
         history,
         stream,
         responseStream,
-        logger
+        logger,
+        null // Max iterations, no specific tool
       );
     }
     
@@ -605,6 +644,11 @@ async function executeAgentLoop(opts) {
     
     // Create assistant message with the final response
     const assistantMessage = createMessage('assistant', finalResponse);
+    
+    // Add tool metadata if the response was generated by a specific tool
+    if (finalResponseSourceTool) {
+      assistantMessage.source_tool = finalResponseSourceTool;
+    }
     
     // Create system message with execution trace (for debugging/transparency)
     let systemMessage = null;
@@ -831,7 +875,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 /**
  * Generate final response to user
  */
-async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, history = [], stream = false, responseStream = null, logger = null) {
+async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, history = [], stream = false, responseStream = null, logger = null, sourceTool = null) {
   try {
     const log = logger || createLogger('Agent-FinalResponse');
     
@@ -909,7 +953,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
     
     // If streaming is enabled, stream the response
     if (stream && responseStream) {
-      return await streamFinalResponse(promptToUse, model, modelData, responseStream, log);
+      return await streamFinalResponse(promptToUse, model, modelData, responseStream, log, sourceTool);
     }
     
     // Non-streaming: Call LLM to generate final response
@@ -934,7 +978,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 /**
  * Stream final response to user via SSE
  */
-async function streamFinalResponse(prompt, model, modelData, responseStream, logger = null) {
+async function streamFinalResponse(prompt, model, modelData, responseStream, logger = null, sourceTool = null) {
   try {
     const log = logger || createLogger('Agent-StreamResponse');
     const systemPromptText = 'You are a helpful BV-BRC AI assistant.';
@@ -958,7 +1002,7 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
         const text = part.choices?.[0]?.delta?.content;
         if (text) {
           fullResponse += text;
-          emitSSE(responseStream, 'final_response', { chunk: text });
+          emitSSE(responseStream, 'final_response', { chunk: text, tool: sourceTool || null });
         }
       }
       
@@ -983,7 +1027,7 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
       let fullResponse = '';
       const onChunk = (text) => {
         fullResponse += text;
-        emitSSE(responseStream, 'final_response', { chunk: text });
+        emitSSE(responseStream, 'final_response', { chunk: text, tool: sourceTool || null });
       };
       
       await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
