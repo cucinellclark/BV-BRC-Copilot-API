@@ -1,11 +1,35 @@
 // services/sseUtils.js
 
 /**
+ * Write an SSE event and flush immediately to prevent buffering
+ * Critical for proper SSE behavior when running under pm2
+ */
+function writeSseEvent(res, eventType, data) {
+  try {
+    if (eventType) {
+      res.write(`event: ${eventType}\n`);
+    }
+    if (data) {
+      const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+      res.write(`data: ${dataStr}\n`);
+    }
+    res.write('\n');
+    
+    // Explicitly flush to prevent buffering (critical for pm2)
+    if (typeof res.flush === 'function') {
+      res.flush();
+    }
+  } catch (error) {
+    /* connection might already be closed */
+  }
+}
+
+/**
  * Send a Server-Sent-Events style error message and close the stream.
  */
 function sendSseError(res, errorMsg) {
   try {
-    res.write(`event: error\ndata: ${JSON.stringify({ error: errorMsg })}\n\n`);
+    writeSseEvent(res, 'error', { error: errorMsg });
     res.end();
   } catch (_) {
     /* connection might already be closed */
@@ -32,6 +56,7 @@ function stopKeepAlive(intervalId) {
 }
 
 module.exports = {
+  writeSseEvent,
   sendSseError,
   startKeepAlive,
   stopKeepAlive

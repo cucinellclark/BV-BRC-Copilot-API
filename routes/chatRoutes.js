@@ -21,6 +21,7 @@ const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
 const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback } = require('../services/queueService');
+const { writeSseEvent } = require('../services/sseUtils');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -71,7 +72,7 @@ router.post('/copilot', authenticate, async (req, res) => {
         
         // If this was a streaming request, send error over SSE, else JSON
         if (req.body.stream === true) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
+            writeSseEvent(res, 'error', { message: 'Internal server error', error: error.message });
             res.end();
         } else {
             res.status(500).json({ message: 'Internal server error', error });
@@ -180,8 +181,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                     } else {
                         console.log('[ROUTE DEBUG] Writing SSE event to response:', eventType);
                     }
-                    res.write(`event: ${eventType}\n`);
-                    res.write(`data: ${JSON.stringify(data)}\n\n`);
+                    writeSseEvent(res, eventType, data);
                     
                     // Close stream if done or error
                     if (eventType === 'done' || eventType === 'error') {
@@ -199,6 +199,9 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
 
             // Send initial connection confirmation
             res.write(': connected\n\n');
+            if (typeof res.flush === 'function') {
+                res.flush();
+            }
             console.log('[ROUTE DEBUG] Initial connection confirmation sent');
 
             // Add job to queue with streaming callback
@@ -233,6 +236,9 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 
                 try {
                     res.write(': heartbeat\n\n');
+                    if (typeof res.flush === 'function') {
+                        res.flush();
+                    }
                 } catch (error) {
                     console.log('[ROUTE DEBUG] Heartbeat write failed:', error.message);
                     clearInterval(heartbeatInterval);
@@ -283,11 +289,10 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
         if (req.body.stream !== false && res.headersSent) {
             // Streaming: Send error event
             try {
-                res.write(`event: error\n`);
-                res.write(`data: ${JSON.stringify({ 
+                writeSseEvent(res, 'error', { 
                     message: 'Failed to queue job', 
                     error: error.message 
-                })}\n\n`);
+                });
                 res.end();
             } catch (e) {
                 // Connection already closed
@@ -388,13 +393,15 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         
         res.flushHeaders();
         res.write(': connected\n\n');
+        if (typeof res.flush === 'function') {
+            res.flush();
+        }
 
         // Get job status
         const jobStatus = await getJobStatus(jobId);
         
         if (!jobStatus.found) {
-            res.write(`event: error\n`);
-            res.write(`data: ${JSON.stringify({ message: 'Job not found' })}\n\n`);
+            writeSseEvent(res, 'error', { message: 'Job not found' });
             res.end();
             return;
         }
@@ -406,21 +413,19 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
             // Job already done
             logger.info('Job already completed', { jobId });
             
-            res.write(`event: started\n`);
-            res.write(`data: ${JSON.stringify({ 
+            writeSseEvent(res, 'started', { 
                 job_id: jobId,
                 message: 'Job already completed'
-            })}\n\n`);
+            });
             
-            res.write(`event: done\n`);
-            res.write(`data: ${JSON.stringify({ 
+            writeSseEvent(res, 'done', { 
                 job_id: jobId,
                 session_id: jobStatus.data.session_id,
                 message: 'Fetch result from /get-session-messages',
                 iterations: 0,
                 tools_used: [],
                 duration_seconds: 0
-            })}\n\n`);
+            });
             
             res.end();
             return;
@@ -428,11 +433,10 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         
         if (state === 'failed') {
             // Job failed
-            res.write(`event: error\n`);
-            res.write(`data: ${JSON.stringify({ 
+            writeSseEvent(res, 'error', { 
                 job_id: jobId,
                 error: jobStatus.error?.message || 'Job failed'
-            })}\n\n`);
+            });
             res.end();
             return;
         }
@@ -445,8 +449,7 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
             if (res.writableEnded || res.destroyed) return;
             
             try {
-                res.write(`event: ${eventType}\n`);
-                res.write(`data: ${JSON.stringify(data)}\n\n`);
+                writeSseEvent(res, eventType, data);
                 
                 if (eventType === 'done' || eventType === 'error') {
                     res.end();
@@ -460,14 +463,13 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         registerStreamCallback(jobId, streamCallback);
 
         // Send current status
-        res.write(`event: ${state === 'active' ? 'started' : 'queued'}\n`);
-        res.write(`data: ${JSON.stringify({ 
+        writeSseEvent(res, state === 'active' ? 'started' : 'queued', { 
             job_id: jobId,
             status: state,
             progress: jobStatus.progress,
             message: state === 'active' ? 'Processing' : 'Waiting in queue',
             session_id: jobStatus.data.session_id
-        })}\n\n`);
+        });
 
         // Heartbeat
         let heartbeatInterval = setInterval(() => {
@@ -477,6 +479,9 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
             }
             try {
                 res.write(': heartbeat\n\n');
+                if (typeof res.flush === 'function') {
+                    res.flush();
+                }
             } catch (error) {
                 clearInterval(heartbeatInterval);
             }
@@ -494,11 +499,10 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         });
         
         try {
-            res.write(`event: error\n`);
-            res.write(`data: ${JSON.stringify({ 
+            writeSseEvent(res, 'error', { 
                 message: 'Stream reconnection failed',
                 error: error.message
-            })}\n\n`);
+            });
             res.end();
         } catch (e) {
             // Connection already closed

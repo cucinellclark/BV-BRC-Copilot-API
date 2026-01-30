@@ -66,7 +66,8 @@ function createMessage(role, content) {
 }
 
 /**
- * Helper function to emit SSE events
+ * Helper function to emit SSE events with explicit flushing
+ * This ensures events are sent immediately, which is critical when running under pm2
  */
 function emitSSE(responseStream, eventType, data) {
   if (!responseStream) return;
@@ -78,6 +79,11 @@ function emitSSE(responseStream, eventType, data) {
       console.log('[Agent SSE] Emitting event:', eventType, 'with data:', dataStr.substring(0, 100) + (dataStr.length > 100 ? '...' : ''));
     }
     responseStream.write(`event: ${eventType}\ndata: ${dataStr}\n\n`);
+    
+    // Explicitly flush to prevent buffering (critical for pm2 and SSE)
+    if (typeof responseStream.flush === 'function') {
+      responseStream.flush();
+    }
   } catch (error) {
     console.error('[Agent] Failed to emit SSE event:', error);
   }
