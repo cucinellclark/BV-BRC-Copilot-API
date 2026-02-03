@@ -26,6 +26,63 @@ function isFinalizeTool(toolId) {
   return finalizeList.some(fragment => toolId.includes(fragment));
 }
 
+function shouldBypassFileHandling(toolId) {
+  if (!toolId) return false;
+  const bypassList = config.global_settings?.bypass_file_handling_tools || [];
+  return bypassList.some(fragment => toolId.includes(fragment));
+}
+
+/**
+ * Unwrap MCP content wrapper to extract actual data
+ * MCP tools return results wrapped in content/structuredContent structure
+ */
+function unwrapMcpContent(result) {
+  if (!result || typeof result !== 'object') {
+    return result;
+  }
+  
+  // Try structuredContent.result first (preferred)
+  if (result.structuredContent?.result) {
+    try {
+      // If it's a JSON string, parse it
+      if (typeof result.structuredContent.result === 'string') {
+        return JSON.parse(result.structuredContent.result);
+      }
+      // If it's already an object, return it
+      return result.structuredContent.result;
+    } catch (parseError) {
+      // If parsing fails, return the string as-is
+      return result.structuredContent.result;
+    }
+  }
+  
+  // Fallback to content[0].text
+  if (result.content && Array.isArray(result.content) && result.content[0]?.text !== undefined) {
+    const textContent = result.content[0].text;
+    try {
+      // If it's a JSON string, parse it
+      if (typeof textContent === 'string') {
+        // Try to parse as JSON, but if it's not valid JSON, return as string
+        const trimmed = textContent.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          return JSON.parse(textContent);
+        }
+        // Not JSON, return as string
+        return textContent;
+      }
+      // If it's already an object/array, return it as-is
+      // (some MCP servers return objects directly in the text field)
+      return textContent;
+    } catch (parseError) {
+      // If parsing fails, return the string as-is
+      return textContent;
+    }
+  }
+  
+  // No wrapper detected, return as-is
+  return result;
+}
+
 function normalizeRagResult(rawResult, maxDocs = 5) {
   const docs = rawResult?.used_documents || rawResult?.results || [];
   const limitedDocs = Array.isArray(docs) ? docs.slice(0, maxDocs) : [];
@@ -36,7 +93,8 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
     index: rawResult?.index,
     count: rawResult?.count ?? limitedDocs.length,
     summary: rawResult?.summary,
-    documents: limitedDocs
+    documents: limitedDocs,
+    source: rawResult?.source || 'bvbrc-rag'
   };
 }
 
@@ -215,79 +273,40 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     let result = isStreamingResponse ? responseData : responseData.result;
     log.info('Tool executed successfully', { toolId });
 
-    // Special-case RAG tools: extract actual data from MCP content wrapper
-    if (isRagTool(toolId)) {
-      // MCP tools return results wrapped in content structure - extract the actual data
-      let extractedData = null;
-      
-      // Try structuredContent.result first (preferred)
-      if (result?.structuredContent?.result) {
-        try {
-          extractedData = JSON.parse(result.structuredContent.result);
-          log.debug('Extracted RAG data from structuredContent.result');
-        } catch (parseError) {
-          log.warn('Failed to parse structuredContent.result', { error: parseError.message });
-        }
-      }
-      
-      // Fallback to content[0].text
-      if (!extractedData && result?.content && Array.isArray(result.content) && result.content[0]?.text) {
-        try {
-          extractedData = JSON.parse(result.content[0].text);
-          log.debug('Extracted RAG data from content[0].text');
-        } catch (parseError) {
-          log.warn('Failed to parse content[0].text', { error: parseError.message });
-        }
-      }
-      
-      if (extractedData) {
-        result = extractedData;
-      } else {
-        log.warn('Could not extract RAG data from MCP wrapper, using result as-is');
-      }
-      
-      // Log raw helpdesk/RAG response for debugging
-      log.info('RAG tool raw result', {
-        toolId,
-        keys: Object.keys(result || {}),
-        count: result?.count,
-        resultsLength: Array.isArray(result?.results) ? result.results.length : null,
-        usedDocsLength: Array.isArray(result?.used_documents) ? result.used_documents.length : null,
-        documentsLength: Array.isArray(result?.documents) ? result.documents.length : null,
-        summaryPreview: typeof result?.summary === 'string' ? result.summary.substring(0, 200) : null
-      });
-      // Also emit to stdout for immediate visibility
-      console.log('[RAG raw result]', {
-        toolId,
-        keys: Object.keys(result || {}),
-        count: result?.count,
-        resultsLength: Array.isArray(result?.results) ? result.results.length : null,
-        usedDocsLength: Array.isArray(result?.used_documents) ? result.used_documents.length : null,
-        documentsLength: Array.isArray(result?.documents) ? result.documents.length : null,
-        summaryPreview: typeof result?.summary === 'string' ? result.summary.substring(0, 200) : null
-      });
+    // Universal MCP unwrapping - all tools return data wrapped in content/structuredContent
+    // Apply unwrapping before any other processing
+    const unwrappedResult = unwrapMcpContent(result);
+    log.debug('Unwrapped MCP content', {
+      toolId,
+      hadWrapper: unwrappedResult !== result,
+      resultType: typeof unwrappedResult,
+      source: unwrappedResult?.source
+    });
+    result = unwrappedResult;
 
-      log.debug('Normalizing RAG tool result', {
+    // Special-case RAG tools: normalize and limit documents
+    if (isRagTool(toolId)) {
+      log.info('Processing RAG tool result', {
         toolId,
+        source: result?.source,
+        count: result?.count,
         hasResults: !!result?.results,
-        hasUsedDocuments: !!result?.used_documents,
-        hasSummary: !!result?.summary,
-        summaryPreview: typeof result?.summary === 'string' ? result.summary.substring(0, 100) : null
+        hasSummary: !!result?.summary
       });
+      
       const normalized = normalizeRagResult(result, config.global_settings?.rag_max_docs);
       log.debug('RAG result normalized', {
         type: normalized.type,
-        hasDocuments: !!normalized.documents,
         documentsCount: normalized.documents?.length,
-        hasSummary: !!normalized.summary,
-        summaryPreview: typeof normalized.summary === 'string' ? normalized.summary.substring(0, 100) : null
+        hasSummary: !!normalized.summary
       });
       return normalized;
     }
     
     // Process result through file manager if session_id is available
     // All results are now saved to disk and return a file reference
-    if (context.session_id) {
+    // Unless the tool is configured to bypass file handling
+    if (context.session_id && !shouldBypassFileHandling(toolId)) {
       log.debug('Processing result for session', { session_id: context.session_id });
       
       // Build context for file manager (includes workspace upload info)
@@ -324,6 +343,12 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         log.warn('Unexpected result type from fileManager', { type: processedResult.type });
         return processedResult;
       }
+    } else if (shouldBypassFileHandling(toolId)) {
+      log.debug('Bypassing file handling for tool', { 
+        toolId, 
+        session_id: context.session_id,
+        source: result?.source
+      });
     } else {
       log.debug('No session_id in context, returning result directly (not saved to file)');
     }

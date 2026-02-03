@@ -18,62 +18,43 @@ function normalizeToolResult(result) {
   let data = result;
   let metadata = null;
   
-  // Check for explicit source field to determine handling
+  // NOTE: MCP wrapper unwrapping is now done in mcpExecutor.js before reaching this function
+  // This function only handles extracting the data array from response objects
+  
   if (typeof result === 'object' && result !== null && !Array.isArray(result)) {
     
-    // Handle bvbrc-mcp-data format (MCP protocol wrapper + BV-BRC data)
+    // Handle bvbrc-mcp-data format: extract results array
     if (result.source === 'bvbrc-mcp-data') {
-      console.log('[FileUtils] Detected bvbrc-mcp-data source (explicit), unwrapping...');
+      console.log('[FileUtils] Processing bvbrc-mcp-data response');
       
-      // Extract from MCP protocol wrapper: structuredContent.result is a JSON string
-      if (result.structuredContent?.result) {
-        try {
-          data = JSON.parse(result.structuredContent.result);
-          console.log('[FileUtils] Parsed structuredContent.result JSON string');
-        } catch (e) {
-          console.warn('[FileUtils] Failed to parse structuredContent.result:', e.message);
-          data = result.structuredContent.result;
-        }
-      }
-      
-      // Now unwrap BV-BRC API format: { count, nextCursorId, results: [...] }
-      if (typeof data === 'object' && data !== null && 'results' in data && Array.isArray(data.results)) {
-        console.log('[FileUtils] Unwrapping BV-BRC response format');
+      // Extract results array from BV-BRC API format: { count, nextCursorId, results: [...] }
+      if ('results' in result && Array.isArray(result.results)) {
+        console.log('[FileUtils] Extracting results array from BV-BRC response');
         metadata = {
           source: 'bvbrc-mcp-data',
-          totalCount: data.count,
-          nextCursorId: data.nextCursorId
+          totalCount: result.count || result.numFound,
+          nextCursorId: result.nextCursorId
         };
-        data = data.results;
+        data = result.results;
       }
     }
-    // FALLBACK: Detect BV-BRC MCP format by structure (for backward compatibility)
-    else if ('structuredContent' in result && result.structuredContent?.result) {
-      console.log('[FileUtils] Detected MCP wrapper structure (fallback), unwrapping...');
+    // Handle workspace format: extract items array
+    else if (result.source === 'bvbrc-workspace') {
+      console.log('[FileUtils] Processing bvbrc-workspace response');
       
-      try {
-        data = JSON.parse(result.structuredContent.result);
-        console.log('[FileUtils] Parsed structuredContent.result JSON string');
-        
-        // Check if it's BV-BRC format
-        if (typeof data === 'object' && data !== null && 'results' in data && Array.isArray(data.results)) {
-          console.log('[FileUtils] Detected BV-BRC response format inside MCP wrapper');
-          metadata = {
-            source: 'bvbrc-mcp-data',
-            totalCount: data.count,
-            nextCursorId: data.nextCursorId
-          };
-          data = data.results;
-        }
-      } catch (e) {
-        console.warn('[FileUtils] Failed to parse structuredContent.result:', e.message);
-        // Treat the raw structuredContent.result as the data (plain text or unknown)
-        data = result.structuredContent.result;
+      if ('items' in result && Array.isArray(result.items)) {
+        console.log('[FileUtils] Extracting items array from workspace response');
+        metadata = {
+          source: 'bvbrc-workspace',
+          totalCount: result.count,
+          path: result.path
+        };
+        data = result.items;
       }
     }
-    // Future: Add other source handlers here
-    // else if (result.source === 'github-api') { ... }
-    // else if (result.source === 'aws-api') { ... }
+    // Add other source handlers here as needed
+    // else if (result.source === 'bvbrc-rag') { ... }
+    // else if (result.source === 'bvbrc-file-utilities') { ... }
   }
   
   // Detect data type of the normalized data

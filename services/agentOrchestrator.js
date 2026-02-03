@@ -487,77 +487,33 @@ async function executeAgentLoop(opts) {
         if (shouldFinalizeNow) {
           logger.info('Finalize-category tool executed, finalizing immediately');
           
-          // Check if result has a summary field - if so, use it directly (for RAG tools)
-          const hasSummary = safeResult && typeof safeResult.summary === 'string' && safeResult.summary.length > 0;
-          if (hasSummary) {
-            logger.info('Using tool summary directly as final response', { 
-              tool: nextAction.action,
-              summaryLength: safeResult.summary.length,
-              streaming: stream && !!responseStream
+          // Wrap the raw result in a consistent JSON object structure
+          const finalizeResponse = {
+            source_tool: nextAction.action,
+            content: result
+          };
+          
+          // For non-streaming: keep as object (will be serialized in JSON response)
+          // For streaming: will be stringified when emitting
+          finalResponse = finalizeResponse;
+          finalResponseSourceTool = nextAction.action;
+          
+          logger.info('Sending finalize tool result as JSON object', {
+            tool: nextAction.action,
+            resultType: typeof result,
+            isString: typeof result === 'string',
+            isObject: typeof result === 'object' && result !== null
+          });
+          
+          // If streaming, emit the JSON object as a stringified chunk
+          if (stream && responseStream) {
+            const finalizeResponseStr = JSON.stringify(finalizeResponse, null, 2);
+            emitSSE(responseStream, 'final_response', { 
+              chunk: finalizeResponseStr, 
+              tool: nextAction.action
             });
-            finalResponse = safeResult.summary;
-            finalResponseSourceTool = nextAction.action; // Track the source tool
-            
-            // If streaming, emit the complete summary at once
-            if (stream && responseStream) {
-              emitSSE(responseStream, 'final_response', { chunk: finalResponse, tool: nextAction.action });
-            }
-          } else if (safeResult && safeResult.type === 'file_reference' && safeResult.filePath) {
-            // For FINALIZE tools that return file_reference (e.g., workflow generation),
-            // read the file content and send it directly to the user
-            try {
-              logger.info('Reading file content for direct submission', {
-                tool: nextAction.action,
-                filePath: safeResult.filePath
-              });
-              const fileContent = await fs.readFile(safeResult.filePath, 'utf8');
-              finalResponse = fileContent;
-              finalResponseSourceTool = nextAction.action; // Track the source tool
-              
-              // If streaming, emit the complete file content at once
-              if (stream && responseStream) {
-                emitSSE(responseStream, 'final_response', { chunk: finalResponse, tool: nextAction.action });
-              }
-            } catch (fileError) {
-              logger.error('Failed to read file content for direct submission', {
-                tool: nextAction.action,
-                filePath: safeResult.filePath,
-                error: fileError.message
-              });
-              // Fall back to LLM generation if file read fails
-              finalResponse = await generateFinalResponse(
-                query,
-                system_prompt,
-                executionTrace,
-                toolResults,
-                model,
-                history,
-                stream,
-                responseStream,
-                logger
-              );
-            }
-          } else {
-            // Otherwise, generate a final response using LLM
-            logger.info('No summary or file_reference in result, generating final response via LLM', {
-              tool: nextAction.action,
-              resultKeys: Object.keys(safeResult || {}),
-              resultType: safeResult?.type
-            });
-            finalResponseSourceTool = nextAction.action; // Track the source tool
-            finalResponse = await generateFinalResponse(
-              query,
-              system_prompt,
-              executionTrace,
-              toolResults,
-              model,
-              history,
-              stream,
-              responseStream,
-              logger,
-              nextAction.action // Pass tool name for tracking
-            );
           }
+          
           break;
         }
       } catch (error) {
