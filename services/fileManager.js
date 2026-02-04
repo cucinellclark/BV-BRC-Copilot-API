@@ -185,6 +185,15 @@ class FileManager {
       created: new Date().toISOString(),
       lastAccessed: new Date().toISOString()
     };
+    
+    // Add query parameters from normalized metadata if present (for query_collection tools)
+    if (normalized.metadata && normalized.metadata.queryParameters) {
+      metadata.queryParameters = normalized.metadata.queryParameters;
+      console.log(`[FileManager] Added query parameters to metadata`, {
+        toolId,
+        queryParameters: Object.keys(normalized.metadata.queryParameters)
+      });
+    }
 
     // Upload to workspace if enabled
     // This ensures all files saved to /tmp are automatically uploaded to workspace
@@ -228,11 +237,16 @@ class FileManager {
           );
           
           if (uploadResult.success) {
+            // Generate workspace directory URL
+            const workspaceUrl = workspaceService.getWorkspaceDirectoryUrl(uploadResult.workspacePath);
+            
             workspaceInfo = {
               workspacePath: uploadResult.workspacePath,
+              workspaceUrl: workspaceUrl,
               uploadedAt: new Date().toISOString()
             };
             metadata.workspacePath = uploadResult.workspacePath;
+            metadata.workspaceUrl = workspaceUrl;
             metadata.workspaceUploadedAt = workspaceInfo.uploadedAt;
             
             console.log(`[FileManager] Successfully uploaded to workspace: ${uploadResult.workspacePath}`, {
@@ -290,6 +304,11 @@ class FileManager {
       },
       message: `Large result saved to file (${formatSize(size)}, ${summary.recordCount} records)`
     };
+
+    // Add query parameters to file reference if present (for query_collection tools)
+    if (normalized.metadata && normalized.metadata.queryParameters) {
+      fileReference.queryParameters = normalized.metadata.queryParameters;
+    }
 
     // Add workspace info if uploaded
     if (workspaceInfo) {

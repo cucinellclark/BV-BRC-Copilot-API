@@ -47,6 +47,149 @@ class WorkspaceService {
   }
 
   /**
+   * Get workspace file type from file extension
+   * Maps common file extensions to workspace-recognized file types
+   * 
+   * @param {string} filePath - Path to the file
+   * @returns {string} Workspace file type (e.g., 'csv', 'tsv', 'json', 'fasta', 'gff', etc.)
+   */
+  getWorkspaceFileType(filePath) {
+    const ext = path.extname(filePath).toLowerCase().replace(/^\./, '');
+    
+    // Map extensions to workspace file types
+    const extensionToType = {
+      // Tabular data
+      'csv': 'csv',
+      'tsv': 'tsv',
+      'txt': 'text',
+      
+      // JSON data
+      'json': 'json',
+      'jsonl': 'json',
+      
+      // Sequence data
+      'fasta': 'fasta',
+      'fa': 'fasta',
+      'fna': 'fasta',
+      'faa': 'fasta',
+      'ffn': 'fasta',
+      'frn': 'fasta',
+      'fastq': 'fastq',
+      'fq': 'fastq',
+      
+      // Annotation data
+      'gff': 'gff',
+      'gff3': 'gff3',
+      'gtf': 'gtf',
+      'gb': 'genbank',
+      'gbk': 'genbank',
+      'genbank': 'genbank',
+      'embl': 'embl',
+      
+      // Alignment data
+      'sam': 'sam',
+      'bam': 'bam',
+      'vcf': 'vcf',
+      'bed': 'bed',
+      'wig': 'wig',
+      'bigwig': 'bigwig',
+      
+      // Other common formats
+      'xml': 'xml',
+      'html': 'html',
+      'htm': 'html',
+      'pdf': 'pdf',
+      'zip': 'zip',
+      'gz': 'gzip',
+      'tar': 'tar',
+      'xlsx': 'excel',
+      'xls': 'excel',
+      'odt': 'odt',
+      'ods': 'ods'
+    };
+    
+    const fileType = extensionToType[ext] || 'unspecified';
+    
+    if (fileType !== 'unspecified') {
+      console.log(`[WorkspaceService] Detected file type: ${fileType} for extension: .${ext}`);
+    } else {
+      console.log(`[WorkspaceService] Unknown file extension: .${ext}, using 'unspecified' type`);
+    }
+    
+    return fileType;
+  }
+
+  /**
+   * Get MIME type from file extension
+   * Used for proper content-type headers during file upload
+   * 
+   * @param {string} filePath - Path to the file
+   * @returns {string} MIME type (e.g., 'text/csv', 'application/json', etc.)
+   */
+  getMimeType(filePath) {
+    const ext = path.extname(filePath).toLowerCase().replace(/^\./, '');
+    
+    // Map extensions to MIME types
+    const extensionToMime = {
+      // Tabular data
+      'csv': 'text/csv',
+      'tsv': 'text/tab-separated-values',
+      'txt': 'text/plain',
+      
+      // JSON data
+      'json': 'application/json',
+      'jsonl': 'application/jsonl',
+      
+      // Sequence data
+      'fasta': 'text/x-fasta',
+      'fa': 'text/x-fasta',
+      'fna': 'text/x-fasta',
+      'faa': 'text/x-fasta',
+      'ffn': 'text/x-fasta',
+      'frn': 'text/x-fasta',
+      'fastq': 'text/x-fastq',
+      'fq': 'text/x-fastq',
+      
+      // Annotation data
+      'gff': 'text/x-gff',
+      'gff3': 'text/x-gff3',
+      'gtf': 'text/x-gtf',
+      'gb': 'text/x-genbank',
+      'gbk': 'text/x-genbank',
+      'genbank': 'text/x-genbank',
+      'embl': 'text/x-embl',
+      
+      // Alignment data
+      'sam': 'text/x-sam',
+      'bam': 'application/x-bam',
+      'vcf': 'text/x-vcf',
+      'bed': 'text/x-bed',
+      'wig': 'text/x-wig',
+      
+      // Other common formats
+      'xml': 'application/xml',
+      'html': 'text/html',
+      'htm': 'text/html',
+      'pdf': 'application/pdf',
+      'zip': 'application/zip',
+      'gz': 'application/gzip',
+      'tar': 'application/x-tar',
+      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'xls': 'application/vnd.ms-excel',
+      'odt': 'application/vnd.oasis.opendocument.text',
+      'ods': 'application/vnd.oasis.opendocument.spreadsheet'
+    };
+    
+    const mimeType = extensionToMime[ext] || 'application/octet-stream';
+    
+    if (mimeType !== 'application/octet-stream') {
+      console.log(`[WorkspaceService] Detected MIME type: ${mimeType} for extension: .${ext}`);
+    }
+    
+    return mimeType;
+  }
+
+  /**
    * Make a JSON-RPC call to workspace API
    */
   async jsonRpcCall(method, params, token, sessionId = null) {
@@ -153,11 +296,15 @@ class WorkspaceService {
   async createUploadNode(filePath, uploadDir, token, sessionId = null) {
     const fileName = path.basename(filePath);
     const workspacePath = path.join(uploadDir, fileName).replace(/\\/g, '/');
+    
+    // Determine file type from extension
+    const fileType = this.getWorkspaceFileType(filePath);
 
     console.log(`[WorkspaceService] Creating workspace upload node`, {
       fileName,
       workspacePath,
       uploadDir,
+      fileType,
       sessionId: sessionId || 'none'
     });
 
@@ -168,7 +315,7 @@ class WorkspaceService {
       const result = await this.jsonRpcCall(
         'Workspace.create',
         {
-          objects: [[workspacePath, 'unspecified', {}, '']],
+          objects: [[workspacePath, fileType, {}, '']],
           createUploadNodes: true,
           overwrite: false
         },
@@ -227,10 +374,14 @@ class WorkspaceService {
     const fileSize = stats.size;
     const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2);
     
+    // Determine MIME type from extension
+    const mimeType = this.getMimeType(filePath);
+    
     console.log(`[WorkspaceService] Starting file upload to Shock API`, {
       fileName,
       fileSize: `${fileSizeMB} MB`,
       fileSizeBytes: fileSize,
+      mimeType,
       uploadUrl: uploadUrl.substring(0, 100) + '...', // Truncate URL for logging
       sessionId: sessionId || 'none'
     });
@@ -239,7 +390,7 @@ class WorkspaceService {
     const form = new FormData();
     form.append('upload', fs.createReadStream(filePath), {
       filename: fileName,
-      contentType: 'application/octet-stream'
+      contentType: mimeType
     });
 
     const headers = {
@@ -428,6 +579,28 @@ class WorkspaceService {
     // Otherwise, prepend user's home path
     const homePath = this.getUserHomePath(userId);
     return `${homePath}/${relativePath}`.replace(/\/+/g, '/');
+  }
+
+  /**
+   * Get workspace directory URL for a given workspace path
+   * Extracts the directory portion (removes filename) and constructs browser URL
+   * 
+   * @param {string} workspacePath - Full workspace path including filename
+   * @param {string} baseUrl - Base BV-BRC URL (default: https://www.bv-brc.org)
+   * @returns {string} URL to the workspace directory
+   */
+  getWorkspaceDirectoryUrl(workspacePath, baseUrl = 'https://www.bv-brc.org') {
+    if (!workspacePath) {
+      return null;
+    }
+
+    // Extract directory path (remove filename)
+    const dirPath = path.dirname(workspacePath);
+    
+    // Construct URL: baseUrl/workspace/dirPath
+    // Remove leading slash from dirPath if present to avoid double slashes
+    const cleanDirPath = dirPath.startsWith('/') ? dirPath : `/${dirPath}`;
+    return `${baseUrl}/workspace${cleanDirPath}`;
   }
 }
 

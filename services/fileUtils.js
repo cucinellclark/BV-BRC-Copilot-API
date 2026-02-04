@@ -23,18 +23,36 @@ function normalizeToolResult(result) {
   
   if (typeof result === 'object' && result !== null && !Array.isArray(result)) {
     
-    // Handle bvbrc-mcp-data format: extract results array
+    // Handle bvbrc-mcp-data format: extract results array OR tsv string
     if (result.source === 'bvbrc-mcp-data') {
       console.log('[FileUtils] Processing bvbrc-mcp-data response');
       
-      // Extract results array from BV-BRC API format: { count, nextCursorId, results: [...] }
-      if ('results' in result && Array.isArray(result.results)) {
+      // Check for TSV format first (new default from MCP server)
+      if ('tsv' in result && typeof result.tsv === 'string') {
+        console.log('[FileUtils] Extracting TSV string from BV-BRC response');
+        metadata = {
+          source: 'bvbrc-mcp-data',
+          totalCount: result.count || result.numFound,
+          nextCursorId: result.nextCursorId
+        };
+        // Preserve query parameters if present
+        if (result.queryParameters) {
+          metadata.queryParameters = result.queryParameters;
+        }
+        data = result.tsv;
+      }
+      // Fallback to JSON format for backward compatibility
+      else if ('results' in result && Array.isArray(result.results)) {
         console.log('[FileUtils] Extracting results array from BV-BRC response');
         metadata = {
           source: 'bvbrc-mcp-data',
           totalCount: result.count || result.numFound,
           nextCursorId: result.nextCursorId
         };
+        // Preserve query parameters if present
+        if (result.queryParameters) {
+          metadata.queryParameters = result.queryParameters;
+        }
         data = result.results;
       }
     }

@@ -20,6 +20,7 @@ const promptManager = require('../prompts');
 const mcpConfig = require('./mcp/config.json');
 const { createLogger } = require('./logger');
 const fs = require('fs').promises;
+const { emitSSE: emitSSEUtil } = require('./sseUtils');
 
 function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   // Check if this is a RAG result (has documents and summary)
@@ -65,29 +66,8 @@ function createMessage(role, content) {
   };
 }
 
-/**
- * Helper function to emit SSE events with explicit flushing
- * This ensures events are sent immediately, which is critical when running under pm2
- */
-function emitSSE(responseStream, eventType, data) {
-  if (!responseStream) return;
-  
-  try {
-    const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
-    // Only log non-content events to reduce noise
-    if (eventType !== 'final_response' && eventType !== 'content') {
-      console.log('[Agent SSE] Emitting event:', eventType, 'with data:', dataStr.substring(0, 100) + (dataStr.length > 100 ? '...' : ''));
-    }
-    responseStream.write(`event: ${eventType}\ndata: ${dataStr}\n\n`);
-    
-    // Explicitly flush to prevent buffering (critical for pm2 and SSE)
-    if (typeof responseStream.flush === 'function') {
-      responseStream.flush();
-    }
-  } catch (error) {
-    console.error('[Agent] Failed to emit SSE event:', error);
-  }
-}
+// Use shared emitSSE from sseUtils
+const emitSSE = emitSSEUtil;
 
 /**
  * Normalize parameters for consistent comparison
@@ -428,7 +408,8 @@ async function executeAgentLoop(opts) {
             model,
             system_prompt,
             session_id,
-            user_id
+            user_id,
+            responseStream: stream && responseStream ? responseStream : null
           },
           logger
         );
@@ -709,7 +690,10 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
     
     // Format conversation history if available
     const historyStr = history.length > 0
-      ? `\n\nCONVERSATION HISTORY (for context):\n${history.slice(-5).map(m => `${m.role}: ${m.content.substring(0, 200)}${m.content.length > 200 ? '...' : ''}`).join('\n')}`
+      ? `\n\nCONVERSATION HISTORY (for context):\n${history.slice(-5).map(m => {
+          const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          return `${m.role}: ${content.substring(0, 200)}${content.length > 200 ? '...' : ''}`;
+        }).join('\n')}`
       : '';
     
     // Format execution trace for prompt with duplicate detection
@@ -851,7 +835,10 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
     
     // Format conversation history if available
     const historyStr = history.length > 0
-      ? `\n\nConversation history (for context):\n${history.slice(-5).map(m => `${m.role}: ${m.content}`).join('\n\n')}`
+      ? `\n\nConversation history (for context):\n${history.slice(-5).map(m => {
+          const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          return `${m.role}: ${content}`;
+        }).join('\n\n')}`
       : '';
     
     let promptToUse;

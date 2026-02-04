@@ -55,9 +55,38 @@ function stopKeepAlive(intervalId) {
   clearInterval(intervalId);
 }
 
+/**
+ * Emit SSE event for progress updates and tool execution
+ * Helper function to emit SSE events with explicit flushing
+ * This ensures events are sent immediately, which is critical when running under pm2
+ * @param {object} responseStream - SSE response stream
+ * @param {string} eventType - Event type
+ * @param {object} data - Event data
+ */
+function emitSSE(responseStream, eventType, data) {
+  if (!responseStream) return;
+  
+  try {
+    const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+    // Only log non-content events to reduce noise
+    if (eventType !== 'final_response' && eventType !== 'content') {
+      console.log('[SSE] Emitting event:', eventType, 'with data:', dataStr.substring(0, 100) + (dataStr.length > 100 ? '...' : ''));
+    }
+    responseStream.write(`event: ${eventType}\ndata: ${dataStr}\n\n`);
+    
+    // Explicitly flush to prevent buffering (critical for pm2 and SSE)
+    if (typeof responseStream.flush === 'function') {
+      responseStream.flush();
+    }
+  } catch (error) {
+    console.error('[SSE] Failed to emit SSE event:', error.message);
+  }
+}
+
 module.exports = {
   writeSseEvent,
   sendSseError,
   startKeepAlive,
-  stopKeepAlive
+  stopKeepAlive,
+  emitSSE
 }; 
