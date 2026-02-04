@@ -33,6 +33,8 @@ const { safeParseJson } = require('./jsonUtils');
 const { prepareCopilotContext } = require('./contextBuilder');
 const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
 const promptManager = require('../prompts');
+const { buildConversationContext } = require('./memory/conversationContextService');
+const { maybeQueueSummary } = require('./summaryQueueService');
 
 const MAX_TOKEN_HEADROOM = 500;
 
@@ -136,6 +138,10 @@ async function handleCopilotRequest(opts) {
       const toInsert = systemMessage ? [userMessage, systemMessage, assistantMessage]
                                      : [userMessage, assistantMessage];
       await addMessagesToSession(session_id, toInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + toInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
     }
 
     return {
@@ -153,10 +159,8 @@ async function handleCopilotRequest(opts) {
 async function handleChatRequest({ query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true }) {
   try {
     const modelData = await getModelData(model);
-    const max_tokens = 40000;
     const chatSession = await getChatSession(session_id);
 
-    const llmMessages = []; // used for queryClient
     const userMessage = createMessage('user', query);
     //(url, model, apiKey, query)
     const embedding_url = config['embedding_url'];
@@ -167,33 +171,29 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
     // Creates a system message recorded in the conversation history if system_prompt is provided
     let systemMessage = null;
     if (system_prompt && system_prompt.trim() !== '') {
-      llmMessages.push({ role: 'system', content: system_prompt });
       systemMessage = createMessage('system', system_prompt);
     }
 
-    // Get the conversation history from the database
-    const chatSessionMessages = chatSession?.messages || [];
-    
-    llmMessages.push({ role: 'user', content: query });
+    const modelSystemPrompt = (system_prompt && system_prompt.trim() !== '')
+      ? system_prompt
+      : promptManager.getSystemPrompt('default');
 
-    let prompt_query;
-    if (include_history) {
-      prompt_query = await createQueryFromMessages(query, chatSessionMessages, system_prompt || '', max_tokens);
-    } else {
-      prompt_query = query;
-    }
-
-    if (!system_prompt || system_prompt.trim() === '') {
-      system_prompt = promptManager.getSystemPrompt('default');
-    }
+    const context = await buildConversationContext({
+      session_id,
+      user_id,
+      query,
+      system_prompt: modelSystemPrompt,
+      include_history,
+      chatSession
+    });
 
     let response;
     try {
       if (modelData.queryType === 'client') {
         const openai_client = setupOpenaiClient(modelData.apiKey, modelData.endpoint);
-        response = await queryClient(openai_client, model, llmMessages);
+        response = await queryClient(openai_client, model, context.messages);
       } else if (modelData.queryType === 'request') {
-        response = await queryRequestChat(modelData.endpoint, model, system_prompt || '', prompt_query);
+        response = await queryRequestChat(modelData.endpoint, model, modelSystemPrompt, context.prompt);
       } else {
         throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
       }
@@ -218,6 +218,10 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
 
     if (save_chat) {
       await addMessagesToSession(session_id, messagesToInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
     }
 
     return { 
@@ -637,6 +641,10 @@ async function handleCopilotStreamRequest(opts, res) {
     if (save_chat) {
       const assistantMessage = createMessage('assistant', assistantBuffer);
       await addMessagesToSession(session_id, [assistantMessage]);
+      const messageCount = (chatSession?.messages?.length || 0) + (systemMessage ? 2 : 1) + 1;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
     }
   } catch (error) {
     console.error('Streaming copilot error:', error);

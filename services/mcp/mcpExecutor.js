@@ -80,22 +80,141 @@ function unwrapMcpContent(result) {
     }
   }
   
+  // Check for FastMCP format: content array with type "text" and text field containing JSON
+  if (result.content && Array.isArray(result.content) && result.content.length > 0) {
+    const firstContent = result.content[0];
+    if (firstContent.type === 'text' && firstContent.text) {
+      try {
+        const trimmed = firstContent.text.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          return JSON.parse(firstContent.text);
+        }
+        // Not JSON, return as string
+        return firstContent.text;
+      } catch (parseError) {
+        // If parsing fails, return the string as-is
+        return firstContent.text;
+      }
+    }
+  }
+  
+  // Check if result.result exists and is a JSON string (some MCP servers wrap this way)
+  if (result.result !== undefined) {
+    if (typeof result.result === 'string') {
+      try {
+        const trimmed = result.result.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          return JSON.parse(result.result);
+        }
+        // Not JSON-like, return as string
+        return result.result;
+      } catch (parseError) {
+        // If parsing fails, return the string as-is
+        return result.result;
+      }
+    } else if (typeof result.result === 'object' && result.result !== null) {
+      // If result.result is already an object, return it directly
+      return result.result;
+    } else {
+      // For other types (boolean, number, etc), return as-is
+      return result.result;
+    }
+  }
+  
   // No wrapper detected, return as-is
   return result;
 }
 
 function normalizeRagResult(rawResult, maxDocs = 5) {
-  const docs = rawResult?.used_documents || rawResult?.results || [];
-  const limitedDocs = Array.isArray(docs) ? docs.slice(0, maxDocs) : [];
+  // Debug: log the raw result structure to diagnose issues
+  if (!rawResult || typeof rawResult !== 'object') {
+    console.warn('[normalizeRagResult] Invalid rawResult:', { type: typeof rawResult, rawResult });
+    return {
+      type: 'rag_result',
+      count: 0,
+      documents: [],
+      source: 'bvbrc-rag',
+      error: 'Invalid result structure'
+    };
+  }
+
+  // Try multiple possible field names for documents
+  let docs = [];
+  
+  // Helper function to safely parse JSON strings
+  const parseIfString = (value) => {
+    if (typeof value === 'string') {
+      try {
+        const trimmed = value.trim();
+        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+          const parsed = JSON.parse(value);
+          return Array.isArray(parsed) ? parsed : null;
+        }
+      } catch (e) {
+        // Not valid JSON, return null
+      }
+    }
+    return null;
+  };
+
+  if (rawResult.used_documents) {
+    if (Array.isArray(rawResult.used_documents)) {
+      docs = rawResult.used_documents;
+    } else {
+      const parsed = parseIfString(rawResult.used_documents);
+      if (parsed) docs = parsed;
+    }
+  }
+  
+  if (docs.length === 0 && rawResult.results) {
+    if (Array.isArray(rawResult.results)) {
+      docs = rawResult.results;
+    } else {
+      const parsed = parseIfString(rawResult.results);
+      if (parsed) docs = parsed;
+    }
+  }
+  
+  if (docs.length === 0 && rawResult.documents) {
+    if (Array.isArray(rawResult.documents)) {
+      docs = rawResult.documents;
+    } else {
+      const parsed = parseIfString(rawResult.documents);
+      if (parsed) docs = parsed;
+    }
+  }
+  
+  if (docs.length === 0 && Array.isArray(rawResult)) {
+    // If the result itself is an array, use it directly
+    docs = rawResult;
+  }
+
+  // If we still don't have docs, log what we do have for debugging
+  if (docs.length === 0 && (rawResult.count > 0 || rawResult.results || rawResult.used_documents)) {
+    console.warn('[normalizeRagResult] No documents found but count > 0 or results exist:', {
+      count: rawResult.count,
+      hasResults: !!rawResult.results,
+      resultsType: typeof rawResult.results,
+      resultsIsArray: Array.isArray(rawResult.results),
+      resultsPreview: typeof rawResult.results === 'string' ? rawResult.results.substring(0, 200) : 'N/A',
+      hasUsedDocuments: !!rawResult.used_documents,
+      usedDocumentsType: typeof rawResult.used_documents,
+      usedDocumentsIsArray: Array.isArray(rawResult.used_documents),
+      resultKeys: Object.keys(rawResult),
+      rawResultPreview: JSON.stringify(rawResult).substring(0, 1000)
+    });
+  }
+
+  const limitedDocs = docs.slice(0, maxDocs);
 
   return {
     type: 'rag_result',
-    query: rawResult?.query,
-    index: rawResult?.index,
-    count: rawResult?.count ?? limitedDocs.length,
-    summary: rawResult?.summary,
+    query: rawResult.query,
+    index: rawResult.index,
+    count: rawResult.count ?? limitedDocs.length,
+    summary: rawResult.summary,
     documents: limitedDocs,
-    source: rawResult?.source || 'bvbrc-rag'
+    source: rawResult.source || 'bvbrc-rag'
   };
 }
 
@@ -697,9 +816,40 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     } else {
       // Parse SSE format response if needed (non-streaming)
       if (typeof responseData === 'string') {
-        const dataMatch = responseData.match(/data: (.+?)(?:\r?\n|$)/);
-        if (dataMatch && dataMatch[1]) {
-          responseData = JSON.parse(dataMatch[1]);
+        log.debug('Parsing SSE format response', {
+          stringPreview: responseData.substring(0, 200)
+        });
+        
+        // SSE format: "event: message\r\ndata: {...}\r\n"
+        // Extract the data line
+        const lines = responseData.split(/\r?\n/);
+        let dataLine = null;
+        
+        for (const line of lines) {
+          if (line.trim().startsWith('data:')) {
+            dataLine = line.trim().substring(5).trim(); // Remove "data:" prefix
+            break;
+          }
+        }
+        
+        if (dataLine) {
+          try {
+            responseData = JSON.parse(dataLine);
+            log.debug('Successfully parsed SSE data line', {
+              hasResult: !!responseData?.result,
+              hasContent: !!responseData?.content,
+              keys: Object.keys(responseData || {})
+            });
+          } catch (parseError) {
+            log.error('Failed to parse SSE data line as JSON', {
+              error: parseError.message,
+              dataLinePreview: dataLine.substring(0, 200)
+            });
+          }
+        } else {
+          log.warn('No data line found in SSE response', {
+            responsePreview: responseData.substring(0, 200)
+          });
         }
       }
     }
@@ -737,10 +887,35 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       throw new Error(`Tool execution failed: ${responseData.error.message || JSON.stringify(responseData.error)}`);
     }
     
+    // DEBUG: Log responseData structure
+    log.info('ResponseData structure before extracting result', {
+      toolId,
+      isStreamingResponse,
+      responseDataType: typeof responseData,
+      responseDataKeys: responseData && typeof responseData === 'object' ? Object.keys(responseData) : 'N/A',
+      hasResult: responseData?.result !== undefined,
+      hasContent: !!responseData?.content,
+      hasStructuredContent: !!responseData?.structuredContent,
+      responseDataPreview: responseData ? JSON.stringify(responseData).substring(0, 500) : 'null/undefined'
+    });
+    
     let result = isStreamingResponse ? responseData : responseData.result;
     log.info('Tool executed successfully', { 
       toolId,
       isStreamingResponse 
+    });
+
+    // DEBUG: Log raw result structure before unwrapping
+    log.info('Raw result structure before unwrapping', {
+      toolId,
+      resultType: typeof result,
+      isNull: result === null,
+      isUndefined: result === undefined,
+      resultKeys: result && typeof result === 'object' ? Object.keys(result) : 'N/A',
+      hasContent: !!result?.content,
+      hasStructuredContent: !!result?.structuredContent,
+      hasResult: !!result?.result,
+      rawResultPreview: result ? JSON.stringify(result).substring(0, 500) : 'null/undefined'
     });
 
     // Universal MCP unwrapping - all tools return data wrapped in content/structuredContent
@@ -860,14 +1035,24 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         source: result?.source,
         count: result?.count,
         hasResults: !!result?.results,
-        hasSummary: !!result?.summary
+        resultsType: typeof result?.results,
+        resultsIsArray: Array.isArray(result?.results),
+        resultsLength: Array.isArray(result?.results) ? result.results.length : 'N/A',
+        hasUsedDocuments: !!result?.used_documents,
+        usedDocumentsType: typeof result?.used_documents,
+        usedDocumentsIsArray: Array.isArray(result?.used_documents),
+        hasSummary: !!result?.summary,
+        resultKeys: result ? Object.keys(result) : [],
+        resultPreview: result ? JSON.stringify(result).substring(0, 1000) : 'null'
       });
       
       const normalized = normalizeRagResult(result, config.global_settings?.rag_max_docs);
-      log.debug('RAG result normalized', {
+      log.info('RAG result normalized', {
         type: normalized.type,
         documentsCount: normalized.documents?.length,
-        hasSummary: !!normalized.summary
+        count: normalized.count,
+        hasSummary: !!normalized.summary,
+        source: normalized.source
       });
       return normalized;
     }

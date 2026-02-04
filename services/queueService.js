@@ -74,8 +74,10 @@ function safeStreamEmit(jobId, eventType, data) {
 
 /**
  * Process agent jobs
+ * Only register processor if queue is enabled in config
  */
-agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
+if (config.queue.enabled !== false) {
+    agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
     const jobLogger = createLogger('AgentWorker', job.data.session_id);
     const jobId = job.id;
     const hasStreamCallback = jobStreamCallbacks.has(jobId);
@@ -250,7 +252,15 @@ agentQueue.process(config.queue.workerConcurrency || 3, async (job) => {
 
         throw error;
     }
-});
+    });
+    
+    logger.info('Agent queue processor registered', {
+        workerConcurrency: config.queue.workerConcurrency || 3,
+        enabled: true
+    });
+} else {
+    logger.warn('Agent queue processing is DISABLED in config - jobs will be queued but not processed automatically');
+}
 
 /**
  * Event listeners for monitoring

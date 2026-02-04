@@ -61,7 +61,7 @@ class WorkspaceService {
       // Tabular data
       'csv': 'csv',
       'tsv': 'tsv',
-      'txt': 'text',
+      'txt': 'txt',
       
       // JSON data
       'json': 'json',

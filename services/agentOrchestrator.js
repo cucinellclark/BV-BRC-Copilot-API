@@ -21,6 +21,8 @@ const mcpConfig = require('./mcp/config.json');
 const { createLogger } = require('./logger');
 const fs = require('fs').promises;
 const { emitSSE: emitSSEUtil } = require('./sseUtils');
+const { buildConversationContext } = require('./memory/conversationContextService');
+const { maybeQueueSummary } = require('./summaryQueueService');
 
 function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   // Check if this is a RAG result (has documents and summary)
@@ -266,12 +268,24 @@ async function executeAgentLoop(opts) {
   
   // Get or create chat session
   let chatSession = null;
-  let history = [];
+  let historyContext = '';
   if (session_id) {
     chatSession = await getChatSession(session_id);
     if (include_history && chatSession?.messages) {
-      history = chatSession.messages;
-      logger.info(`Loaded ${history.length} messages from session history`);
+      logger.info(`Loaded ${chatSession.messages.length} messages from session history`);
+      try {
+        const context = await buildConversationContext({
+          session_id,
+          user_id,
+          query: '',
+          system_prompt,
+          include_history,
+          chatSession
+        });
+        historyContext = context.historyText || '';
+      } catch (error) {
+        logger.warn('Failed to build history context, proceeding without it', { error: error.message });
+      }
     }
   }
   
@@ -290,7 +304,7 @@ async function executeAgentLoop(opts) {
         executionTrace,
         toolResults,
         model,
-        history,
+        historyContext,
         logger
       );
       
@@ -388,7 +402,7 @@ async function executeAgentLoop(opts) {
           executionTrace,
           toolResults,
           model,
-          history,
+          historyContext,
           stream,
           responseStream,
           logger,
@@ -552,7 +566,7 @@ async function executeAgentLoop(opts) {
             executionTrace,
             toolResults,
             model,
-            history,
+            historyContext,
             stream,
             responseStream,
             logger,
@@ -572,7 +586,7 @@ async function executeAgentLoop(opts) {
         executionTrace,
         toolResults,
         model,
-        history,
+        historyContext,
         stream,
         responseStream,
         logger,
@@ -639,6 +653,10 @@ async function executeAgentLoop(opts) {
         
         await addMessagesToSession(session_id, messagesToSave);
         logger.info(`Saved ${messagesToSave.length} messages to session ${session_id}`);
+        const messageCount = (chatSession?.messages?.length || 0) + messagesToSave.length;
+        maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+          logger.warn('Failed to queue summary', { error: err.message });
+        });
       } catch (saveError) {
         logger.error('Failed to save chat', { error: saveError.message, stack: saveError.stack });
         // Don't fail the whole request if save fails
@@ -681,7 +699,7 @@ async function executeAgentLoop(opts) {
 /**
  * Plan the next action using LLM
  */
-async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, history = [], logger = null) {
+async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', logger = null) {
   try {
     const log = logger || createLogger('Agent-Planner');
     
@@ -689,11 +707,8 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
     const toolsDescription = await loadToolsForPrompt();
     
     // Format conversation history if available
-    const historyStr = history.length > 0
-      ? `\n\nCONVERSATION HISTORY (for context):\n${history.slice(-5).map(m => {
-          const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-          return `${m.role}: ${content.substring(0, 200)}${content.length > 200 ? '...' : ''}`;
-        }).join('\n')}`
+    const historyStr = historyContext
+      ? `\n\nCONVERSATION HISTORY (for context):\n${historyContext}`
       : '';
     
     // Format execution trace for prompt with duplicate detection
@@ -821,7 +836,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 /**
  * Generate final response to user
  */
-async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, history = [], stream = false, responseStream = null, logger = null, sourceTool = null) {
+async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null) {
   try {
     const log = logger || createLogger('Agent-FinalResponse');
     
@@ -834,11 +849,8 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
     });
     
     // Format conversation history if available
-    const historyStr = history.length > 0
-      ? `\n\nConversation history (for context):\n${history.slice(-5).map(m => {
-          const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-          return `${m.role}: ${content}`;
-        }).join('\n\n')}`
+    const historyStr = historyContext
+      ? `\n\nConversation history (for context):\n${historyContext}`
       : '';
     
     let promptToUse;

@@ -14,6 +14,7 @@ const {
 } = require('./llmServices');
 const { safeParseJson } = require('./jsonUtils');
 const promptManager = require('../prompts');
+const { buildConversationContext } = require('./memory/conversationContextService');
 
 // Lightweight replica of chatService.createQueryFromMessages to avoid a circular
 // dependency.  Falls back to a simple concatenation if the helper microservice
@@ -127,12 +128,22 @@ async function prepareCopilotContext(opts) {
     }
 
     // 6. Build the prompt (history + RAG docs)
-    const max_tokens = 40000;
     let promptWithHistory = finalQuery;
+    const modelSystemPrompt = (system_prompt && system_prompt.trim() !== '')
+      ? system_prompt
+      : promptManager.getSystemPrompt('default');
 
-    if (include_history && history.length > 0) {
+    if (include_history) {
       try {
-        promptWithHistory = await createQueryFromMessages(finalQuery, history, system_prompt, max_tokens);
+        const context = await buildConversationContext({
+          session_id,
+          user_id,
+          query: finalQuery,
+          system_prompt: modelSystemPrompt,
+          include_history,
+          chatSession
+        });
+        promptWithHistory = context.prompt;
       } catch (_) {
         // fall back to the original query if helper fails
       }

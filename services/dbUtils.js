@@ -343,6 +343,49 @@ async function saveSummary(sessionId, summary) {
 }
 
 /**
+ * Get summary document for a session
+ * @param {string} sessionId - The session ID
+ * @returns {Object|null} Summary document or null
+ */
+async function getSummaryBySessionId(sessionId) {
+  try {
+    if (!sessionId) return null;
+    const db = await connectToDatabase();
+    const summaryCollection = db.collection('chatSummaries');
+    return await summaryCollection.findOne({ session_id: sessionId });
+  } catch (error) {
+    throw new LLMServiceError('Failed to get summary', error);
+  }
+}
+
+/**
+ * Save or update summary document with metadata
+ * @param {string} sessionId - The session ID
+ * @param {string} userId - The user ID
+ * @param {object} summaryDoc - Summary fields to write
+ * @returns {Object} Update result
+ */
+async function saveSummaryDoc(sessionId, userId, summaryDoc = {}) {
+  try {
+    const db = await connectToDatabase();
+    const summaryCollection = db.collection('chatSummaries');
+    const updateDoc = {
+      ...summaryDoc,
+      session_id: sessionId,
+      user_id: userId,
+      updated_at: new Date()
+    };
+    return await summaryCollection.updateOne(
+      { session_id: sessionId },
+      { $set: updateDoc },
+      { upsert: true }
+    );
+  } catch (error) {
+    throw new LLMServiceError('Failed to save summary document', error);
+  }
+}
+
+/**
  * Rate a conversation session
  * @param {string} sessionId - The session ID to rate
  * @param {string} userId - The user ID (for security/validation)
@@ -646,6 +689,8 @@ module.exports = {
   addMessagesToSession,
   getOrCreateChatSession,
   saveSummary,
+  getSummaryBySessionId,
+  saveSummaryDoc,
   rateConversation,
   rateMessage,
   storeMessageEmbedding,
