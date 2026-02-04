@@ -31,7 +31,7 @@
     ],
     "finalize_tools": [
       "helpdesk_service_usage",
-      "generate_workflow_manifest",
+      "create_and_execute_workflow",
       "workspace_search_tool",
       "workspace_ls_tool",
       "workspace_ls",
@@ -42,7 +42,7 @@
       "workspace_search_tool",
       "workspace_ls",
       "workspace_search",
-      "generate_workflow_manifest",
+      "create_and_execute_workflow",
       "helpdesk_service_usage"
     ]
   }
