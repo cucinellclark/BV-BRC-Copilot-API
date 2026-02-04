@@ -1,0 +1,49 @@
+{
+  "servers": {
+    "bvbrc_server": {
+      "name": "BV-BRC MCP Server",
+      "url": "http:/140.221.78.67:8051", 
+      "type": "mcp",
+      "auth": null,
+      "timeout": 30000,
+      "description": "Provides access to BV-BRC services, workspace and data",
+      "disabled": false
+    },
+    "internal_server": {
+      "name": "Internal MCP Server",
+      "url": "http://140.221.78.67:8052",
+      "type": "mcp",
+      "auth": null,
+      "timeout": 30000,
+      "description": "Provides access to internal services like code execution and rag databases",
+      "disabled": false
+    }
+  },
+  "global_settings": {
+    "connection_retry_attempts": 3,
+    "connection_retry_delay": 5000,
+    "tool_execution_timeout": 60000,
+    "enable_tool_streaming": true,
+    "token_server_allowlist": ["bvbrc_server", "internal_server"],
+    "rag_max_docs": 5,
+    "rag_tools": [
+      "helpdesk_service_usage"
+    ],
+    "finalize_tools": [
+      "helpdesk_service_usage",
+      "generate_workflow_manifest",
+      "workspace_search_tool",
+      "workspace_ls_tool",
+      "workspace_ls",
+      "query_collection"
+    ],
+    "bypass_file_handling_tools": [
+      "workspace_ls_tool",
+      "workspace_search_tool",
+      "workspace_ls",
+      "workspace_search",
+      "generate_workflow_manifest",
+      "helpdesk_service_usage"
+    ]
+  }
+}

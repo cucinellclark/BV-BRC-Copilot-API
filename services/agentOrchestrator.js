@@ -17,6 +17,7 @@ const {
 } = require('./llmServices');
 const { safeParseJson } = require('./jsonUtils');
 const promptManager = require('../prompts');
+const config = require('../config.json');
 const mcpConfig = require('./mcp/config.json');
 const { createLogger } = require('./logger');
 const fs = require('fs').promises;
@@ -264,7 +265,7 @@ async function executeAgentLoop(opts) {
   let finalResponse = null;
   
   // Get auth token (from opts or config)
-  const authToken = auth_token || mcpConfig.auth_token;
+  const authToken = auth_token || config.auth_token;
   
   // Get or create chat session
   let chatSession = null;

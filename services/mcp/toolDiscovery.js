@@ -5,6 +5,7 @@ const path = require('path');
 const axios = require('axios');
 const { sessionManager } = require('./mcpSessionManager');
 
+const ROOT_CONFIG_PATH = path.join(__dirname, '../../config.json');
 const MCP_CONFIG_PATH = path.join(__dirname, 'config.json');
 const TOOLS_MANIFEST_PATH = path.join(__dirname, 'tools.json');
 const TOOLS_PROMPT_PATH = path.join(__dirname, 'tools-for-prompt.txt');
@@ -18,6 +19,10 @@ async function discoverTools() {
   console.log('[MCP Tool Discovery] Starting...');
   
   try {
+    // Load root config for auth_token
+    const rootConfigFile = await fs.readFile(ROOT_CONFIG_PATH, 'utf8');
+    const rootConfig = JSON.parse(rootConfigFile);
+    
     // Load MCP config
     const configFile = await fs.readFile(MCP_CONFIG_PATH, 'utf8');
     const config = JSON.parse(configFile);
@@ -37,7 +42,7 @@ async function discoverTools() {
     // Fetch tools from enabled servers only
     const serverPromises = enabledServers.map(
       ([serverKey, serverConfig]) => {
-        return fetchServerTools(serverKey, serverConfig, config.global_settings, config.auth_token);
+        return fetchServerTools(serverKey, serverConfig, config.global_settings, rootConfig.auth_token);
       }
     );
     

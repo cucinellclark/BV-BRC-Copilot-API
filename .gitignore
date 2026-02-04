@@ -1,4 +1,4 @@
-config.json
+/config.json
 mongodb_config.json
 
 *__pycache__*
