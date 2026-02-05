@@ -94,3 +94,10 @@
 [2026-01-28 14:29:20 -0600] [2517867] [INFO] Booting worker with pid: 2517867
 [2026-01-28 14:29:20 -0600] [2517868] [INFO] Booting worker with pid: 2517868
 [2026-01-28 14:29:20 -0600] [2517869] [INFO] Booting worker with pid: 2517869
+[2026-02-05 08:18:01 -0600] [717929] [INFO] Starting gunicorn 23.0.0
+[2026-02-05 08:18:01 -0600] [717929] [INFO] Listening at: http://0.0.0.0:5000 (717929)
+[2026-02-05 08:18:01 -0600] [717929] [INFO] Using worker: gevent
+[2026-02-05 08:18:01 -0600] [717944] [INFO] Booting worker with pid: 717944
+[2026-02-05 08:18:01 -0600] [717945] [INFO] Booting worker with pid: 717945
+[2026-02-05 08:18:01 -0600] [717946] [INFO] Booting worker with pid: 717946
+[2026-02-05 08:18:01 -0600] [717947] [INFO] Booting worker with pid: 717947

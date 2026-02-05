@@ -8,6 +8,7 @@
  * Usage:
  *   node purge-queues.js
  *   node purge-queues.js --dry-run  (show what would be purged without actually purging)
+ *   node purge-queues.js --stop-active  (stop/cancel active jobs before purging)
  */
 
 const Queue = require('bull');
@@ -22,6 +23,38 @@ const redisConfig = {
 // Parse command line arguments
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run') || args.includes('-d');
+const stopActive = args.includes('--stop-active') || args.includes('-s');
+
+/**
+ * Stop/cancel active jobs in a queue
+ * @param {Queue} queue - Bull queue instance
+ * @param {string} queueName - Name of the queue for logging
+ * @returns {Promise<number>} Number of active jobs stopped
+ */
+async function stopActiveJobs(queue, queueName) {
+    const activeJobs = await queue.getActive();
+    
+    if (activeJobs.length === 0) {
+        console.log(`[${queueName}] No active jobs to stop`);
+        return 0;
+    }
+    
+    console.log(`[${queueName}] Stopping ${activeJobs.length} active job(s)...`);
+    
+    let stoppedCount = 0;
+    for (const job of activeJobs) {
+        try {
+            await job.remove();
+            stoppedCount++;
+            console.log(`[${queueName}]   ✓ Stopped job ${job.id}`);
+        } catch (error) {
+            console.log(`[${queueName}]   ✗ Failed to stop job ${job.id}: ${error.message}`);
+        }
+    }
+    
+    console.log(`[${queueName}] ✓ Stopped ${stoppedCount} of ${activeJobs.length} active job(s)`);
+    return stoppedCount;
+}
 
 /**
  * Purge a queue completely
@@ -79,6 +112,15 @@ async function purgeQueue(queue, queueName) {
         };
     }
     
+    // Stop active jobs if requested
+    let stoppedActive = 0;
+    if (stopActive && active > 0 && !dryRun) {
+        stoppedActive = await stopActiveJobs(queue, queueName);
+        // Re-check active count after stopping
+        const newActive = await queue.getActiveCount();
+        active = newActive;
+    }
+    
     console.log(`[${queueName}] Purging all jobs...`);
     
     try {
@@ -91,8 +133,9 @@ async function purgeQueue(queue, queueName) {
         return {
             queueName,
             purged: totalBefore,
+            stoppedActive,
             waiting,
-            active,
+            active: 0, // All jobs purged
             delayed,
             completed,
             failed,
@@ -120,23 +163,31 @@ async function purgeQueue(queue, queueName) {
         const failedCleaned = await queue.clean(0, 'failed');
         totalPurged += failedCleaned.length;
         
+        // Re-check active count
+        const remainingActive = await queue.getActiveCount();
+        
         // Note: Active jobs cannot be cleaned while running
-        if (active > 0) {
-            console.log(`[${queueName}] ⚠ Warning: ${active} active job(s) cannot be purged while running`);
-            console.log(`[${queueName}]    Wait for them to complete or restart the API with queue.enabled=false`);
+        if (remainingActive > 0) {
+            console.log(`[${queueName}] ⚠ Warning: ${remainingActive} active job(s) cannot be purged while running`);
+            if (!stopActive) {
+                console.log(`[${queueName}]    Use --stop-active flag to stop active jobs, or wait for them to complete`);
+            } else {
+                console.log(`[${queueName}]    Some active jobs could not be stopped`);
+            }
         }
         
-        console.log(`[${queueName}] ✓ Purged ${totalPurged} jobs (${active} active jobs remain)`);
+        console.log(`[${queueName}] ✓ Purged ${totalPurged} jobs (${remainingActive} active jobs remain)`);
         
         return {
             queueName,
             purged: totalPurged,
+            stoppedActive,
             waiting: 0,
-            active, // Active jobs remain
+            active: remainingActive, // Active jobs remain
             delayed: 0,
             completed: 0,
             failed: 0,
-            total: totalPurged + active
+            total: totalPurged + remainingActive
         };
     }
 }
@@ -153,6 +204,9 @@ async function main() {
         console.log('\n⚠ DRY RUN MODE - No jobs will be actually purged\n');
     } else {
         console.log('\n⚠ WARNING: This will permanently delete all jobs from the queues!');
+        if (stopActive) {
+            console.log('   Active jobs will be stopped before purging.');
+        }
         console.log('   Press Ctrl+C within 5 seconds to cancel...\n');
         
         // Give user 5 seconds to cancel
@@ -182,9 +236,14 @@ async function main() {
         let totalPurged = 0;
         let totalRemaining = 0;
         
+        let totalStopped = 0;
         results.forEach(result => {
             console.log(`\n[${result.queueName}]:`);
             console.log(`  Purged: ${result.purged} jobs`);
+            if (result.stoppedActive > 0) {
+                console.log(`  Stopped (active): ${result.stoppedActive} jobs`);
+                totalStopped += result.stoppedActive;
+            }
             if (result.active > 0) {
                 console.log(`  Remaining (active): ${result.active} jobs`);
                 totalRemaining += result.active;
@@ -193,8 +252,11 @@ async function main() {
         });
         
         console.log(`\nTotal: ${totalPurged} jobs purged`);
+        if (totalStopped > 0) {
+            console.log(`       ${totalStopped} active jobs stopped`);
+        }
         if (totalRemaining > 0) {
-            console.log(`       ${totalRemaining} active jobs remain (will complete or can be stopped)`);
+            console.log(`       ${totalRemaining} active jobs remain (use --stop-active to stop them)`);
         }
         
         if (dryRun) {
