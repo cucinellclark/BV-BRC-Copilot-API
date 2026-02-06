@@ -66,7 +66,7 @@ async function purgeQueue(queue, queueName) {
     console.log(`\n[${queueName}] Checking queue status...`);
     
     // Get counts before purge
-    const [waiting, active, delayed, completed, failed] = await Promise.all([
+    let [waiting, active, delayed, completed, failed] = await Promise.all([
         queue.getWaitingCount(),
         queue.getActiveCount(),
         queue.getDelayedCount(),
