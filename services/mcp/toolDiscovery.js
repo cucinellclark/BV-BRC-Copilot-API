@@ -9,7 +9,6 @@ const ROOT_CONFIG_PATH = path.join(__dirname, '../../config.json');
 const MCP_CONFIG_PATH = path.join(__dirname, 'config.json');
 const TOOLS_MANIFEST_PATH = path.join(__dirname, 'tools.json');
 const TOOLS_PROMPT_PATH = path.join(__dirname, 'tools-for-prompt.txt');
-const LOCAL_TOOLS_PATH = path.join(__dirname, 'local-tools.json');
 
 /**
  * Discover tools from all configured MCP servers
@@ -234,7 +233,14 @@ async function writeToolsForPrompt(manifest) {
         Object.entries(tool.inputSchema.properties).forEach(([paramName, paramSpec]) => {
           const required = tool.inputSchema.required?.includes(paramName) ? ' (required)' : '';
           const description = paramSpec.description || '';
-          promptText += `- ${paramName}${required}: ${paramSpec.type} - ${description}\n`;
+          // Hide/annotate parameters that the system will inject server-side.
+          // In particular, internal_server.* file tools operate on Copilot session files and
+          // MUST be bound to the trusted chat session_id, not an LLM-supplied value.
+          if (toolId.startsWith('internal_server.') && paramName === 'session_id') {
+            promptText += `- ${paramName}${required}: ${paramSpec.type} - (auto-provided by system; do NOT set)\n`;
+          } else {
+            promptText += `- ${paramName}${required}: ${paramSpec.type} - ${description}\n`;
+          }
         });
       }
       
@@ -243,38 +249,6 @@ async function writeToolsForPrompt(manifest) {
     
     promptText += '\n';
   });
-  
-  // Append local tools
-  try {
-    const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
-    const localToolsConfig = JSON.parse(localToolsFile);
-    
-    promptText += `## Local Meta-Tools\n`;
-    promptText += `${localToolsConfig.description}\n\n`;
-    
-    Object.entries(localToolsConfig.tools).forEach(([toolId, tool]) => {
-      // Skip disabled tools
-      if (tool.disabled) return;
-      
-      promptText += `### ${toolId}\n`;
-      promptText += `Tool Name: ${tool.name}\n`;
-      promptText += `${tool.description}\n`;
-      
-      if (tool.inputSchema?.properties) {
-        promptText += `**Parameters:**\n`;
-        Object.entries(tool.inputSchema.properties).forEach(([paramName, paramSpec]) => {
-          const required = tool.inputSchema.required?.includes(paramName) ? ' (required)' : '';
-          const description = paramSpec.description || '';
-          const enumValues = paramSpec.enum ? ` [Options: ${paramSpec.enum.join(', ')}]` : '';
-          promptText += `- ${paramName}${required}: ${paramSpec.type} - ${description}${enumValues}\n`;
-        });
-      }
-      
-      promptText += '\n';
-    });
-  } catch (error) {
-    console.warn('[MCP Tool Discovery] Could not load local tools, skipping');
-  }
   
   await fs.writeFile(TOOLS_PROMPT_PATH, promptText);
 }
@@ -305,27 +279,9 @@ async function loadToolsForPrompt() {
 }
 
 /**
- * Get tool definition by ID (checks both MCP and local tools)
+ * Get tool definition by ID
  */
 async function getToolDefinition(toolId) {
-  // Check if it's a local tool
-  if (toolId && toolId.startsWith('local.')) {
-    try {
-      const localToolsFile = await fs.readFile(LOCAL_TOOLS_PATH, 'utf8');
-      const localToolsConfig = JSON.parse(localToolsFile);
-      const tool = localToolsConfig.tools[toolId];
-      // Return null if tool doesn't exist or is disabled
-      if (!tool || tool.disabled) {
-        return null;
-      }
-      return tool;
-    } catch (error) {
-      console.warn('[MCP] Failed to load local tool definition');
-      return null;
-    }
-  }
-  
-  // Check MCP tools
   const manifest = await loadToolsManifest();
   return manifest?.tools[toolId] || null;
 }

@@ -65,14 +65,7 @@ flowchart TD
     AddToTrace --> IsFinalize{action == 'FINALIZE'?}
     
     IsFinalize --> |Yes| GenerateFinal[Generate Final Response]
-    IsFinalize --> |No| IsWorkflow{action == 'local.create_workflow'?}
-    
-    IsWorkflow --> |Yes| ExecuteWorkflow[Execute Workflow Tool<br/>via executeMcpTool]
-    IsWorkflow --> |No| ExecuteTool[Execute Tool<br/>via executeMcpTool]
-    
-    ExecuteWorkflow --> WorkflowSuccess{Success?}
-    WorkflowSuccess --> |Yes| FormatWorkflow[Format Workflow Response<br/>Emit 'workflow_created' SSE<br/>Set finalResponse<br/>Break loop]
-    WorkflowSuccess --> |No| WorkflowError[Handle Error<br/>Set finalResponse with error<br/>Break loop]
+    IsFinalize --> |No| ExecuteTool[Execute Tool<br/>via executeMcpTool]
     
     ExecuteTool --> PrepareResult[Prepare Tool Result:<br/>- Check if RAG result<br/>- Extract documents & summary<br/>- Store RAG docs separately<br/>- Create safe result for LLM]
     
@@ -97,8 +90,6 @@ flowchart TD
     %% Final Response Generation
     MaxIterReached --> GenerateFinal
     UseSummary --> SaveChat
-    FormatWorkflow --> SaveChat
-    WorkflowError --> SaveChat
     
     GenerateFinal --> CheckToolResults{Has Tool Results?}
     CheckToolResults --> |Yes| ToolBasedResponse[Format Tool-Based Response:<br/>- Format execution trace<br/>- Format tool results<br/>- Build finalResponse prompt]
@@ -190,7 +181,6 @@ Each iteration includes:
 
 ### 5. **Tool Categories**
 - **Finalize Tools**: Automatically trigger final response (e.g., RAG tools)
-- **Workflow Tools**: Create multi-step workflow plans
 - **Data Tools**: Query BV-BRC collections, file operations
 - **FINALIZE Action**: Explicit finalization by planner
 
@@ -214,7 +204,6 @@ Two paths:
 - `duplicate_detected`: When duplicate action detected
 - `forced_finalize`: When forcing finalization
 - `tool_executed`: After tool execution
-- `workflow_created`: When workflow generated
 - `final_response`: Streaming final answer chunks
 - `done`: Completion metadata
 - `error`: Error information

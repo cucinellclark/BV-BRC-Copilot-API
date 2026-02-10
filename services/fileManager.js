@@ -57,6 +57,14 @@ class FileManager {
   }
 
   /**
+   * Returns true when the tool result is an error payload (common pattern: { error: true, ... }).
+   * We still save these locally, but we avoid uploading them to BV-BRC Workspace.
+   */
+  isErrorPayload(data) {
+    return !!(data && typeof data === 'object' && (data.error === true || data.isError === true));
+  }
+
+  /**
    * Initialize the file manager (create base directory)
    */
   async init() {
@@ -151,6 +159,7 @@ class FileManager {
 
     // Normalize the result - handles API-specific formats
     const normalized = normalizeToolResult(result);
+    const isErrorPayload = this.isErrorPayload(normalized.data);
 
     // Generate unique file ID and name
     const fileId = crypto.randomUUID();
@@ -161,6 +170,13 @@ class FileManager {
     
     // Create summary from normalized data
     const summary = createSummary(normalized, size);
+
+    // If this is an error payload, don't let it masquerade as "data" in downstream logic.
+    // For json_object errors, createSummary() would otherwise count object keys.
+    if (isErrorPayload) {
+      summary.recordCount = 0;
+      summary.fields = [];
+    }
     
     // Save the normalized data (unwrapped if applicable)
     const dataToSave = this.serializeForStorage(normalized.data, normalized.dataType);
@@ -198,7 +214,7 @@ class FileManager {
     // Upload to workspace if enabled
     // This ensures all files saved to /tmp are automatically uploaded to workspace
     let workspaceInfo = null;
-    if (this.uploadToWorkspace) {
+    if (this.uploadToWorkspace && !isErrorPayload) {
       if (context.authToken && context.user_id) {
         try {
           // Extract userId from token (may include domain like user@domain.com)
@@ -284,6 +300,14 @@ class FileManager {
         });
         metadata.workspaceUploadSkipped = `Missing: ${missingAuth.join(', ')}`;
       }
+    } else if (this.uploadToWorkspace && isErrorPayload) {
+      // Optimization: error payloads are useful for debugging but not worth the remote upload cost.
+      console.log('[FileManager] Workspace upload skipped - tool returned error payload', {
+        toolId,
+        fileName,
+        sessionId
+      });
+      metadata.workspaceUploadSkipped = 'Tool returned error payload';
     }
 
     await this.updateMetadata(sessionId, metadata);
@@ -291,9 +315,11 @@ class FileManager {
     // Return file reference
     const fileReference = {
       type: 'file_reference',
-      fileId,
+      // Standardize on snake_case for MCP tool compatibility.
+      file_id: fileId,
       fileName,
       filePath,
+      isError: isErrorPayload,
       summary: {
         dataType: normalized.dataType,
         size,
@@ -302,8 +328,16 @@ class FileManager {
         fields: summary.fields,
         sampleRecord: summary.sampleRecord
       },
-      message: `Large result saved to file (${formatSize(size)}, ${summary.recordCount} records)`
+      message: isErrorPayload
+        ? `Tool error saved to file (${formatSize(size)})`
+        : `Large result saved to file (${formatSize(size)}, ${summary.recordCount} records)`
     };
+
+    // Include structured error hints when possible (useful for planner + UI)
+    if (isErrorPayload && normalized?.data && typeof normalized.data === 'object') {
+      if (normalized.data.errorType) fileReference.errorType = normalized.data.errorType;
+      if (normalized.data.message) fileReference.errorMessage = normalized.data.message;
+    }
 
     // Add query parameters to file reference if present (for query_collection tools)
     if (normalized.metadata && normalized.metadata.queryParameters) {
@@ -336,6 +370,20 @@ class FileManager {
         }
         
         console.log(`[FileManager] Updated metadata in database for session ${sessionId}`);
+
+        // IMPORTANT: Keep an on-disk metadata.json in sync as well.
+        // The internal_server "file utilities" MCP tools typically operate on:
+        //   /tmp/copilot/sessions/{session_id}/metadata.json
+        // and won't see Mongo-only metadata.
+        try {
+          await this.writeMetadataFileFromDb(sessionId);
+        } catch (syncErr) {
+          console.warn('[FileManager] Failed to sync metadata.json from database, falling back to append mode', {
+            sessionId,
+            error: syncErr.message
+          });
+          await this.updateMetadataFile(sessionId, fileInfo);
+        }
       } catch (error) {
         console.error(`[FileManager] Failed to save metadata to database:`, error);
         // Fall back to JSON file on error
@@ -345,6 +393,32 @@ class FileManager {
       // Store in JSON file
       await this.updateMetadataFile(sessionId, fileInfo);
     }
+  }
+
+  /**
+   * Write a complete metadata.json for the session from database state.
+   * This keeps compatibility with MCP servers/tools that expect the JSON file.
+   */
+  async writeMetadataFileFromDb(sessionId) {
+    if (!this.useDatabase) return;
+    if (!this.dbUtils) throw new Error('Database utils not available');
+
+    const files = await this.dbUtils.getSessionFiles(sessionId);
+    const totalSize = await this.dbUtils.getSessionStorageSize(sessionId);
+
+    const metadataPath = this.getMetadataPath(sessionId);
+    await fs.mkdir(this.getSessionDir(sessionId), { recursive: true });
+
+    const metadata = {
+      session_id: sessionId,
+      created: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+      files: Array.isArray(files) ? files : [],
+      totalSize: totalSize || 0
+    };
+
+    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
+    console.log(`[FileManager] Synced metadata file from database for session ${sessionId}`);
   }
 
   /**

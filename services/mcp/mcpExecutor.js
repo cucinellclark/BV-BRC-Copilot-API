@@ -3,7 +3,6 @@
 const axios = require('axios');
 const { getToolDefinition, loadToolsManifest } = require('./toolDiscovery');
 const { sessionManager } = require('./mcpSessionManager');
-const { isLocalTool, executeLocalTool } = require('./localToolExecutor');
 const { McpStreamHandler } = require('./mcpStreamHandler');
 const { fileManager } = require('../fileManager');
 const { createLogger } = require('../logger');
@@ -31,6 +30,49 @@ function shouldBypassFileHandling(toolId) {
   if (!toolId) return false;
   const bypassList = config.global_settings?.bypass_file_handling_tools || [];
   return bypassList.some(fragment => toolId.includes(fragment));
+}
+
+/**
+ * Apply server-side overrides for parameters that should NOT be controlled by the LLM.
+ *
+ * Today this is primarily used to bind "internal_server.*" file tools to the current
+ * Copilot chat session. Those tools operate on files stored under:
+ *   /tmp/copilot/sessions/{session_id}/downloads
+ *
+ * Letting the LLM supply session_id is fragile (it may invent "default").
+ * We always force it from the trusted execution context.
+ */
+function applySystemParameterOverrides(toolId, parameters = {}, context = {}, log = null, toolDef = null) {
+  const safeParams = (parameters && typeof parameters === 'object') ? { ...parameters } : {};
+
+  // Check if tool schema accepts session_id (for any server, not just internal_server)
+  if (toolId && context?.session_id && toolDef?.inputSchema?.properties) {
+    const acceptsSessionId = !!(
+      Object.prototype.hasOwnProperty.call(toolDef.inputSchema.properties, 'session_id')
+    );
+
+    if (acceptsSessionId) {
+      const provided = safeParams.session_id;
+      if (provided && provided !== context.session_id) {
+        (log?.warn || console.warn)('[MCP] Overriding tool session_id from untrusted parameters', {
+          toolId,
+          providedSessionId: provided,
+          forcedSessionId: context.session_id
+        });
+      }
+      safeParams.session_id = context.session_id;
+    } else {
+      // If the LLM provided it anyway but tool doesn't accept it, strip it to avoid breaking the tool call.
+      if (safeParams.session_id !== undefined) {
+        (log?.warn || console.warn)('[MCP] Removing unsupported session_id parameter for tool', {
+          toolId
+        });
+        delete safeParams.session_id;
+      }
+    }
+  }
+
+  return safeParams;
 }
 
 /**
@@ -671,25 +713,17 @@ fileManager.init().catch(err => {
 });
 
 /**
- * Execute an MCP tool or local pseudo-tool
+ * Execute an MCP tool
  * 
- * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection" or "local.get_file_info")
+ * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection")
  * @param {object} parameters - Tool parameters
  * @param {string} authToken - Authentication token
- * @param {object} context - Additional context for local tools (query, model, etc.)
+ * @param {object} context - Additional context (query, model, etc.)
  * @param {Logger} logger - Optional logger instance
  * @returns {Promise<object>} Tool execution result
  */
 async function executeMcpTool(toolId, parameters = {}, authToken = null, context = {}, logger = null) {
   const log = logger || createLogger('MCP-Executor', context.session_id);
-  
-  log.info(`Executing tool: ${toolId}`, { parameters });
-  
-  // Handle local pseudo-tools
-  if (isLocalTool(toolId)) {
-    log.info('Routing to local tool executor');
-    return await executeLocalTool(toolId, parameters, context, log);
-  }
   
   try {
     // Load tool definition
@@ -719,6 +753,12 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       log.error('Tool not found', { toolId });
       throw new Error(`Tool not found: ${toolId}`);
     }
+
+    // Never trust the LLM with certain IDs (e.g., internal_server session_id)
+    // Apply overrides AFTER resolving tool definition so we can honor the schema.
+    parameters = applySystemParameterOverrides(toolId, parameters, context, log, toolDef);
+
+    log.info(`Executing tool: ${toolId}`, { parameters });
     
     // Get server config
     const serverKey = toolDef.server;

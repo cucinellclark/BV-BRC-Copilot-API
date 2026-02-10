@@ -15,26 +15,15 @@ EXECUTION GUIDELINES:
 3. For data queries, use solr_collection_parameters first to understand available fields and collections
 4. Use countOnly:true when you only need to know how many results exist
 5. Always include the token parameter (it will be auto-provided)
+6. For internal_server.* file tools: NEVER choose or invent a session_id (e.g. "default"). The system will inject/bind the correct Copilot session_id automatically.
 6. When you have sufficient information to answer the user's question, choose FINALIZE
 
 CRITICAL - UNDERSTANDING FILE REFERENCES:
-When a tool returns a file_reference (type: 'file_reference'), the data has been SUCCESSFULLY RETRIEVED and saved.
-The file_reference contains a complete summary including:
-  - recordCount: number of records retrieved
-  - fields: list of all available fields in the data
-  - sampleRecord: example of the actual data retrieved
-  - dataType: type of data (json_array, csv, etc.)
+When a tool returns a file_reference (type: 'file_reference'), the tool has either successfully retrieved the data and saved it to a file, or it has failed to retrieve the data and returned a file_reference with an error message.
 
-This summary IS the result - you have successfully retrieved the data!
+IMPORTANT - FILE ID PARAMETER NAME:
+File references include a file identifier "file_id". When calling internal_server file tools, pass this value using the parameter name "file_id" (the system will inject session_id automatically).
 
-DO NOT repeat the same query just because you received a file_reference.
-If you need to access or analyze the saved file data further, use:
-  - local.get_file_info: Get complete metadata about the file
-  - internal_server.query_json: Filter/query the data
-  - internal_server.read_file_lines: Read specific portions
-  - internal_server.search_file: Search within the data
-
-If the file_reference summary contains enough information to answer the user's query, FINALIZE immediately.
 
 CRITICAL - AVOID INFINITE LOOPS:
 Before choosing your next action, check the execution trace carefully:
@@ -53,6 +42,9 @@ PREVIOUS EXECUTION TRACE:
 
 TOOL RESULTS SO FAR:
 {{toolResults}}
+
+SESSION MEMORY (authoritative state):
+{{sessionMemory}}
 
 USER QUERY: {{query}}
 

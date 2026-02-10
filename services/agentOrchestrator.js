@@ -24,6 +24,8 @@ const fs = require('fs').promises;
 const { emitSSE: emitSSEUtil } = require('./sseUtils');
 const { buildConversationContext } = require('./memory/conversationContextService');
 const { maybeQueueSummary } = require('./summaryQueueService');
+const { maybeQueueSessionFacts } = require('./sessionFactsQueueService');
+const { getSessionMemory, updateSessionMemory, formatSessionMemory } = require('./memory/sessionMemoryService');
 
 function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   // Check if this is a RAG result (has documents and summary)
@@ -263,6 +265,7 @@ async function executeAgentLoop(opts) {
   let iteration = 0;
   let finalResponseSourceTool = null; // Track which tool generated the final response
   let finalResponse = null;
+  let sessionMemory = null;
   
   // Get auth token (from opts or config)
   const authToken = auth_token || config.auth_token;
@@ -290,6 +293,14 @@ async function executeAgentLoop(opts) {
     }
   }
   
+  if (session_id) {
+    try {
+      sessionMemory = await getSessionMemory(session_id, user_id);
+    } catch (error) {
+      logger.warn('Failed to load session memory, proceeding without it', { error: error.message });
+    }
+  }
+  
   // Create user message
   const userMessage = createMessage('user', query);
   
@@ -306,6 +317,7 @@ async function executeAgentLoop(opts) {
         toolResults,
         model,
         historyContext,
+        sessionMemory,
         logger
       );
       
@@ -407,7 +419,8 @@ async function executeAgentLoop(opts) {
           stream,
           responseStream,
           logger,
-          null // No specific tool for FINALIZE action
+          null, // No specific tool for FINALIZE action
+          sessionMemory
         );
         break;
       }
@@ -438,6 +451,12 @@ async function executeAgentLoop(opts) {
         if (ragStorage) {
           collectedRagDocs.push(ragStorage);
         }
+
+        const isErrorResult = !!(
+          safeResult &&
+          typeof safeResult === 'object' &&
+          (safeResult.isError === true || safeResult.error === true)
+        );
         
         // Log what we got from prepareToolResult for debugging
         logger.debug('Tool result prepared', {
@@ -450,13 +469,41 @@ async function executeAgentLoop(opts) {
         
         toolResults[nextAction.action] = safeResult;
         traceEntry.result = safeResult;
-        traceEntry.status = 'success';
+        traceEntry.status = isErrorResult ? 'error' : 'success';
+
+        if (session_id) {
+          try {
+            sessionMemory = await updateSessionMemory({
+              session_id,
+              user_id,
+              toolId: nextAction.action,
+              parameters: nextAction.parameters,
+              result: safeResult
+            });
+          } catch (memoryError) {
+            logger.warn('Failed to update session memory', { error: memoryError.message });
+          }
+        }
+
+        if (session_id) {
+          maybeQueueSessionFacts({
+            session_id,
+            user_id,
+            user_query: query,
+            model,
+            toolId: nextAction.action,
+            parameters: nextAction.parameters,
+            result: safeResult
+          }).catch((factsError) => {
+            logger.warn('Failed to queue session facts update', { error: factsError.message });
+          });
+        }
         
         logger.logToolExecution(
           nextAction.action,
           nextAction.parameters,
           safeResult,
-          'success'
+          traceEntry.status
         );
         
         logger.logAgentIteration(
@@ -465,7 +512,7 @@ async function executeAgentLoop(opts) {
           nextAction.reasoning,
           nextAction.parameters,
           safeResult,
-          'success'
+          traceEntry.status
         );
         
         // Emit SSE event for tool execution result
@@ -473,7 +520,7 @@ async function executeAgentLoop(opts) {
           emitSSE(responseStream, 'tool_executed', {
             iteration,
             tool: nextAction.action,
-            status: 'success',
+            status: traceEntry.status,
             result: safeResult
           });
         }
@@ -571,7 +618,8 @@ async function executeAgentLoop(opts) {
             stream,
             responseStream,
             logger,
-            null // Error case, no specific tool
+            null, // Error case, no specific tool
+            sessionMemory
           );
           break;
         }
@@ -591,7 +639,8 @@ async function executeAgentLoop(opts) {
         stream,
         responseStream,
         logger,
-        null // Max iterations, no specific tool
+        null, // Max iterations, no specific tool
+        sessionMemory
       );
     }
     
@@ -700,7 +749,7 @@ async function executeAgentLoop(opts) {
 /**
  * Plan the next action using LLM
  */
-async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', logger = null) {
+async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', sessionMemory = null, logger = null) {
   try {
     const log = logger || createLogger('Agent-Planner');
     
@@ -755,12 +804,20 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
             Object.entries(toolResults).map(([key, value]) => {
               // Check if this is a file reference (expected for all results)
               if (value && value.type === 'file_reference') {
-                return [key, {
+                const isErrorRef = value.isError === true || value.error === true;
+                return [key, isErrorRef ? {
+                  type: 'ERROR_SAVED',
+                  file_id: value.file_id,
+                  errorType: value.errorType,
+                  errorMessage: value.errorMessage,
+                  message: value.message,
+                  note: 'Tool returned an error payload saved to file. Inspect it with internal_server file tools and adjust inputs/tool choice.'
+                } : {
                   type: 'FILE_SAVED',
-                  fileId: value.fileId,
+                  file_id: value.file_id,
                   summary: value.summary,
                   message: value.message,
-                  note: 'Result saved to file. Use local.get_file_info to see details, then use internal_server file tools to query/extract data.'
+                  note: 'Result saved to file. Use internal_server file tools to query/extract data.'
                 }];
               }
               
@@ -777,6 +834,10 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
         )
       : 'No tool results yet';
     
+    const sessionMemoryStr = sessionMemory
+      ? formatSessionMemory(sessionMemory)
+      : 'No session memory available';
+    
     // Build planning prompt
     const planningPrompt = promptManager.formatPrompt(
       promptManager.getAgentPrompt('taskPlanning'),
@@ -784,6 +845,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
         tools: toolsDescription,
         executionTrace: traceStr,
         toolResults: resultsStr,
+        sessionMemory: sessionMemoryStr,
         query: query,
         systemPrompt: (systemPrompt || 'No additional context') + historyStr
       }
@@ -837,7 +899,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 /**
  * Generate final response to user
  */
-async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null) {
+async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null, sessionMemory = null) {
   try {
     const log = logger || createLogger('Agent-FinalResponse');
     
@@ -854,6 +916,11 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       ? `\n\nConversation history (for context):\n${historyContext}`
       : '';
     
+    // Format session memory if available
+    const sessionMemoryStr = sessionMemory
+      ? `\n\nSession Facts:\n${formatSessionMemory(sessionMemory)}`
+      : '';
+    
     let promptToUse;
     
     if (isDirectResponse) {
@@ -863,7 +930,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         {
           query: query,
           systemPrompt: systemPrompt || 'No additional context',
-          historyContext: historyStr
+          historyContext: historyStr + sessionMemoryStr
         }
       );
     } else {
@@ -876,12 +943,19 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       const resultsStr = Object.entries(toolResults).map(([tool, result]) => {
         // Check if this is a file reference (expected for all results)
         if (result && result.type === 'file_reference') {
+          if (result.isError === true || result.error === true) {
+            return `${tool}:\n[ERROR SAVED]\n` +
+                   `File ID: ${result.file_id}\n` +
+                   `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
+                   `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
+                   `Use internal_server file tools (e.g., preview_file, query_json) to inspect the saved error payload.\n`;
+          }
           return `${tool}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
                  `Data Type: ${result.summary.dataType}\n` +
                  `Fields: ${result.summary.fields.join(', ')}\n` +
                  `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
-                 `File ID: ${result.fileId}\n` +
-                 `Use local.get_file_info to get full details, then use internal_server file tools to query/extract data.\n`;
+                 `File ID: ${result.file_id}\n` +
+                 `Use internal_server file tools (e.g., preview_file, query_json, read_file_lines) to query/extract data.\n`;
         }
         
         // Fallback for non-file-reference results (should be rare/error cases)
@@ -899,7 +973,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
           query: query,
           executionTrace: traceStr,
           toolResults: resultsStr || 'No tool results available',
-          systemPrompt: systemPrompt || 'No additional context'
+          systemPrompt: (systemPrompt || 'No additional context') + sessionMemoryStr
         }
       );
     }
