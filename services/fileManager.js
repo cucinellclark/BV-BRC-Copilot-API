@@ -202,6 +202,17 @@ class FileManager {
       lastAccessed: new Date().toISOString()
     };
     
+    // Add source metadata if present (includes result_type, tool_name, etc.)
+    if (summary.sourceMetadata) {
+      metadata.sourceMetadata = summary.sourceMetadata;
+      console.log(`[FileManager] Added source metadata`, {
+        toolId,
+        source: summary.sourceMetadata.source,
+        result_type: summary.sourceMetadata.result_type,
+        tool_name: summary.sourceMetadata.tool_name
+      });
+    }
+    
     // Add query parameters from normalized metadata if present (for query_collection tools)
     if (normalized.metadata && normalized.metadata.queryParameters) {
       metadata.queryParameters = normalized.metadata.queryParameters;
@@ -326,7 +337,8 @@ class FileManager {
         sizeFormatted: formatSize(size),
         recordCount: summary.recordCount,
         fields: summary.fields,
-        sampleRecord: summary.sampleRecord
+        sampleRecord: summary.sampleRecord,
+        sourceMetadata: summary.sourceMetadata // Include source metadata (result_type, tool_name, etc.)
       },
       message: isErrorPayload
         ? `Tool error saved to file (${formatSize(size)})`

@@ -32,14 +32,12 @@
     "finalize_tools": [
       "helpdesk_service_usage",
       "create_and_execute_workflow",
-      "workspace_search_tool",
-      "workspace_ls_tool",
+      "workspace_browse_tool",
       "workspace_ls",
       "workspace_search"
     ],
     "bypass_file_handling_tools": [
-      "workspace_ls_tool",
-      "workspace_search_tool",
+      "workspace_browse_tool",
       "workspace_ls",
       "workspace_search",
       "create_and_execute_workflow",

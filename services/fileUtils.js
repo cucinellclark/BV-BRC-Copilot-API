@@ -30,44 +30,72 @@ function normalizeToolResult(result) {
       // Check for TSV format first (new default from MCP server)
       if ('tsv' in result && typeof result.tsv === 'string') {
         console.log('[FileUtils] Extracting TSV string from BV-BRC response');
-        metadata = {
-          source: 'bvbrc-mcp-data',
-          totalCount: result.count || result.numFound,
-          nextCursorId: result.nextCursorId
-        };
-        // Preserve query parameters if present
-        if (result.queryParameters) {
-          metadata.queryParameters = result.queryParameters;
+        // Preserve ALL fields except the data string
+        metadata = { ...result };
+        delete metadata.tsv; // Remove the data string
+        // Ensure totalCount is set for consistency
+        if (result.count !== undefined || result.numFound !== undefined) {
+          metadata.totalCount = result.count || result.numFound;
         }
         data = result.tsv;
       }
       // Fallback to JSON format for backward compatibility
       else if ('results' in result && Array.isArray(result.results)) {
         console.log('[FileUtils] Extracting results array from BV-BRC response');
-        metadata = {
-          source: 'bvbrc-mcp-data',
-          totalCount: result.count || result.numFound,
-          nextCursorId: result.nextCursorId
-        };
-        // Preserve query parameters if present
-        if (result.queryParameters) {
-          metadata.queryParameters = result.queryParameters;
+        // Preserve ALL fields except the data array
+        metadata = { ...result };
+        delete metadata.results; // Remove the data array
+        // Ensure totalCount is set for consistency
+        if (result.count !== undefined || result.numFound !== undefined) {
+          metadata.totalCount = result.count || result.numFound;
         }
         data = result.results;
       }
     }
-    // Handle workspace format: extract items array
+    // Handle workspace format: new structure has everything nested under "result"
+    // Check for new format first: result.result.source === 'bvbrc-workspace'
+    else if (result.result && result.result.source === 'bvbrc-workspace') {
+      console.log('[FileUtils] Processing bvbrc-workspace response (new nested format)');
+      const resultData = result.result;
+      
+      if ('items' in resultData && Array.isArray(resultData.items)) {
+        console.log('[FileUtils] Extracting items array from workspace response');
+        // Preserve ALL metadata fields from result.result
+        metadata = { ...resultData };
+        delete metadata.items; // Remove the data array
+        // Ensure totalCount is set for consistency
+        if (resultData.count !== undefined) {
+          metadata.totalCount = resultData.count;
+        }
+        data = resultData.items;
+      } else if ('metadata' in resultData) {
+        console.log('[FileUtils] Extracting metadata object from workspace response');
+        // Preserve ALL metadata fields from result.result
+        metadata = { ...resultData };
+        delete metadata.metadata; // Remove the metadata data object
+        data = resultData.metadata;
+      }
+    }
+    // Handle old workspace format for backward compatibility
     else if (result.source === 'bvbrc-workspace') {
-      console.log('[FileUtils] Processing bvbrc-workspace response');
+      console.log('[FileUtils] Processing bvbrc-workspace response (legacy format)');
       
       if ('items' in result && Array.isArray(result.items)) {
         console.log('[FileUtils] Extracting items array from workspace response');
-        metadata = {
-          source: 'bvbrc-workspace',
-          totalCount: result.count,
-          path: result.path
-        };
+        // Preserve ALL fields except the data array
+        metadata = { ...result };
+        delete metadata.items; // Remove the data array
+        // Ensure totalCount is set for consistency
+        if (result.count !== undefined) {
+          metadata.totalCount = result.count;
+        }
         data = result.items;
+      } else if ('result' in result && typeof result.result === 'object') {
+        console.log('[FileUtils] Extracting result object from workspace response');
+        // Preserve ALL fields except the result object
+        metadata = { ...result };
+        delete metadata.result; // Remove the data object
+        data = result.result;
       }
     }
     // Add other source handlers here as needed
