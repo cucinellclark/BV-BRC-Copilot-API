@@ -170,7 +170,12 @@ async function getUserSessions(userId, limit = 20, offset = 0) {
       .limit(limit)
       .toArray();
 
-    return { sessions, total };
+    const normalizedSessions = sessions.map((session) => ({
+      ...session,
+      workflow_ids: Array.isArray(session.workflow_ids) ? session.workflow_ids : []
+    }));
+
+    return { sessions: normalizedSessions, total };
   } catch (error) {
     throw new LLMServiceError('Failed to get user sessions', error);
   }
@@ -266,6 +271,7 @@ async function createChatSession(sessionId, userId, title = 'Untitled') {
       title,
       created_at: new Date(),
       messages: [],
+      workflow_ids: [],
       last_modified: new Date()
     });
     
@@ -274,6 +280,32 @@ async function createChatSession(sessionId, userId, title = 'Untitled') {
   } catch (error) {
     console.error(`[createChatSession] Error creating session ${sessionId} for user ${userId}:`, error);
     throw new LLMServiceError('Failed to create chat session', error);
+  }
+}
+
+/**
+ * Add a workflow ID to a chat session.
+ * Uses $addToSet so duplicates are ignored.
+ * @param {string} sessionId - The session ID
+ * @param {string} workflowId - Workflow ID to add
+ * @returns {Object} Update result
+ */
+async function addWorkflowIdToSession(sessionId, workflowId) {
+  try {
+    if (!sessionId || !workflowId) {
+      return null;
+    }
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    return await chatCollection.updateOne(
+      { session_id: sessionId },
+      {
+        $addToSet: { workflow_ids: workflowId },
+        $set: { last_modified: new Date() }
+      }
+    );
+  } catch (error) {
+    throw new LLMServiceError('Failed to add workflow ID to session', error);
   }
 }
 
@@ -752,6 +784,7 @@ module.exports = {
   getUserPrompts,
   saveUserPrompt,
   createChatSession,
+  addWorkflowIdToSession,
   addMessagesToSession,
   getOrCreateChatSession,
   saveSummary,

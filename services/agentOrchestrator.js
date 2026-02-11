@@ -7,7 +7,8 @@ const {
   getModelData, 
   getChatSession, 
   createChatSession,
-  addMessagesToSession 
+  addMessagesToSession,
+  addWorkflowIdToSession
 } = require('./dbUtils');
 const { 
   queryChatOnly, 
@@ -57,6 +58,65 @@ function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   }
 
   return { storage: null, safeResult: result };
+}
+
+/**
+ * Extract workflow_id from a workflow tool result
+ * Handles various result structures from create_and_execute_workflow including MCP wrappers
+ */
+function extractWorkflowId(result) {
+  if (!result) return null;
+  
+  // Direct workflow_id field (most common after unwrapping)
+  if (result.workflow_id && typeof result.workflow_id === 'string') {
+    return result.workflow_id.trim();
+  }
+  
+  // Check in content wrapper (MCP format: content[0].text contains JSON string)
+  if (result.content && Array.isArray(result.content) && result.content.length > 0) {
+    const firstContent = result.content[0];
+    if (firstContent.text) {
+      try {
+        const parsed = JSON.parse(firstContent.text);
+        if (parsed.workflow_id && typeof parsed.workflow_id === 'string') {
+          return parsed.workflow_id.trim();
+        }
+      } catch (e) {
+        // Not JSON or parse failed, continue
+      }
+    }
+  }
+  
+  // Check in structuredContent
+  if (result.structuredContent && result.structuredContent.result) {
+    const structuredResult = result.structuredContent.result;
+    if (typeof structuredResult === 'string') {
+      try {
+        const parsed = JSON.parse(structuredResult);
+        if (parsed.workflow_id && typeof parsed.workflow_id === 'string') {
+          return parsed.workflow_id.trim();
+        }
+      } catch (e) {
+        // Not JSON or parse failed
+      }
+    } else if (typeof structuredResult === 'object' && structuredResult.workflow_id) {
+      return structuredResult.workflow_id.trim();
+    }
+  }
+  
+  // If result is itself a JSON string
+  if (typeof result === 'string') {
+    try {
+      const parsed = JSON.parse(result);
+      if (parsed && parsed.workflow_id && typeof parsed.workflow_id === 'string') {
+        return parsed.workflow_id.trim();
+      }
+    } catch (e) {
+      // Not JSON, ignore.
+    }
+  }
+  
+  return null;
 }
 
 /**
@@ -270,11 +330,24 @@ async function executeAgentLoop(opts) {
   // Get auth token (from opts or config)
   const authToken = auth_token || config.auth_token;
   
-  // Get or create chat session
+  // Get or create chat session early so tool-side metadata writes (e.g. workflow_ids)
+  // always have an existing chat_sessions document to update.
   let chatSession = null;
   let historyContext = '';
   if (session_id) {
     chatSession = await getChatSession(session_id);
+    if (!chatSession) {
+      try {
+        await createChatSession(session_id, user_id);
+        chatSession = await getChatSession(session_id);
+        logger.info('Created chat session at start of agent loop', { session_id, user_id });
+      } catch (createError) {
+        logger.warn('Failed to create chat session at start, will retry on save', {
+          session_id,
+          error: createError.message
+        });
+      }
+    }
     if (include_history && chatSession?.messages) {
       logger.info(`Loaded ${chatSession.messages.length} messages from session history`);
       try {
@@ -482,6 +555,35 @@ async function executeAgentLoop(opts) {
             });
           } catch (memoryError) {
             logger.warn('Failed to update session memory', { error: memoryError.message });
+          }
+        }
+
+        // Store workflow IDs directly on chat_sessions for straightforward retrieval.
+        if (session_id && nextAction.action && nextAction.action.includes('create_and_execute_workflow')) {
+          logger.debug('Attempting to extract workflow ID', {
+            tool: nextAction.action,
+            resultType: typeof safeResult,
+            hasContent: !!safeResult?.content,
+            hasStructuredContent: !!safeResult?.structuredContent,
+            hasWorkflowIdField: !!safeResult?.workflow_id,
+            resultPreview: safeResult ? JSON.stringify(safeResult).substring(0, 300) : 'null'
+          });
+          
+          const workflowId = extractWorkflowId(safeResult);
+          
+          if (workflowId) {
+            try {
+              await addWorkflowIdToSession(session_id, workflowId);
+              logger.info('Stored workflow ID on chat session', { session_id, workflow_id: workflowId });
+            } catch (workflowError) {
+              logger.warn('Failed to store workflow ID on chat session', { error: workflowError.message, workflow_id: workflowId });
+            }
+          } else {
+            logger.warn('No workflow ID found in create_and_execute_workflow result', {
+              session_id,
+              resultType: typeof safeResult,
+              resultKeys: safeResult && typeof safeResult === 'object' ? Object.keys(safeResult) : []
+            });
           }
         }
 

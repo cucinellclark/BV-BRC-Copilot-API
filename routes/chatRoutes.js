@@ -621,12 +621,11 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
             return res.status(400).json({ message: 'session_id is required' });
         }
 
-        if (user_id) {
-            const session = await getChatSession(session_id);
-            if (session && session.user_id && session.user_id !== user_id) {
-                return res.status(403).json({ message: 'Not authorized to access this session' });
-            }
+        const session = await getChatSession(session_id);
+        if (user_id && session && session.user_id && session.user_id !== user_id) {
+            return res.status(403).json({ message: 'Not authorized to access this session' });
         }
+        const workflowIds = session?.workflow_ids || [];
 
         const includeFiles = parseBooleanFlag(req.query.include_files, false);
         const limitParam = parseInt(req.query.limit, 10);
@@ -637,7 +636,10 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
         const messages = await getSessionMessages(session_id);
 
         if (!includeFiles) {
-            return res.status(200).json({ messages });
+            return res.status(200).json({ 
+                messages,
+                workflow_ids: workflowIds
+            });
         }
 
         const [sessionFiles, totalSize] = await Promise.all([
@@ -647,6 +649,7 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
 
         res.status(200).json({
             messages,
+            workflow_ids: workflowIds,
             session_files: sessionFiles.files,
             session_files_pagination: {
                 total: sessionFiles.total,
@@ -738,7 +741,6 @@ router.get('/get-all-sessions', authenticate, async (req, res) => {
 
         const { sessions, total } = await getUserSessions(user_id, limit, offset);
         const has_more = offset + sessions.length < total;
-
         res.status(200).json({ sessions, total, has_more });
     } catch (error) {
         console.error('Error retrieving chat sessions:', error);

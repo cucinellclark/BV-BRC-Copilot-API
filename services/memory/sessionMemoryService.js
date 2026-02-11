@@ -211,6 +211,7 @@ async function updateSessionMemory({ session_id, user_id, toolId, parameters, re
   if (toolId) {
     nextMemory.tool_facts[toolId] = extractedFacts;
   }
+  
   // LLM facts are authoritative; do not merge tool-derived facts into facts.
   nextMemory.updated_at = new Date().toISOString();
 
@@ -239,7 +240,10 @@ function formatSessionMemory(memory) {
   const facts = memory.facts && Object.keys(memory.facts).length > 0
     ? JSON.stringify(memory.facts, null, 2)
     : '{}';
-  return `FOCUS:\n${focus}\n\nFACTS:\n${facts}`;
+  
+  let output = `FOCUS:\n${focus}\n\nFACTS:\n${facts}`;
+  
+  return output;
 }
 
 module.exports = {
