@@ -99,6 +99,11 @@ Format your response in clear paragraphs. Use markdown for formatting when appro
 
 When including hyperlinks, use standard markdown link syntax: [link text](URL)
 
+IMPORTANT - URL GUIDELINES:
+- Do NOT make up or invent URLs
+- All BV-BRC URLs must use the base URL: https://www.bv-brc.org
+- Only include URLs that are provided in the tool results or that you can construct using the base URL and known BV-BRC URL patterns
+
 Do NOT mention the internal tools or technical details about how you gathered the information. Focus on answering the user's question naturally.`,
 
   // Direct response prompt - used for conversational queries without tools
