@@ -50,7 +50,8 @@
       "query_json",
       "get_sra_metadata",
       "workspace_preview_file_tool",
-      "bvbrc_plan_query_collection"
+      "bvbrc_plan_query_collection",
+      "workspace_get_file_metadata_tool"
     ]
   }
 }

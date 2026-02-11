@@ -1,5 +1,6 @@
 const { connectToDatabase } = require('../database');
 const { LLMServiceError } = require('./llmServices');
+const { formatSize } = require('./fileUtils');
 
 /**
  * Get model data from the database
@@ -626,6 +627,71 @@ async function getSessionFiles(sessionId) {
 }
 
 /**
+ * Convert stored file metadata into a client-safe DTO.
+ * Intentionally excludes internal fields like local filesystem paths.
+ * @param {object} fileMetadata - Stored file metadata document
+ * @returns {object} Client-safe file metadata
+ */
+function mapSessionFileToClient(fileMetadata) {
+  const createdAt = fileMetadata.created_at || fileMetadata.created || null;
+  const sizeBytes = Number.isFinite(fileMetadata.size) ? fileMetadata.size : 0;
+
+  return {
+    file_id: fileMetadata.fileId,
+    file_name: fileMetadata.fileName || null,
+    tool_id: fileMetadata.toolId || null,
+    created_at: createdAt,
+    last_accessed: fileMetadata.lastAccessed || null,
+    data_type: fileMetadata.dataType || null,
+    size_bytes: sizeBytes,
+    size_formatted: formatSize(sizeBytes),
+    record_count: Number.isFinite(fileMetadata.recordCount) ? fileMetadata.recordCount : 0,
+    fields: Array.isArray(fileMetadata.fields) ? fileMetadata.fields : [],
+    is_error: fileMetadata.isError === true,
+    workspace_path: fileMetadata.workspacePath || null,
+    workspace_url: fileMetadata.workspaceUrl || null,
+    query_parameters: fileMetadata.queryParameters || null
+  };
+}
+
+/**
+ * Get paginated, client-safe file metadata for a session
+ * @param {string} sessionId - The session ID
+ * @param {number} limit - Page size
+ * @param {number} offset - Page offset
+ * @returns {object} Paginated file metadata
+ */
+async function getSessionFilesPaginated(sessionId, limit = 20, offset = 0) {
+  try {
+    limit = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 100) : 20;
+    offset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    const query = { session_id: sessionId };
+
+    const total = await filesCollection.countDocuments(query);
+    const files = await filesCollection
+      .find(query)
+      .sort({ created_at: -1 })
+      .skip(offset)
+      .limit(limit)
+      .toArray();
+
+    return {
+      files: files.map(mapSessionFileToClient),
+      total,
+      limit,
+      offset,
+      has_more: offset + files.length < total
+    };
+  } catch (error) {
+    console.error(`[getSessionFilesPaginated] Error getting paginated session files:`, error);
+    throw new LLMServiceError('Failed to get paginated session files', error);
+  }
+}
+
+/**
  * Delete file metadata
  * @param {string} sessionId - The session ID
  * @param {string} fileId - The file ID
@@ -700,6 +766,7 @@ module.exports = {
   saveFileMetadata,
   getFileMetadata,
   getSessionFiles,
+  getSessionFilesPaginated,
   deleteFileMetadata,
   getSessionStorageSize
 }; 

@@ -523,6 +523,24 @@ async function executeAgentLoop(opts) {
             status: traceEntry.status,
             result: safeResult
           });
+
+          // Emit a dedicated event for newly-created session files so clients
+          // can update file UIs immediately without parsing generic tool payloads.
+          if (safeResult && safeResult.type === 'file_reference') {
+            emitSSE(responseStream, 'session_file_created', {
+              iteration,
+              session_id,
+              tool: nextAction.action,
+              file: {
+                file_id: safeResult.file_id,
+                file_name: safeResult.fileName || null,
+                is_error: safeResult.isError === true,
+                summary: safeResult.summary || null,
+                workspace: safeResult.workspace || null
+              },
+              timestamp: new Date().toISOString()
+            });
+          }
         }
 
         // Tools marked as FINALIZE should finalize immediately

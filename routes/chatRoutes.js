@@ -7,6 +7,7 @@ const ChatService = require('../services/chatService');
 const AgentOrchestrator = require('../services/agentOrchestrator');
 const {
   getModelData,
+  getChatSession,
   getSessionMessages,
   getSessionTitle,
   getUserSessions,
@@ -15,7 +16,9 @@ const {
   getUserPrompts,
   saveUserPrompt,
   rateConversation,
-  rateMessage
+  rateMessage,
+  getSessionFilesPaginated,
+  getSessionStorageSize
 } = require('../services/dbUtils');
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
@@ -24,6 +27,17 @@ const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback } = req
 const { writeSseEvent } = require('../services/sseUtils');
 const config = require('../config.json');
 const router = express.Router();
+
+function parseBooleanFlag(value, defaultValue = false) {
+    if (value === undefined || value === null) return defaultValue;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+        const normalized = value.toLowerCase().trim();
+        if (['true', '1', 'yes'].includes(normalized)) return true;
+        if (['false', '0', 'no'].includes(normalized)) return false;
+    }
+    return defaultValue;
+}
 
 // ========== MAIN CHAT ROUTES ==========
 router.post('/copilot', authenticate, async (req, res) => {
@@ -602,15 +616,95 @@ router.get('/start-chat', authenticate, (req, res) => {
 router.get('/get-session-messages', authenticate, async (req, res) => {
     try {
         const session_id = req.query.session_id;
+        const user_id = req.query.user_id;
         if (!session_id) {
             return res.status(400).json({ message: 'session_id is required' });
         }
 
+        if (user_id) {
+            const session = await getChatSession(session_id);
+            if (session && session.user_id && session.user_id !== user_id) {
+                return res.status(403).json({ message: 'Not authorized to access this session' });
+            }
+        }
+
+        const includeFiles = parseBooleanFlag(req.query.include_files, false);
+        const limitParam = parseInt(req.query.limit, 10);
+        const offsetParam = parseInt(req.query.offset, 10);
+        const limit = (!isNaN(limitParam) && limitParam > 0) ? Math.min(limitParam, 100) : 20;
+        const offset = (!isNaN(offsetParam) && offsetParam >= 0) ? offsetParam : 0;
+
         const messages = await getSessionMessages(session_id);
-        res.status(200).json({ messages });
+
+        if (!includeFiles) {
+            return res.status(200).json({ messages });
+        }
+
+        const [sessionFiles, totalSize] = await Promise.all([
+            getSessionFilesPaginated(session_id, limit, offset),
+            getSessionStorageSize(session_id)
+        ]);
+
+        res.status(200).json({
+            messages,
+            session_files: sessionFiles.files,
+            session_files_pagination: {
+                total: sessionFiles.total,
+                limit: sessionFiles.limit,
+                offset: sessionFiles.offset,
+                has_more: sessionFiles.has_more
+            },
+            session_file_summary: {
+                total_files: sessionFiles.total,
+                total_size_bytes: totalSize
+            }
+        });
     } catch (error) {
         console.error('Error retrieving session messages:', error);
         res.status(500).json({ message: 'Failed to retrieve session messages', error: error.message });
+    }
+});
+
+router.get('/get-session-files', authenticate, async (req, res) => {
+    try {
+        const session_id = req.query.session_id;
+        const user_id = req.query.user_id;
+        if (!session_id) {
+            return res.status(400).json({ message: 'session_id is required' });
+        }
+
+        const limitParam = parseInt(req.query.limit, 10);
+        const offsetParam = parseInt(req.query.offset, 10);
+        const limit = (!isNaN(limitParam) && limitParam > 0) ? Math.min(limitParam, 100) : 20;
+        const offset = (!isNaN(offsetParam) && offsetParam >= 0) ? offsetParam : 0;
+
+        const session = await getChatSession(session_id);
+        if (user_id && session && session.user_id && session.user_id !== user_id) {
+            return res.status(403).json({ message: 'Not authorized to access this session' });
+        }
+
+        const [sessionFiles, totalSize] = await Promise.all([
+            getSessionFilesPaginated(session_id, limit, offset),
+            getSessionStorageSize(session_id)
+        ]);
+
+        res.status(200).json({
+            session_id,
+            files: sessionFiles.files,
+            pagination: {
+                total: sessionFiles.total,
+                limit: sessionFiles.limit,
+                offset: sessionFiles.offset,
+                has_more: sessionFiles.has_more
+            },
+            summary: {
+                total_files: sessionFiles.total,
+                total_size_bytes: totalSize
+            }
+        });
+    } catch (error) {
+        console.error('Error retrieving session files:', error);
+        res.status(500).json({ message: 'Failed to retrieve session files', error: error.message });
     }
 });
 
