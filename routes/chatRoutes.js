@@ -110,7 +110,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             });
         }
 
-        const max_iterations = config.agent?.max_iterations || 8;
+        const max_iterations = config.agent?.max_iterations || 3;
 
         logger.info('Agent request received', { 
             query_preview: query.substring(0, 100),

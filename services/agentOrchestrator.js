@@ -238,7 +238,7 @@ async function executeAgentLoop(opts) {
     system_prompt = '',
     save_chat = true,
     include_history = true,
-    max_iterations = 8,
+    max_iterations = 3,
     auth_token = null,
     stream = false,
     responseStream = null
@@ -924,13 +924,19 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
     let promptToUse;
     
     if (isDirectResponse) {
+      const hasHistoryContext = typeof historyContext === 'string' && historyContext.trim().length > 0;
+      const followUpInstruction = hasHistoryContext
+        ? '\n\nFOLLOW-UP TURN INSTRUCTION:\nThis conversation is already in progress. Continue naturally from prior context and do NOT start with a greeting or re-introduce yourself.'
+        : '';
+
       // Use direct response prompt for conversational queries
       promptToUse = promptManager.formatPrompt(
         promptManager.getAgentPrompt('directResponse'),
         {
           query: query,
           systemPrompt: systemPrompt || 'No additional context',
-          historyContext: historyStr + sessionMemoryStr
+          historyContext: historyStr + sessionMemoryStr,
+          followUpInstruction
         }
       );
     } else {

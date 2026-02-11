@@ -113,11 +113,12 @@ ADDITIONAL CONTEXT:
 {{systemPrompt}}
 
 {{historyContext}}
+{{followUpInstruction}}
 
 Provide a natural, helpful response that:
 1. Addresses the user's message directly
 2. Is friendly and conversational
-3. For greetings, briefly introduce yourself and what you can help with
+3. Only if this is the first turn (no prior conversation), briefly introduce yourself and what you can help with
 4. For general questions about BV-BRC, provide accurate information
 5. For thanks or acknowledgments, respond naturally
 6. Keep it concise but informative

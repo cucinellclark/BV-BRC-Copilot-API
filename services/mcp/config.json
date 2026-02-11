@@ -49,7 +49,8 @@
       "search_file",
       "query_json",
       "get_sra_metadata",
-      "workspace_preview_file_tool"
+      "workspace_preview_file_tool",
+      "bvbrc_plan_query_collection"
     ]
   }
 }

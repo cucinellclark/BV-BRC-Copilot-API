@@ -273,7 +273,9 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
  */
 function isQueryCollectionTool(toolId) {
   if (!toolId) return false;
-  return toolId.includes('query_collection');
+  // Only match bvbrc_query_collection specifically
+  // Match both 'bvbrc_query_collection' and 'server.bvbrc_query_collection' formats
+  return toolId === 'bvbrc_query_collection' || toolId.endsWith('.bvbrc_query_collection');
 }
 
 /**

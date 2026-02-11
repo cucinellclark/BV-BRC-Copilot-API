@@ -94,7 +94,7 @@ if (config.queue.enabled !== false) {
         jobProgress.set(job.id, {
             status: 'active',
             currentIteration: 0,
-            maxIterations: job.data.max_iterations || 8,
+            maxIterations: job.data.max_iterations || 3,
             currentTool: null,
             error: null,
             startedAt: new Date(),
@@ -333,7 +333,7 @@ async function addAgentJob(jobData, options = {}) {
     jobProgress.set(job.id, {
         status: 'waiting',
         currentIteration: 0,
-        maxIterations: jobData.max_iterations || 8,
+        maxIterations: jobData.max_iterations || 3,
         currentTool: null,
         error: null,
         startedAt: new Date(),
@@ -372,7 +372,7 @@ async function getJobStatus(jobId) {
         status: state, // 'waiting', 'active', 'completed', 'failed', 'delayed'
         progress: {
             currentIteration: progress.currentIteration || 0,
-            maxIterations: progress.maxIterations || 8,
+            maxIterations: progress.maxIterations || 3,
             currentTool: progress.currentTool || null,
             percentage: job.progress() || 0
         },

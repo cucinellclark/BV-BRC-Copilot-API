@@ -194,11 +194,12 @@ class Logger {
       }
     }
     
-    this.info(`Starting new query: ${this.currentQueryId}`, {
-      queryCounter: this.queryCounter,
-      queryId: this.currentQueryId,
-      previousQueryCount: this.queryCounter
-    });
+    // Console logging removed for query start
+    // this.info(`Starting new query: ${this.currentQueryId}`, {
+    //   queryCounter: this.queryCounter,
+    //   queryId: this.currentQueryId,
+    //   previousQueryCount: this.queryCounter
+    // });
     
     return this.currentQueryId;
   }
@@ -274,8 +275,8 @@ class Logger {
       queryId
     };
     
-    // Console output (truncated)
-    this.info(`[Query ${queryId}] LLM Prompt #${sequenceNum}: ${promptName}`, { model, contentLength: promptContent.length });
+    // Console output (truncated) - removed query logging
+    // this.info(`[Query ${queryId}] LLM Prompt #${sequenceNum}: ${promptName}`, { model, contentLength: promptContent.length });
     
     // File output (full content in numbered file)
     if (this.sessionId) {
@@ -330,8 +331,8 @@ ${'='.repeat(80)}
       queryId
     };
     
-    // Console output (truncated)
-    this.info(`[Query ${queryId}] LLM Response #${sequenceNum}: ${promptName}`, { model, responseLength: response.length });
+    // Console output (truncated) - removed query logging
+    // this.info(`[Query ${queryId}] LLM Response #${sequenceNum}: ${promptName}`, { model, responseLength: response.length });
     
     // File output (full content in numbered file)
     if (this.sessionId) {
@@ -388,11 +389,11 @@ ${'='.repeat(80)}
       queryId
     };
     
-    // Console output
-    this.info(`[Query ${queryId}] Tool Execution #${sequenceNum}: ${toolName} [${status}]`, { 
-      parametersCount: Object.keys(parameters || {}).length,
-      hasError: !!error
-    });
+    // Console output - removed query logging
+    // this.info(`[Query ${queryId}] Tool Execution #${sequenceNum}: ${toolName} [${status}]`, { 
+    //   parametersCount: Object.keys(parameters || {}).length,
+    //   hasError: !!error
+    // });
     
     // File output (full content in numbered file)
     if (this.sessionId) {
@@ -453,8 +454,8 @@ ${'='.repeat(80)}
       queryId
     };
     
-    // Console output
-    this.info(`[Query ${queryId}] Agent Iteration #${sequenceNum} (${iteration}): ${action}`, { reasoning, status });
+    // Console output - removed query logging
+    // this.info(`[Query ${queryId}] Agent Iteration #${sequenceNum} (${iteration}): ${action}`, { reasoning, status });
     
     // File output (full content in numbered file)
     if (this.sessionId) {
