@@ -22,9 +22,70 @@ function truncateString(value, maxLength) {
   return `${value.slice(0, maxLength)}\n...[truncated ${value.length - maxLength} chars]`;
 }
 
+/**
+ * Recursively parse JSON strings within an object to prevent double-encoding
+ * This handles cases where tool results contain fields with stringified JSON
+ */
+function deepParseJsonStrings(obj, depth = 0, maxDepth = 10) {
+  // Prevent infinite recursion
+  if (depth > maxDepth) return obj;
+  
+  // Handle null/undefined
+  if (obj == null) return obj;
+  
+  // Handle arrays
+  if (Array.isArray(obj)) {
+    return obj.map(item => deepParseJsonStrings(item, depth + 1, maxDepth));
+  }
+  
+  // Handle objects
+  if (typeof obj === 'object') {
+    const result = {};
+    for (const [key, value] of Object.entries(obj)) {
+      result[key] = deepParseJsonStrings(value, depth + 1, maxDepth);
+    }
+    return result;
+  }
+  
+  // Handle strings that might be JSON
+  if (typeof obj === 'string') {
+    const trimmed = obj.trim();
+    // Check if it looks like JSON (starts with [ or {)
+    if ((trimmed.startsWith('[') || trimmed.startsWith('{')) && trimmed.length > 1) {
+      try {
+        const parsed = JSON.parse(obj);
+        // Only recurse if we successfully parsed an object or array
+        if (typeof parsed === 'object' && parsed !== null) {
+          return deepParseJsonStrings(parsed, depth + 1, maxDepth);
+        }
+        return parsed;
+      } catch (e) {
+        // Not valid JSON, return as-is
+        return obj;
+      }
+    }
+    return obj;
+  }
+  
+  // For primitives (numbers, booleans), return as-is
+  return obj;
+}
+
 function sanitizeToolResult(result, maxChars = 4000) {
   if (result == null) return '';
-  const normalized = normalizeContent(result);
+  
+  // First, recursively parse any JSON strings to prevent double-encoding
+  let cleaned;
+  try {
+    cleaned = deepParseJsonStrings(result);
+  } catch (e) {
+    // If parsing fails, fall back to original behavior
+    logger.warn('Failed to deep parse JSON strings in tool result', { error: e.message });
+    cleaned = result;
+  }
+  
+  // Then normalize and truncate
+  const normalized = normalizeContent(cleaned);
   return truncateString(normalized, maxChars);
 }
 

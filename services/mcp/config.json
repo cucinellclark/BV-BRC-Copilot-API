@@ -48,7 +48,8 @@
       "read_file_lines",
       "search_file",
       "query_json",
-      "get_sra_metadata"
+      "get_sra_metadata",
+      "workspace_preview_file_tool"
     ]
   }
 }

@@ -44,6 +44,14 @@ function shouldBypassFileHandling(toolId) {
  */
 function applySystemParameterOverrides(toolId, parameters = {}, context = {}, log = null, toolDef = null) {
   const safeParams = (parameters && typeof parameters === 'object') ? { ...parameters } : {};
+  
+  // Create a safe logger wrapper that falls back to console if log is null
+  const logger = log || {
+    warn: (...args) => console.warn(...args),
+    error: (...args) => console.error(...args),
+    info: (...args) => console.info(...args),
+    debug: (...args) => console.debug(...args)
+  };
 
   // Check if tool schema accepts session_id (for any server, not just internal_server)
   if (toolId && context?.session_id && toolDef?.inputSchema?.properties) {
@@ -54,7 +62,7 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
     if (acceptsSessionId) {
       const provided = safeParams.session_id;
       if (provided && provided !== context.session_id) {
-        (log?.warn || console.warn)('[MCP] Overriding tool session_id from untrusted parameters', {
+        logger.warn('[MCP] Overriding tool session_id from untrusted parameters', {
           toolId,
           providedSessionId: provided,
           forcedSessionId: context.session_id
@@ -64,7 +72,7 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
     } else {
       // If the LLM provided it anyway but tool doesn't accept it, strip it to avoid breaking the tool call.
       if (safeParams.session_id !== undefined) {
-        (log?.warn || console.warn)('[MCP] Removing unsupported session_id parameter for tool', {
+        logger.warn('[MCP] Removing unsupported session_id parameter for tool', {
           toolId
         });
         delete safeParams.session_id;
