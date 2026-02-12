@@ -62,7 +62,8 @@ function prepareToolResult(toolId, result, ragMaxDocs = 5) {
 
 /**
  * Extract workflow_id from a workflow tool result
- * Handles various result structures from create_and_execute_workflow including MCP wrappers
+ * Handles various result structures from workflow tools (plan_workflow, submit_workflow)
+ * Including MCP wrappers
  */
 function extractWorkflowId(result) {
   if (!result) return null;
@@ -510,6 +511,8 @@ async function executeAgentLoop(opts) {
             system_prompt,
             session_id,
             user_id,
+            historyContext,
+            sessionMemory,
             responseStream: stream && responseStream ? responseStream : null
           },
           logger
@@ -559,7 +562,7 @@ async function executeAgentLoop(opts) {
         }
 
         // Store workflow IDs directly on chat_sessions for straightforward retrieval.
-        if (session_id && nextAction.action && nextAction.action.includes('create_and_execute_workflow')) {
+        if (session_id && nextAction.action && nextAction.action.includes('submit_workflow')) {
           logger.debug('Attempting to extract workflow ID', {
             tool: nextAction.action,
             resultType: typeof safeResult,
@@ -579,8 +582,9 @@ async function executeAgentLoop(opts) {
               logger.warn('Failed to store workflow ID on chat session', { error: workflowError.message, workflow_id: workflowId });
             }
           } else {
-            logger.warn('No workflow ID found in create_and_execute_workflow result', {
+            logger.warn('No workflow ID found in workflow submission result', {
               session_id,
+              tool: nextAction.action,
               resultType: typeof safeResult,
               resultKeys: safeResult && typeof safeResult === 'object' ? Object.keys(safeResult) : []
             });

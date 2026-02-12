@@ -7,6 +7,7 @@ const { McpStreamHandler } = require('./mcpStreamHandler');
 const { fileManager } = require('../fileManager');
 const { createLogger } = require('../logger');
 const { emitSSE } = require('../sseUtils');
+const { isContextAwareTool, applyContextEnhancement } = require('./contextAwareTools');
 
 // Initialize stream handler
 const streamHandler = new McpStreamHandler(fileManager);
@@ -78,6 +79,12 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
         delete safeParams.session_id;
       }
     }
+  }
+
+  // Apply context-aware enhancement for tools that need conversational context
+  if (isContextAwareTool(toolId)) {
+    const enhancedParams = applyContextEnhancement(toolId, safeParams, context, toolDef, logger);
+    Object.assign(safeParams, enhancedParams);
   }
 
   return safeParams;
