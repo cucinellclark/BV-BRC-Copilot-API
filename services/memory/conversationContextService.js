@@ -29,6 +29,40 @@ function normalizeContent(content) {
   }
 }
 
+/**
+ * Check if a tool result should cause message exclusion
+ * @param {Object} traceEntry - Entry from agent_trace
+ * @returns {boolean} - True if this trace entry should trigger exclusion
+ */
+function shouldExcludeByToolResult(traceEntry) {
+  if (!traceEntry || !traceEntry.action) return false;
+  
+  // Check if this is workspace_browse_tool
+  if (!traceEntry.action.includes('workspace_browse_tool')) return false;
+  
+  // Check if the result has a result_type of list_result or search_result
+  if (traceEntry.result) {
+    // The result might be nested in different ways
+    let resultType = null;
+    
+    // Direct result_type field
+    if (traceEntry.result.result_type) {
+      resultType = traceEntry.result.result_type;
+    }
+    // Nested in result.result.result_type (from file_reference)
+    else if (traceEntry.result.result && traceEntry.result.result.result_type) {
+      resultType = traceEntry.result.result.result_type;
+    }
+    
+    // Exclude if result_type is list_result or search_result
+    if (resultType === 'list_result' || resultType === 'search_result') {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 function shouldExcludeMessage(message) {
   if (!message || !message.role) return true;
   if (message.role === 'system') {
@@ -44,13 +78,36 @@ function selectRecentMessages(messages, maxTokens) {
   const selected = [];
   let usedTokens = 0;
   let excludedCount = 0;
+  let nextAssistantShouldBeExcluded = false;
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
+    
+    // Check if the current message should be excluded based on basic criteria
     if (shouldExcludeMessage(msg)) {
       excludedCount++;
+      
+      // If this is a system message with agent_trace, check if any tool was workspace_browse with list/search result
+      if (msg.agent_trace && Array.isArray(msg.agent_trace)) {
+        for (const traceEntry of msg.agent_trace) {
+          if (shouldExcludeByToolResult(traceEntry)) {
+            // Mark that the next assistant message (going backwards) should be excluded
+            nextAssistantShouldBeExcluded = true;
+            break;
+          }
+        }
+      }
+      
       continue;
     }
+    
+    // Check if this assistant message should be excluded due to workspace_browse_tool usage
+    if (msg.role === 'assistant' && nextAssistantShouldBeExcluded) {
+      excludedCount++;
+      nextAssistantShouldBeExcluded = false; // Reset the flag
+      continue;
+    }
+    
     const content = normalizeContent(msg.content);
     const msgTokens = estimateTokens(content) + 10;
     if (usedTokens + msgTokens > maxTokens) {

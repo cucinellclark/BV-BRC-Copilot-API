@@ -301,6 +301,7 @@ async function executeAgentLoop(opts) {
     include_history = true,
     max_iterations = 3,
     auth_token = null,
+    workspace_items = null,
     stream = false,
     responseStream = null
   } = opts;
@@ -317,8 +318,23 @@ async function executeAgentLoop(opts) {
     model, 
     session_id, 
     user_id, 
-    max_iterations 
+    max_iterations,
+    has_workspace_items: !!workspace_items,
+    workspace_items_count: workspace_items ? workspace_items.length : 0
   });
+  
+  // Log workspace items if present
+  if (workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0) {
+    logger.info('Workspace items available for this query', {
+      count: workspace_items.length,
+      items: workspace_items.map(item => ({
+        type: item.type,
+        path: item.path,
+        name: item.name,
+        has_content: !!item.content
+      }))
+    });
+  }
   
   const executionTrace = [];
   const toolResults = {};
@@ -392,6 +408,7 @@ async function executeAgentLoop(opts) {
         model,
         historyContext,
         sessionMemory,
+        workspace_items,
         logger
       );
       
@@ -494,7 +511,8 @@ async function executeAgentLoop(opts) {
           responseStream,
           logger,
           null, // No specific tool for FINALIZE action
-          sessionMemory
+          sessionMemory,
+          workspace_items
         );
         break;
       }
@@ -513,6 +531,7 @@ async function executeAgentLoop(opts) {
             user_id,
             historyContext,
             sessionMemory,
+            workspace_items,
             responseStream: stream && responseStream ? responseStream : null
           },
           logger
@@ -743,7 +762,8 @@ async function executeAgentLoop(opts) {
             responseStream,
             logger,
             null, // Error case, no specific tool
-            sessionMemory
+            sessionMemory,
+            workspace_items
           );
           break;
         }
@@ -764,7 +784,8 @@ async function executeAgentLoop(opts) {
         responseStream,
         logger,
         null, // Max iterations, no specific tool
-        sessionMemory
+        sessionMemory,
+        workspace_items
       );
     }
     
@@ -873,7 +894,7 @@ async function executeAgentLoop(opts) {
 /**
  * Plan the next action using LLM
  */
-async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', sessionMemory = null, logger = null) {
+async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', sessionMemory = null, workspace_items = null, logger = null) {
   try {
     const log = logger || createLogger('Agent-Planner');
     
@@ -962,7 +983,42 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       ? formatSessionMemory(sessionMemory)
       : 'No session memory available';
     
+    // Format workspace items if available
+    const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
+      ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
+      : '';
+    
+    // Log workspace items inclusion in prompt
+    if (workspaceStr) {
+      logger.info('Including workspace items in planning prompt', {
+        workspace_items_count: workspace_items.length,
+        workspace_str_length: workspaceStr.length,
+        items_summary: workspace_items.map(item => ({
+          type: item.type,
+          path: item.path,
+          name: item.name
+        }))
+      });
+    } else {
+      logger.debug('No workspace items to include in planning prompt', {
+        workspace_items_provided: !!workspace_items,
+        is_array: Array.isArray(workspace_items),
+        length: workspace_items ? workspace_items.length : 0
+      });
+    }
+    
     // Build planning prompt
+    const finalSystemPrompt = (systemPrompt || 'No additional context') + historyStr + workspaceStr;
+    
+    // Log the final system prompt composition
+    logger.debug('Building planning prompt with system context', {
+      base_system_prompt_length: (systemPrompt || 'No additional context').length,
+      history_str_length: historyStr.length,
+      workspace_str_length: workspaceStr.length,
+      final_system_prompt_length: finalSystemPrompt.length,
+      has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES')
+    });
+    
     const planningPrompt = promptManager.formatPrompt(
       promptManager.getAgentPrompt('taskPlanning'),
       {
@@ -971,7 +1027,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
         toolResults: resultsStr,
         sessionMemory: sessionMemoryStr,
         query: query,
-        systemPrompt: (systemPrompt || 'No additional context') + historyStr
+        systemPrompt: finalSystemPrompt
       }
     );
     
@@ -1023,7 +1079,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 /**
  * Generate final response to user
  */
-async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null, sessionMemory = null) {
+async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null, sessionMemory = null, workspace_items = null) {
   try {
     const log = logger || createLogger('Agent-FinalResponse');
     
@@ -1045,6 +1101,30 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       ? `\n\nSession Facts:\n${formatSessionMemory(sessionMemory)}`
       : '';
     
+    // Format workspace items if available
+    const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
+      ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
+      : '';
+    
+    // Log workspace items inclusion in final response prompt
+    if (workspaceStr) {
+      log.info('Including workspace items in final response prompt', {
+        workspace_items_count: workspace_items.length,
+        workspace_str_length: workspaceStr.length,
+        items_summary: workspace_items.map(item => ({
+          type: item.type,
+          path: item.path,
+          name: item.name
+        }))
+      });
+    } else {
+      log.debug('No workspace items to include in final response prompt', {
+        workspace_items_provided: !!workspace_items,
+        is_array: Array.isArray(workspace_items),
+        length: workspace_items ? workspace_items.length : 0
+      });
+    }
+    
     let promptToUse;
     
     if (isDirectResponse) {
@@ -1053,13 +1133,24 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         ? '\n\nFOLLOW-UP TURN INSTRUCTION:\nThis conversation is already in progress. Continue naturally from prior context and do NOT start with a greeting or re-introduce yourself.'
         : '';
 
+      const finalHistoryContext = historyStr + sessionMemoryStr + workspaceStr;
+      
+      // Log the final context composition
+      log.debug('Building direct response prompt with context', {
+        history_str_length: historyStr.length,
+        session_memory_str_length: sessionMemoryStr.length,
+        workspace_str_length: workspaceStr.length,
+        final_history_context_length: finalHistoryContext.length,
+        has_workspace_in_context: finalHistoryContext.includes('WORKSPACE FILES')
+      });
+
       // Use direct response prompt for conversational queries
       promptToUse = promptManager.formatPrompt(
         promptManager.getAgentPrompt('directResponse'),
         {
           query: query,
           systemPrompt: systemPrompt || 'No additional context',
-          historyContext: historyStr + sessionMemoryStr,
+          historyContext: finalHistoryContext,
           followUpInstruction
         }
       );
@@ -1096,6 +1187,17 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         return `${tool}:\n${resultStr}\n`;
       }).join('\n---\n');
       
+      const finalSystemPrompt = (systemPrompt || 'No additional context') + sessionMemoryStr + workspaceStr;
+      
+      // Log the final system prompt composition
+      log.debug('Building tool-based response prompt with system context', {
+        base_system_prompt_length: (systemPrompt || 'No additional context').length,
+        session_memory_str_length: sessionMemoryStr.length,
+        workspace_str_length: workspaceStr.length,
+        final_system_prompt_length: finalSystemPrompt.length,
+        has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES')
+      });
+      
       // Build response prompt
       promptToUse = promptManager.formatPrompt(
         promptManager.getAgentPrompt('finalResponse'),
@@ -1103,7 +1205,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
           query: query,
           executionTrace: traceStr,
           toolResults: resultsStr || 'No tool results available',
-          systemPrompt: (systemPrompt || 'No additional context') + sessionMemoryStr
+          systemPrompt: finalSystemPrompt
         }
       );
     }

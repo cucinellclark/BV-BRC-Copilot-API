@@ -181,6 +181,7 @@ if (config.queue.enabled !== false) {
             include_history: job.data.include_history,
             max_iterations: job.data.max_iterations,
             auth_token: job.data.auth_token,
+            workspace_items: job.data.workspace_items,
             stream: !!streamCallback,
             responseStream: responseStream,
             progressCallback: progressCallback

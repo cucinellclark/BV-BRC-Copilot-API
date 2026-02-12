@@ -166,11 +166,40 @@ function applyContextEnhancement(toolId, parameters = {}, context = {}, toolDef 
       contextAdded: enhancedQuery.length - originalQuery.length
     });
     
-    // Return modified parameters
-    return {
+    // Build return parameters with enhanced query
+    const enhancedParams = {
       ...parameters,
       user_query: enhancedQuery
     };
+    
+    // For plan_workflow tool, inject workspace_items if available in context
+    if (toolId.includes('plan_workflow') && context.workspace_items) {
+      const workspaceItems = context.workspace_items;
+      
+      // Only inject if workspace_items is a non-empty array
+      if (Array.isArray(workspaceItems) && workspaceItems.length > 0) {
+        enhancedParams.workspace_items = workspaceItems;
+        
+        log.info('Injected workspace_items into plan_workflow call', {
+          toolId,
+          workspace_items_count: workspaceItems.length,
+          items_summary: workspaceItems.map(item => ({
+            type: item.type,
+            path: item.path,
+            name: item.name
+          }))
+        });
+      } else {
+        log.debug('workspace_items in context is not a valid array, skipping injection', {
+          toolId,
+          workspace_items_type: typeof workspaceItems,
+          is_array: Array.isArray(workspaceItems),
+          length: Array.isArray(workspaceItems) ? workspaceItems.length : 'N/A'
+        });
+      }
+    }
+    
+    return enhancedParams;
     
   } catch (error) {
     log.error('Failed to enhance context for tool', {
