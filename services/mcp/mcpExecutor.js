@@ -8,6 +8,7 @@ const { fileManager } = require('../fileManager');
 const { createLogger } = require('../logger');
 const { emitSSE } = require('../sseUtils');
 const { isContextAwareTool, applyContextEnhancement } = require('./contextAwareTools');
+const { workspaceService } = require('../workspaceService');
 
 // Initialize stream handler
 const streamHandler = new McpStreamHandler(fileManager);
@@ -77,6 +78,76 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
           toolId
         });
         delete safeParams.session_id;
+      }
+    }
+  }
+
+  // Override path parameter for workspace_browse_tool to ensure first segment is the actual user_id
+  // Extract user_id from auth token to get the full email address (e.g., user@patricbrc.org)
+  if (toolId && toolId.includes('workspace_browse_tool') && safeParams.path) {
+    const originalPath = safeParams.path;
+    
+    // Extract user_id from auth token (authoritative source)
+    const authToken = context?.authToken || context?.auth_token;
+    console.log('authToken', authToken);
+    let actualUserId = null;
+    
+    if (authToken) {
+      actualUserId = workspaceService.extractUserId(authToken);
+    }
+    console.log('actualUserId', actualUserId);
+    // Fallback to context.user_id if token extraction fails
+    if (!actualUserId && context?.user_id) {
+      actualUserId = context.user_id;
+    }
+    
+    if (actualUserId) {
+      // Parse the path to extract segments
+      // Path format: /user1@patricbrc.org/home/Genome Groups or /user1@patricbrc.org/
+      // IMPORTANT: The @ symbol in email addresses should NOT be split on, only split on /
+      const hasTrailingSlash = originalPath.endsWith('/');
+      
+      // Split by '/' and get the first segment (the user_id part)
+      const pathParts = originalPath.split('/');
+      
+      // pathParts[0] is empty (before the leading /), pathParts[1] is the user_id
+      if (pathParts.length > 1 && pathParts[1]) {
+        // Replace the first path segment with the actual user_id extracted from token
+        pathParts[1] = actualUserId;
+        
+        // Reconstruct the path, preserving trailing slash
+        const correctedPath = pathParts.join('/') + (hasTrailingSlash && !pathParts[pathParts.length - 1] ? '' : hasTrailingSlash ? '/' : '');
+        
+        if (correctedPath !== originalPath) {
+          logger.info('[MCP] Overriding workspace_browse_tool path with actual user_id from token', {
+            toolId,
+            originalPath,
+            correctedPath,
+            tokenExtractedUserId: actualUserId,
+            contextUserId: context.user_id || 'not provided'
+          });
+          safeParams.path = correctedPath;
+        }
+      }
+    } else {
+      logger.warn('[MCP] Could not extract user_id for workspace_browse_tool path override', {
+        toolId,
+        hasAuthToken: !!authToken,
+        hasContextUserId: !!context?.user_id
+      });
+    }
+    
+    // Sanitize list-type parameters: convert empty strings to null
+    // The MCP server expects these to be arrays or null, not empty strings
+    const listParams = ['filename_search_terms', 'file_extension', 'file_types'];
+    for (const param of listParams) {
+      if (safeParams[param] === '' || safeParams[param] === 'null' || safeParams[param] === 'undefined') {
+        logger.info('[MCP] Sanitizing list parameter for workspace_browse_tool', {
+          param,
+          originalValue: safeParams[param],
+          newValue: null
+        });
+        safeParams[param] = null;
       }
     }
   }
@@ -773,7 +844,12 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
 
     // Never trust the LLM with certain IDs (e.g., internal_server session_id)
     // Apply overrides AFTER resolving tool definition so we can honor the schema.
-    parameters = applySystemParameterOverrides(toolId, parameters, context, log, toolDef);
+    // Include authToken in context for parameter overrides
+    const contextWithAuth = {
+      ...context,
+      authToken: authToken || context.authToken || context.auth_token
+    };
+    parameters = applySystemParameterOverrides(toolId, parameters, contextWithAuth, log, toolDef);
 
     log.info(`Executing tool: ${toolId}`, { parameters });
     
