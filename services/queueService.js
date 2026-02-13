@@ -4,15 +4,14 @@ const Queue = require('bull');
 const config = require('../config.json');
 const { createLogger } = require('./logger');
 const AgentOrchestrator = require('./agentOrchestrator');
+const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
 
 // Initialize logger
 const logger = createLogger('QueueService');
 
 // Redis configuration from config.json
-const redisConfig = {
-    host: config.redis.host,
-    port: config.redis.port
-};
+const redisConfig = getQueueRedisConfig();
+const queueCategory = getQueueCategory();
 
 // Create Bull queue for agent operations
 const agentQueue = new Queue('agent-operations', {
@@ -32,6 +31,11 @@ const agentQueue = new Queue('agent-operations', {
             age: 86400 // Keep failed jobs for 24 hours
         }
     }
+});
+
+logger.info('Agent queue Redis category selected', {
+    queueCategory,
+    redisDb: redisConfig.db
 });
 
 // Track job progress for status endpoint

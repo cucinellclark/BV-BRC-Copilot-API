@@ -2,13 +2,12 @@ const Queue = require('bull');
 const config = require('../config.json');
 const { createLogger } = require('./logger');
 const { generateSessionFactsUpdate } = require('./memory/sessionFactsService');
+const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
 
 const logger = createLogger('SessionFactsQueue');
 
-const redisConfig = {
-  host: config.redis.host,
-  port: config.redis.port
-};
+const redisConfig = getQueueRedisConfig();
+const queueCategory = getQueueCategory();
 
 const factsQueue = new Queue('session-facts', {
   redis: redisConfig,
@@ -30,7 +29,9 @@ const queueEnabled = config.queue?.enabled !== false && (config.conversation?.fa
 logger.info('Session facts queue worker initialized', {
   queueName: 'session-facts',
   workerConcurrency,
-  queueEnabled
+  queueEnabled,
+  queueCategory,
+  redisDb: redisConfig.db
 });
 
 if (queueEnabled) {
