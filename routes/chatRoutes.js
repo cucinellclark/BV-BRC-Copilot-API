@@ -15,6 +15,7 @@ const {
   deleteSession,
   getUserPrompts,
   saveUserPrompt,
+  registerChatSession,
   rateConversation,
   rateMessage,
   getSessionFilesPaginated,
@@ -42,15 +43,15 @@ function parseBooleanFlag(value, defaultValue = false) {
 // ========== MAIN CHAT ROUTES ==========
 router.post('/copilot', authenticate, async (req, res) => {
     const logger = createLogger('CopilotRoute', req.body.session_id);
-    
+
     try {
-        logger.info('Copilot request received', { 
+        logger.info('Copilot request received', {
             user_id: req.body.user_id,
             model: req.body.model,
             stream: req.body.stream,
             has_rag: !!req.body.rag_db
         });
-        
+
         if (req.body.stream === true) {
             // -------- Streaming (SSE) path --------
             logger.debug('Using streaming response');
@@ -75,15 +76,15 @@ router.post('/copilot', authenticate, async (req, res) => {
         logger.debug('Using standard JSON response');
         const { query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
         const response = await ChatService.handleCopilotRequest({ query, model, session_id, user_id, system_prompt, save_chat, include_history, rag_db, num_docs, image, enhanced_prompt });
-        
+
         logger.info('Copilot request completed successfully');
         res.status(200).json(response);
     } catch (error) {
-        logger.error('Copilot request failed', { 
-            error: error.message, 
-            stack: error.stack 
+        logger.error('Copilot request failed', {
+            error: error.message,
+            stack: error.stack
         });
-        
+
         // If this was a streaming request, send error over SSE, else JSON
         if (req.body.stream === true) {
             writeSseEvent(res, 'error', { message: 'Internal server error', error: error.message });
@@ -97,14 +98,14 @@ router.post('/copilot', authenticate, async (req, res) => {
 // ========== AGENT COPILOT ROUTE (QUEUED WITH STREAMING) ==========
 router.post('/copilot-agent', authenticate, async (req, res) => {
     const logger = createLogger('AgentRoute', req.body.session_id);
-    
+
     try {
-        const { 
-            query, 
-            model, 
+        const {
+            query,
+            model,
             session_id,
-            user_id, 
-            system_prompt = '', 
+            user_id,
+            system_prompt = '',
             save_chat = true,
             include_history = true,
             auth_token = null,
@@ -114,24 +115,24 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
 
         // Validate required fields
         if (!query || !model || !user_id) {
-            logger.warn('Missing required fields', { 
+            logger.warn('Missing required fields', {
                 has_query: !!query,
                 has_model: !!model,
                 has_user_id: !!user_id
             });
-            return res.status(400).json({ 
-                message: 'Missing required fields', 
-                required: ['query', 'model', 'user_id'] 
+            return res.status(400).json({
+                message: 'Missing required fields',
+                required: ['query', 'model', 'user_id']
             });
         }
 
         const max_iterations = config.agent?.max_iterations || 3;
 
-        logger.info('Agent request received', { 
+        logger.info('Agent request received', {
             query_preview: query.substring(0, 100),
-            model, 
-            session_id, 
-            user_id, 
+            model,
+            session_id,
+            user_id,
             save_chat,
             max_iterations,
             streaming: stream,
@@ -157,7 +158,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             // ========== STREAMING PATH ==========
             console.log('[ROUTE DEBUG] Entering streaming path');
             logger.debug('Using streaming response with queue');
-            
+
             // Set SSE headers
             res.set({
                 'Content-Type': 'text/event-stream; charset=utf-8',
@@ -165,7 +166,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 'Connection': 'keep-alive',
                 'X-Accel-Buffering': 'no'
             });
-            
+
             // Flush headers immediately
             if (typeof res.flushHeaders === 'function') {
                 res.flushHeaders();
@@ -193,7 +194,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             // Create streaming callback
             const streamCallback = (eventType, data) => {
                 callbackInvocations++;
-                
+
                 // Only check response object state, not req events (which can be unreliable for SSE)
                 if (res.writableEnded || res.destroyed) {
                     // Only log non-content events to reduce noise
@@ -202,7 +203,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                     }
                     return; // Connection closed, stop trying to write
                 }
-                
+
                 try {
                     // Write SSE event
                     if (eventType === 'final_response' || eventType === 'content') {
@@ -211,16 +212,16 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                         console.log('[ROUTE DEBUG] Writing SSE event to response:', eventType);
                     }
                     writeSseEvent(res, eventType, data);
-                    
+
                     // Close stream on terminal events
                     if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
                         console.log('[ROUTE DEBUG] Stream ending. Total content chunks sent:', contentChunkCount);
                         res.end();
                     }
                 } catch (error) {
-                    logger.error('Failed to write to stream', { 
+                    logger.error('Failed to write to stream', {
                         error: error.message,
-                        eventType 
+                        eventType
                     });
                     // Stream will be closed naturally, no need to track state
                 }
@@ -251,7 +252,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             });
 
             console.log('[ROUTE DEBUG] Job added to queue, jobId:', job.id);
-            logger.info('Streaming job queued', { 
+            logger.info('Streaming job queued', {
                 jobId: job.id,
                 session_id,
                 user_id
@@ -263,7 +264,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                     clearInterval(heartbeatInterval);
                     return;
                 }
-                
+
                 try {
                     res.write(': heartbeat\n\n');
                     if (typeof res.flush === 'function') {
@@ -282,7 +283,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             // ========== NON-STREAMING PATH (ORIGINAL) ==========
             console.log('[ROUTE DEBUG] Entering NON-streaming path (stream is false or undefined)');
             logger.debug('Using non-streaming response with queue');
-            
+
             const job = await addAgentJob({
                 query,
                 model,
@@ -296,7 +297,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 workspace_items
             });
 
-            logger.info('Agent job queued successfully', { 
+            logger.info('Agent job queued successfully', {
                 jobId: job.id,
                 session_id,
                 user_id
@@ -312,17 +313,17 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
         }
 
     } catch (error) {
-        logger.error('Failed to queue agent job', { 
-            error: error.message, 
-            stack: error.stack 
+        logger.error('Failed to queue agent job', {
+            error: error.message,
+            stack: error.stack
         });
-        
+
         if (req.body.stream !== false && res.headersSent) {
             // Streaming: Send error event
             try {
-                writeSseEvent(res, 'error', { 
-                    message: 'Failed to queue job', 
-                    error: error.message 
+                writeSseEvent(res, 'error', {
+                    message: 'Failed to queue job',
+                    error: error.message
                 });
                 res.end();
             } catch (e) {
@@ -330,8 +331,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             }
         } else {
             // Non-streaming: Return 500
-            res.status(500).json({ 
-                message: 'Failed to queue agent job', 
+            res.status(500).json({
+                message: 'Failed to queue agent job',
                 error: error.message,
                 stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
             });
@@ -342,14 +343,14 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
 // ========== JOB STATUS ROUTE ==========
 router.get('/job/:jobId/status', authenticate, async (req, res) => {
     const logger = createLogger('JobStatus');
-    
+
     try {
         const { jobId } = req.params;
-        
+
         logger.info('Job status request', { jobId });
-        
+
         const jobStatus = await getJobStatus(jobId);
-        
+
         if (!jobStatus.found) {
             logger.warn('Job not found', { jobId });
             return res.status(404).json({
@@ -357,21 +358,21 @@ router.get('/job/:jobId/status', authenticate, async (req, res) => {
                 job_id: jobId
             });
         }
-        
-        logger.info('Job status retrieved', { 
-            jobId, 
+
+        logger.info('Job status retrieved', {
+            jobId,
             status: jobStatus.status,
             progress: jobStatus.progress?.percentage || 0
         });
-        
+
         res.status(200).json(jobStatus);
-        
+
     } catch (error) {
-        logger.error('Failed to get job status', { 
+        logger.error('Failed to get job status', {
             error: error.message,
             jobId: req.params.jobId
         });
-        
+
         res.status(500).json({
             message: 'Failed to retrieve job status',
             error: error.message
@@ -382,23 +383,23 @@ router.get('/job/:jobId/status', authenticate, async (req, res) => {
 // ========== QUEUE STATS ROUTE (for monitoring) ==========
 router.get('/queue/stats', authenticate, async (req, res) => {
     const logger = createLogger('QueueStats');
-    
+
     try {
         logger.info('Queue stats request');
-        
+
         const stats = await getQueueStats();
-        
+
         res.status(200).json({
             message: 'Queue statistics',
             timestamp: new Date().toISOString(),
             stats
         });
-        
+
     } catch (error) {
-        logger.error('Failed to get queue stats', { 
+        logger.error('Failed to get queue stats', {
             error: error.message
         });
-        
+
         res.status(500).json({
             message: 'Failed to retrieve queue statistics',
             error: error.message
@@ -464,10 +465,10 @@ router.post('/job/:jobId/abort', authenticate, async (req, res) => {
 router.get('/job/:jobId/stream', authenticate, async (req, res) => {
     const logger = createLogger('JobStream');
     const { jobId } = req.params;
-    
+
     try {
         logger.info('Stream reconnection requested', { jobId });
-        
+
         // Set SSE headers
         res.set({
             'Content-Type': 'text/event-stream; charset=utf-8',
@@ -475,7 +476,7 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no'
         });
-        
+
         res.flushHeaders();
         res.write(': connected\n\n');
         if (typeof res.flush === 'function') {
@@ -484,7 +485,7 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
 
         // Get job status
         const jobStatus = await getJobStatus(jobId);
-        
+
         if (!jobStatus.found) {
             writeSseEvent(res, 'error', { message: 'Job not found' });
             res.end();
@@ -493,17 +494,17 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
 
         // Check job state
         const state = jobStatus.status;
-        
+
         if (state === 'completed') {
             // Job already done
             logger.info('Job already completed', { jobId });
-            
-            writeSseEvent(res, 'started', { 
+
+            writeSseEvent(res, 'started', {
                 job_id: jobId,
                 message: 'Job already completed'
             });
-            
-            writeSseEvent(res, 'done', { 
+
+            writeSseEvent(res, 'done', {
                 job_id: jobId,
                 session_id: jobStatus.data.session_id,
                 message: 'Fetch result from /get-session-messages',
@@ -511,14 +512,14 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
                 tools_used: [],
                 duration_seconds: 0
             });
-            
+
             res.end();
             return;
         }
-        
+
         if (state === 'failed') {
             // Job failed
-            writeSseEvent(res, 'error', { 
+            writeSseEvent(res, 'error', {
                 job_id: jobId,
                 error: jobStatus.error?.message || 'Job failed'
             });
@@ -528,14 +529,14 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
 
         // Job is waiting or active, attach new stream callback
         logger.info('Attaching new stream to active/waiting job', { jobId, state });
-        
+
         const streamCallback = (eventType, data) => {
             // Only check response object state, not req events
             if (res.writableEnded || res.destroyed) return;
-            
+
             try {
                 writeSseEvent(res, eventType, data);
-                
+
                 if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
                     res.end();
                 }
@@ -548,7 +549,7 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         registerStreamCallback(jobId, streamCallback);
 
         // Send current status
-        writeSseEvent(res, state === 'active' ? 'started' : 'queued', { 
+        writeSseEvent(res, state === 'active' ? 'started' : 'queued', {
             job_id: jobId,
             status: state,
             progress: jobStatus.progress,
@@ -578,13 +579,13 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
         });
 
     } catch (error) {
-        logger.error('Stream reconnection failed', { 
+        logger.error('Stream reconnection failed', {
             jobId,
-            error: error.message 
+            error: error.message
         });
-        
+
         try {
-            writeSseEvent(res, 'error', { 
+            writeSseEvent(res, 'error', {
                 message: 'Stream reconnection failed',
                 error: error.message
             });
@@ -597,29 +598,29 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
 
 router.post('/chat', authenticate, async (req, res) => {
     const logger = createLogger('ChatRoute', req.body.session_id);
-    
+
     try {
-        logger.info('Chat request received', { 
+        logger.info('Chat request received', {
             user_id: req.body.user_id,
             model: req.body.model
         });
-        
+
         const { query, model, session_id, user_id, system_prompt, save_chat = true } = req.body;
-        const response = await ChatService.handleChatRequest({ 
-            query, 
-            model, 
-            session_id, 
-            user_id, 
-            system_prompt, 
-            save_chat 
+        const response = await ChatService.handleChatRequest({
+            query,
+            model,
+            session_id,
+            user_id,
+            system_prompt,
+            save_chat
         });
-        
+
         logger.info('Chat request completed successfully');
         res.status(200).json(response);
     } catch (error) {
-        logger.error('Chat request failed', { 
-            error: error.message, 
-            stack: error.stack 
+        logger.error('Chat request failed', {
+            error: error.message,
+            stack: error.stack
         });
         res.status(500).json({ message: 'Internal server error', error });
     }
@@ -651,14 +652,14 @@ router.post('/chat-image', authenticate, async (req, res) => {
     try {
         const { query, model, session_id, user_id, system_prompt, save_chat = true, image } = req.body;
         // const image = req.file ? req.file.buffer.toString('base64') : null;
-        const response = await ChatService.handleChatImageRequest({ 
-            query, 
-            model, 
-            session_id, 
-            user_id, 
-            image, 
-            system_prompt, 
-            save_chat 
+        const response = await ChatService.handleChatImageRequest({
+            query,
+            model,
+            session_id,
+            user_id,
+            image,
+            system_prompt,
+            save_chat
         });
         res.status(200).json(response);
     } catch (error) {
@@ -684,6 +685,25 @@ router.get('/start-chat', authenticate, (req, res) => {
     res.status(200).json({ message: 'created session id', session_id: sessionId });
 });
 
+router.post('/register-session', authenticate, async (req, res) => {
+    try {
+        const { session_id, user_id, title } = req.body || {};
+        if (!session_id || !user_id) {
+            return res.status(400).json({ message: 'session_id and user_id are required' });
+        }
+
+        const registration = await registerChatSession(session_id, user_id, title || 'New Chat');
+        return res.status(200).json({
+            status: 'ok',
+            session_id,
+            created: registration.created === true
+        });
+    } catch (error) {
+        console.error('Error registering chat session:', error);
+        return res.status(500).json({ message: 'Failed to register session', error: error.message });
+    }
+});
+
 router.get('/get-session-messages', authenticate, async (req, res) => {
     try {
         const session_id = req.query.session_id;
@@ -707,7 +727,7 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
         const messages = await getSessionMessages(session_id);
 
         if (!includeFiles) {
-            return res.status(200).json({ 
+            return res.status(200).json({
                 messages,
                 workflow_ids: workflowIds
             });
@@ -914,27 +934,27 @@ router.post('/save-prompt', authenticate, async (req, res) => {
 router.post('/rate-conversation', authenticate, async (req, res) => {
     try {
         const { session_id, user_id, rating } = req.body;
-        
+
         // Validate required fields
         if (!session_id || !user_id || rating === undefined) {
-            return res.status(400).json({ 
-                message: 'session_id, user_id, and rating are required' 
+            return res.status(400).json({
+                message: 'session_id, user_id, and rating are required'
             });
         }
-        
+
         // Validate rating value (assuming 1-5 scale)
         if (typeof rating !== 'number' || rating < 1 || rating > 5) {
-            return res.status(400).json({ 
-                message: 'Rating must be a number between 1 and 5' 
+            return res.status(400).json({
+                message: 'Rating must be a number between 1 and 5'
             });
         }
-        
+
         const result = await rateConversation(session_id, user_id, rating);
-        
-        res.status(200).json({ 
+
+        res.status(200).json({
             message: 'Conversation rated successfully',
             session_id,
-            rating 
+            rating
         });
     } catch (error) {
         console.error('Error rating conversation:', error);
@@ -945,28 +965,28 @@ router.post('/rate-conversation', authenticate, async (req, res) => {
 router.post('/rate-message', authenticate, async (req, res) => {
     try {
         const { user_id, message_id, rating } = req.body;
-        
+
         // Validate required fields
         if (!user_id || !message_id || rating === undefined) {
-            return res.status(400).json({ 
-                message: 'user_id, message_id, and rating are required' 
+            return res.status(400).json({
+                message: 'user_id, message_id, and rating are required'
             });
         }
-        
+
         // Validate rating value: -1, 0, 1
         if (typeof rating !== 'number' || rating < -1 || rating > 1) {
-            return res.status(400).json({ 
-                message: 'Rating must be a number between -1 and 1' 
+            return res.status(400).json({
+                message: 'Rating must be a number between -1 and 1'
             });
         }
-        
+
         const result = await rateMessage(user_id, message_id, rating);
-        
-        res.status(200).json({ 
+
+        res.status(200).json({
             message: 'Message rated successfully',
             user_id,
             message_id,
-            rating 
+            rating
         });
     } catch (error) {
         console.error('Error rating message:', error);

@@ -12,11 +12,11 @@ async function getModelData(model) {
   try {
     const db = await connectToDatabase();
     const modelData = await db.collection('modelList').findOne({ model });
-    
+
     if (!modelData) {
       throw new LLMServiceError(`Invalid model: ${model}`);
     }
-    
+
     return modelData;
   } catch (error) {
     if (error instanceof LLMServiceError) {
@@ -65,11 +65,11 @@ async function getRagData(ragDbName) {
   try {
     const db = await connectToDatabase();
     const ragData = await db.collection('ragList').findOne({ name: ragDbName });
-    
+
     if (!ragData) {
       throw new LLMServiceError(`Invalid RAG database: ${ragDbName}`);
     }
-    
+
     return ragData;
   } catch (error) {
     if (error instanceof LLMServiceError) {
@@ -93,13 +93,13 @@ async function getChatSession(sessionId) {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
     const session = await chatCollection.findOne({ session_id: sessionId });
-    
+
     if (session) {
       console.log(`[getChatSession] Session found: ${sessionId}`);
     } else {
       console.log(`[getChatSession] Session not found: ${sessionId}`);
     }
-    
+
     return session;
   } catch (error) {
     console.error(`[getChatSession] Error looking up session ${sessionId}:`, error);
@@ -264,7 +264,7 @@ async function createChatSession(sessionId, userId, title = 'Untitled') {
     console.log(`[createChatSession] Creating new session: ${sessionId} for user: ${userId} with title: "${title}"`);
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    
+
     const result = await chatCollection.insertOne({
       session_id: sessionId,
       user_id: userId,
@@ -274,12 +274,61 @@ async function createChatSession(sessionId, userId, title = 'Untitled') {
       workflow_ids: [],
       last_modified: new Date()
     });
-    
+
     console.log(`[createChatSession] Session created successfully: ${sessionId}`);
     return result;
   } catch (error) {
     console.error(`[createChatSession] Error creating session ${sessionId} for user ${userId}:`, error);
     throw new LLMServiceError('Failed to create chat session', error);
+  }
+}
+
+/**
+ * Register a chat session idempotently.
+ * Creates a new session when missing, otherwise only refreshes last_modified.
+ * @param {string} sessionId - The session ID
+ * @param {string} userId - The user ID
+ * @param {string} title - Optional title for newly created sessions
+ * @returns {Object} Registration result with created flag
+ */
+async function registerChatSession(sessionId, userId, title = 'New Chat') {
+  try {
+    if (!sessionId || !userId) {
+      throw new LLMServiceError('Session ID and user ID are required');
+    }
+
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    const now = new Date();
+    const normalizedTitle = (typeof title === 'string' && title.trim()) ? title.trim() : 'New Chat';
+
+    const result = await chatCollection.updateOne(
+      { session_id: sessionId, user_id: userId },
+      {
+        $setOnInsert: {
+          session_id: sessionId,
+          user_id: userId,
+          title: normalizedTitle,
+          created_at: now,
+          messages: [],
+          workflow_ids: []
+        },
+        $set: { last_modified: now }
+      },
+      { upsert: true }
+    );
+
+    return {
+      created: !!result.upsertedCount,
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+      upsertedId: result.upsertedId || null
+    };
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to register chat session', error);
   }
 }
 
@@ -319,7 +368,7 @@ async function addMessagesToSession(sessionId, messages) {
   try {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    
+
     return await chatCollection.updateOne(
       { session_id: sessionId },
       {
@@ -342,12 +391,12 @@ async function addMessagesToSession(sessionId, messages) {
 async function getOrCreateChatSession(sessionId, userId, title = 'Untitled') {
   try {
     let chatSession = await getChatSession(sessionId);
-    
+
     if (!chatSession) {
       await createChatSession(sessionId, userId, title);
       chatSession = await getChatSession(sessionId);
     }
-    
+
     return chatSession;
   } catch (error) {
     throw new LLMServiceError('Failed to get or create chat session', error);
@@ -364,7 +413,7 @@ async function saveSummary(sessionId, summary) {
   try {
     const db = await connectToDatabase();
     const summaryCollection = db.collection('chatSummaries');
-    
+
     return await summaryCollection.updateOne(
       { session_id: sessionId },
       { $set: { summary, updated_at: new Date() } },
@@ -430,16 +479,16 @@ async function rateConversation(sessionId, userId, rating) {
     console.log(`[rateConversation] Rating session ${sessionId} with rating: ${rating}`);
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    
+
     const result = await chatCollection.updateOne(
       { session_id: sessionId, user_id: userId },
       { $set: { rating, rated_at: new Date() } }
     );
-    
+
     if (result.matchedCount === 0) {
       throw new LLMServiceError(`Session not found or user not authorized: ${sessionId}`);
     }
-    
+
     console.log(`[rateConversation] Session ${sessionId} rated successfully`);
     return result;
   } catch (error) {
@@ -496,14 +545,14 @@ async function storeMessageEmbedding(sessionId, messageId, embedding) {
     console.log(`[storeMessageEmbedding] Storing embedding for message ${messageId} in session ${sessionId}`);
     const db = await connectToDatabase();
     const embeddingsCollection = db.collection('message_embeddings');
-    
+
     const result = await embeddingsCollection.insertOne({
       session_id: sessionId,
       message_id: messageId,
       embedding,
       created_at: new Date()
     });
-    
+
     console.log(`[storeMessageEmbedding] Embedding stored successfully for message ${messageId}`);
     return result;
   } catch (error) {
@@ -522,12 +571,12 @@ async function getEmbeddingsBySessionId(sessionId) {
     console.log(`[getEmbeddingsBySessionId] Retrieving embeddings for session: ${sessionId}`);
     const db = await connectToDatabase();
     const embeddingsCollection = db.collection('message_embeddings');
-    
+
     const embeddings = await embeddingsCollection
       .find({ session_id: sessionId })
       .sort({ created_at: 1 })
       .toArray();
-    
+
     console.log(`[getEmbeddingsBySessionId] Found ${embeddings.length} embeddings for session ${sessionId}`);
     return embeddings;
   } catch (error) {
@@ -546,15 +595,15 @@ async function getEmbeddingByMessageId(messageId) {
     console.log(`[getEmbeddingByMessageId] Retrieving embedding for message: ${messageId}`);
     const db = await connectToDatabase();
     const embeddingsCollection = db.collection('message_embeddings');
-    
+
     const embedding = await embeddingsCollection.findOne({ message_id: messageId });
-    
+
     if (embedding) {
       console.log(`[getEmbeddingByMessageId] Embedding found for message ${messageId}`);
     } else {
       console.log(`[getEmbeddingByMessageId] Embedding not found for message ${messageId}`);
     }
-    
+
     return embedding;
   } catch (error) {
     console.error(`[getEmbeddingByMessageId] Error retrieving embedding for message ${messageId}:`, error);
@@ -592,13 +641,13 @@ async function saveFileMetadata(sessionId, fileMetadata) {
     console.log(`[saveFileMetadata] Saving file metadata for session ${sessionId}, fileId: ${fileMetadata.fileId}`);
     const db = await connectToDatabase();
     const filesCollection = db.collection('session_files');
-    
+
     const result = await filesCollection.insertOne({
       session_id: sessionId,
       ...fileMetadata,
       created_at: new Date()
     });
-    
+
     console.log(`[saveFileMetadata] File metadata saved successfully for fileId: ${fileMetadata.fileId}`);
     return result;
   } catch (error) {
@@ -617,12 +666,12 @@ async function getFileMetadata(sessionId, fileId) {
   try {
     const db = await connectToDatabase();
     const filesCollection = db.collection('session_files');
-    
+
     const fileMetadata = await filesCollection.findOne({
       session_id: sessionId,
       fileId: fileId
     });
-    
+
     if (fileMetadata) {
       // Update last accessed time
       await filesCollection.updateOne(
@@ -630,7 +679,7 @@ async function getFileMetadata(sessionId, fileId) {
         { $set: { lastAccessed: new Date() } }
       );
     }
-    
+
     return fileMetadata;
   } catch (error) {
     console.error(`[getFileMetadata] Error getting file metadata:`, error);
@@ -647,7 +696,7 @@ async function getSessionFiles(sessionId) {
   try {
     const db = await connectToDatabase();
     const filesCollection = db.collection('session_files');
-    
+
     return await filesCollection
       .find({ session_id: sessionId })
       .sort({ created_at: -1 })
@@ -734,12 +783,12 @@ async function deleteFileMetadata(sessionId, fileId) {
     console.log(`[deleteFileMetadata] Deleting file metadata for session ${sessionId}, fileId: ${fileId}`);
     const db = await connectToDatabase();
     const filesCollection = db.collection('session_files');
-    
+
     const result = await filesCollection.deleteOne({
       session_id: sessionId,
       fileId: fileId
     });
-    
+
     console.log(`[deleteFileMetadata] File metadata deleted successfully`);
     return result;
   } catch (error) {
@@ -757,12 +806,12 @@ async function getSessionStorageSize(sessionId) {
   try {
     const db = await connectToDatabase();
     const filesCollection = db.collection('session_files');
-    
+
     const result = await filesCollection.aggregate([
       { $match: { session_id: sessionId } },
       { $group: { _id: null, totalSize: { $sum: '$size' } } }
     ]).toArray();
-    
+
     return result.length > 0 ? result[0].totalSize : 0;
   } catch (error) {
     console.error(`[getSessionStorageSize] Error getting session storage size:`, error);
@@ -784,6 +833,7 @@ module.exports = {
   getUserPrompts,
   saveUserPrompt,
   createChatSession,
+  registerChatSession,
   addWorkflowIdToSession,
   addMessagesToSession,
   getOrCreateChatSession,
@@ -802,4 +852,4 @@ module.exports = {
   getSessionFilesPaginated,
   deleteFileMetadata,
   getSessionStorageSize
-}; 
+};
