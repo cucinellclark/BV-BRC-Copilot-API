@@ -1378,6 +1378,31 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
       return fullResponse;
     }
 
+    // Handle argo-based models
+    if (modelData.queryType === 'argo') {
+      const payload = {
+        model: model,
+        prompt: [prompt],
+        system: systemPromptText,
+        user: "cucinell",
+        temperature: 1.0,
+        stream: true
+      };
+
+      let fullResponse = '';
+      const onChunk = (text) => {
+        fullResponse += text;
+        emitSSE(responseStream, 'final_response', { chunk: text, tool: sourceTool || null });
+      };
+
+      await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+
+      // Log the complete streamed response
+      log.logResponse('Streaming Final Response (Argo)', fullResponse, model);
+
+      return fullResponse;
+    }
+
     throw new LLMServiceError(`Invalid queryType for streaming: ${modelData.queryType}`);
   } catch (error) {
     const log = logger || createLogger('Agent-StreamResponse');

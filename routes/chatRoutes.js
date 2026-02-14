@@ -862,6 +862,8 @@ router.post('/generate-title-from-messages', authenticate, async (req, res) => {
             response = await ChatService.queryModel(openai_client, model, queryMsg);
         } else if (queryType === 'request') {
             response = await ChatService.queryRequest(modelData.endpoint, model, '', query);
+        } else if (queryType === 'argo') {
+            response = await ChatService.queryRequestArgo(modelData.endpoint, model, '', query);
         } else {
             return res.status(500).json({ message: 'Invalid query type', queryType });
         }

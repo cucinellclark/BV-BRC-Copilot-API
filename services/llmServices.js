@@ -109,15 +109,12 @@ async function queryRequestChat(url, model, system_prompt, query) {
         var payload = {
             model, temperature: 1.0,
             messages: [{ role: 'system', content: system_prompt }, { role: 'user', content: query }]
-        }        
-        return model === 'gpt4o'
-            ? await queryRequestChatArgo(url, model, system_prompt, query)
-            : await postJson(url, payload).then(res => {
-                if (!res?.choices?.[0]?.message?.content) {
-                    throw new LLMServiceError('Invalid response format from chat API');
-                }
-                return res.choices[0].message.content;
-            });
+        }
+        const res = await postJson(url, payload);
+        if (!res?.choices?.[0]?.message?.content) {
+            throw new LLMServiceError('Invalid response format from chat API');
+        }
+        return res.choices[0].message.content;
     } catch (error) {
         throw new LLMServiceError('Failed to query chat API', error);
     }
@@ -125,13 +122,13 @@ async function queryRequestChat(url, model, system_prompt, query) {
 
 async function queryRequestChatArgo(url, model, system_prompt, query) {
     try {
-        if (!url || !model || !system_prompt || !query) {
+        if (!url || !model || !query) {
             throw new LLMServiceError('Missing required parameters for queryRequestChatArgo');
         }
         const res = await postJson(url, {
             model,
             prompt: [query],
-            system: system_prompt,
+            system: system_prompt || '',
             user: "cucinell",
             temperature: 1.0
         });
@@ -162,6 +159,8 @@ async function queryChatOnly({ query, model, system_prompt = '', modelData }) {
             response = await queryClient(openai_client, model, llmMessages);
         } else if (modelData.queryType === 'request') {
             response = await queryRequestChat(modelData.endpoint, model, system_prompt || '', query);
+        } else if (modelData.queryType === 'argo') {
+            response = await queryRequestChatArgo(modelData.endpoint, model, system_prompt || '', query);
         } else {
             throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
         }
@@ -277,14 +276,14 @@ async function queryRag(query, rag_db, user_id, model, num_docs, session_id) {
             if (!model) missingParams.push('model');
             throw new LLMServiceError(`Missing required parameters for queryRag: ${missingParams.join(', ')}`);
         }
-        
-        const res = await postJson('http://0.0.0.0:5000/rag', { 
-            query, 
-            rag_db, 
-            user_id, 
-            model, 
-            num_docs, 
-            session_id 
+
+        const res = await postJson('http://0.0.0.0:5000/rag', {
+            query,
+            rag_db,
+            user_id,
+            model,
+            num_docs,
+            session_id
         });
 
         if (!res) {
@@ -419,26 +418,26 @@ module.exports = {
 
     // Error handling
     LLMServiceError,
-    
+
     // Utility functions
     count_tokens,
     safe_count_tokens,
     postJsonStream,
-    
+
     // OpenAI client functions
     setupOpenaiClient,
     queryClient,
-    
+
     // Chat API functions
     queryRequestChat,
     queryRequestChatArgo,
     queryChatOnly,
     queryChatImage,
-    
+
     // Embedding functions
     queryRequestEmbedding,
     queryRequestEmbeddingTfidf,
-    
+
     // Specialized service functions
     queryRag,
     queryLambdaModel
