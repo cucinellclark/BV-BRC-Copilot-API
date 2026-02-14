@@ -247,6 +247,11 @@ if (config.queue.enabled !== false) {
 
     } catch (error) {
         if (error && error.isCancelled) {
+            jobLogger.info('Agent job cancelled', {
+                jobId: job.id,
+                message: error.message
+            });
+
             const progress = jobProgress.get(job.id);
             if (progress) {
                 progress.status = 'cancelled';
@@ -260,13 +265,25 @@ if (config.queue.enabled !== false) {
                 message: 'Job cancelled by user',
                 timestamp: new Date().toISOString()
             });
+            safeStreamEmit(jobId, 'done', {
+                job_id: jobId,
+                session_id: job.data.session_id,
+                cancelled: true,
+                message: 'Job cancelled by user',
+                timestamp: new Date().toISOString()
+            });
 
             // Prevent retries for cancelled jobs.
             await job.discard();
             jobStreamCallbacks.delete(jobId);
             cancellationRequests.delete(cancellationKey);
 
-            throw error;
+            return {
+                success: false,
+                cancelled: true,
+                session_id: job.data.session_id,
+                completedAt: new Date()
+            };
         }
 
         jobLogger.error('Agent job failed', {
@@ -315,6 +332,16 @@ if (config.queue.enabled !== false) {
  * Event listeners for monitoring
  */
 agentQueue.on('completed', (job, result) => {
+    const progress = jobProgress.get(job.id);
+    if (progress?.status === 'cancelled') {
+        logger.info('Job cancelled', {
+            jobId: job.id,
+            userId: job.data.user_id,
+            duration: Date.now() - job.timestamp
+        });
+        return;
+    }
+
     logger.info('Job completed', { 
         jobId: job.id, 
         userId: job.data.user_id,

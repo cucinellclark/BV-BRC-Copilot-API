@@ -927,6 +927,11 @@ async function executeAgentLoop(opts) {
       }
     };
   } catch (error) {
+    if (error && error.isCancelled) {
+      logger.info('Agent loop cancelled', { error: error.message });
+      throw error;
+    }
+
     logger.error('Agent loop failed', { error: error.message, stack: error.stack });
     throw new LLMServiceError('Agent loop failed', error);
   }

@@ -212,8 +212,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                     }
                     writeSseEvent(res, eventType, data);
                     
-                    // Close stream if done or error
-                    if (eventType === 'done' || eventType === 'error') {
+                    // Close stream on terminal events
+                    if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
                         console.log('[ROUTE DEBUG] Stream ending. Total content chunks sent:', contentChunkCount);
                         res.end();
                     }
@@ -536,7 +536,7 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
             try {
                 writeSseEvent(res, eventType, data);
                 
-                if (eventType === 'done' || eventType === 'error') {
+                if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
                     res.end();
                 }
             } catch (error) {
