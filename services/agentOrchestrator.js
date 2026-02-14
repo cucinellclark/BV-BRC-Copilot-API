@@ -3,15 +3,15 @@
 const { v4: uuidv4 } = require('uuid');
 const { executeMcpTool, isFinalizeTool, isRagTool } = require('./mcp/mcpExecutor');
 const { loadToolsForPrompt } = require('./mcp/toolDiscovery');
-const { 
-  getModelData, 
-  getChatSession, 
+const {
+  getModelData,
+  getChatSession,
   createChatSession,
   addMessagesToSession,
   addWorkflowIdToSession
 } = require('./dbUtils');
-const { 
-  queryChatOnly, 
+const {
+  queryChatOnly,
   LLMServiceError,
   setupOpenaiClient,
   postJsonStream
@@ -31,7 +31,7 @@ const { getSessionMemory, updateSessionMemory, formatSessionMemory } = require('
 function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   // Check if this is a RAG result (has documents and summary)
   const isRagResult = result && result.documents && result.summary;
-  
+
   if (isRagResult) {
     const docs = Array.isArray(result.documents) ? result.documents.slice(0, ragMaxDocs) : [];
     const count = result.count ?? docs.length;
@@ -67,12 +67,12 @@ function prepareToolResult(toolId, result, ragMaxDocs = 5) {
  */
 function extractWorkflowId(result) {
   if (!result) return null;
-  
+
   // Direct workflow_id field (most common after unwrapping)
   if (result.workflow_id && typeof result.workflow_id === 'string') {
     return result.workflow_id.trim();
   }
-  
+
   // Check in content wrapper (MCP format: content[0].text contains JSON string)
   if (result.content && Array.isArray(result.content) && result.content.length > 0) {
     const firstContent = result.content[0];
@@ -87,7 +87,7 @@ function extractWorkflowId(result) {
       }
     }
   }
-  
+
   // Check in structuredContent
   if (result.structuredContent && result.structuredContent.result) {
     const structuredResult = result.structuredContent.result;
@@ -104,7 +104,7 @@ function extractWorkflowId(result) {
       return structuredResult.workflow_id.trim();
     }
   }
-  
+
   // If result is itself a JSON string
   if (typeof result === 'string') {
     try {
@@ -116,7 +116,7 @@ function extractWorkflowId(result) {
       // Not JSON, ignore.
     }
   }
-  
+
   return null;
 }
 
@@ -143,13 +143,13 @@ function normalizeParameters(params) {
   if (!params || typeof params !== 'object') {
     return params;
   }
-  
+
   const normalized = {};
   const keys = Object.keys(params).sort(); // Sort keys for consistent comparison
-  
+
   for (const key of keys) {
     let value = params[key];
-    
+
     // Normalize empty strings, null, undefined to null
     if (value === '' || value === null || value === undefined) {
       normalized[key] = null;
@@ -178,7 +178,7 @@ function normalizeParameters(params) {
       normalized[key] = value;
     }
   }
-  
+
   return normalized;
 }
 
@@ -187,23 +187,23 @@ function normalizeParameters(params) {
  */
 function deepEquals(obj1, obj2) {
   if (obj1 === obj2) return true;
-  
+
   if (obj1 == null || obj2 == null) return obj1 === obj2;
-  
+
   if (typeof obj1 !== 'object' || typeof obj2 !== 'object') {
     return obj1 === obj2;
   }
-  
+
   const keys1 = Object.keys(obj1);
   const keys2 = Object.keys(obj2);
-  
+
   if (keys1.length !== keys2.length) return false;
-  
+
   for (const key of keys1) {
     if (!keys2.includes(key)) return false;
     if (!deepEquals(obj1[key], obj2[key])) return false;
   }
-  
+
   return true;
 }
 
@@ -215,7 +215,7 @@ function isDuplicateAction(plannedAction, executionTrace) {
   if (!plannedAction || !plannedAction.action) {
     return { isDuplicate: false };
   }
-  
+
   // Only track duplicates for actions where re-running is costly or redundant
   const duplicateTrackedActions = new Set([
     'bvbrc_server.query_collection',
@@ -230,20 +230,20 @@ function isDuplicateAction(plannedAction, executionTrace) {
   if (plannedAction.action === 'FINALIZE') {
     return { isDuplicate: false };
   }
-  
+
   const normalizedPlanned = normalizeParameters(plannedAction.parameters);
-  
+
   // Check against all successful past actions
   for (const pastAction of executionTrace) {
     // Only check successful actions
     if (pastAction.status !== 'success') {
       continue;
     }
-    
+
     // Check if action names match
     if (pastAction.action === plannedAction.action) {
       const normalizedPast = normalizeParameters(pastAction.parameters);
-      
+
       // Check if parameters are identical
       if (deepEquals(normalizedPlanned, normalizedPast)) {
         return {
@@ -256,7 +256,7 @@ function isDuplicateAction(plannedAction, executionTrace) {
       }
     }
   }
-  
+
   return { isDuplicate: false };
 }
 
@@ -267,7 +267,7 @@ function hasSufficientData(toolResults) {
   if (!toolResults || Object.keys(toolResults).length === 0) {
     return false;
   }
-  
+
   // Check if we have any file references with data
   for (const result of Object.values(toolResults)) {
     if (result && result.type === 'file_reference' && result.summary) {
@@ -281,7 +281,7 @@ function hasSufficientData(toolResults) {
       return true;
     }
   }
-  
+
   return false;
 }
 
@@ -301,7 +301,7 @@ function sanitizeToolNames(text) {
 
 /**
  * Main agent orchestrator - executes iterative task loop
- * 
+ *
  * @param {object} opts - Options object
  * @returns {Promise<object>} Final response with execution trace
  */
@@ -322,24 +322,24 @@ async function executeAgentLoop(opts) {
     progressCallback = null,
     shouldCancel = () => false
   } = opts;
-  
+
   // Create logger for this session
   const logger = createLogger('Agent', session_id);
-  
+
   // Start a new query (this will increment the query counter and create Query A, B, C, etc.)
   const queryId = logger.startNewQuery();
-  
-  logger.info('Starting agent loop', { 
+
+  logger.info('Starting agent loop', {
     queryId,
-    query, 
-    model, 
-    session_id, 
-    user_id, 
+    query,
+    model,
+    session_id,
+    user_id,
     max_iterations,
     has_workspace_items: !!workspace_items,
     workspace_items_count: workspace_items ? workspace_items.length : 0
   });
-  
+
   // Log workspace items if present
   if (workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0) {
     logger.info('Workspace items available for this query', {
@@ -352,7 +352,7 @@ async function executeAgentLoop(opts) {
       }))
     });
   }
-  
+
   const executionTrace = [];
   const toolResults = {};
   const collectedRagDocs = [];
@@ -360,10 +360,10 @@ async function executeAgentLoop(opts) {
   let finalResponseSourceTool = null; // Track which tool generated the final response
   let finalResponse = null;
   let sessionMemory = null;
-  
+
   // Get auth token (from opts or config)
   const authToken = auth_token || config.auth_token;
-  
+
   // Get or create chat session early so tool-side metadata writes (e.g. workflow_ids)
   // always have an existing chat_sessions document to update.
   let chatSession = null;
@@ -399,7 +399,7 @@ async function executeAgentLoop(opts) {
       }
     }
   }
-  
+
   if (session_id) {
     try {
       sessionMemory = await getSessionMemory(session_id, user_id);
@@ -407,9 +407,10 @@ async function executeAgentLoop(opts) {
       logger.warn('Failed to load session memory, proceeding without it', { error: error.message });
     }
   }
-  
+
   // Create user message
   const userMessage = createMessage('user', query);
+  let userMessagePersisted = false;
 
   const throwIfCancelled = (checkpoint) => {
     if (!shouldCancel()) return;
@@ -418,13 +419,34 @@ async function executeAgentLoop(opts) {
     cancelError.isCancelled = true;
     throw cancelError;
   };
-  
+
   try {
+    // Persist the user message immediately so aborted/cancelled jobs still keep user intent.
+    if (save_chat && session_id) {
+      try {
+        if (!chatSession) {
+          await createChatSession(session_id, user_id);
+          chatSession = await getChatSession(session_id);
+        }
+        await addMessagesToSession(session_id, [userMessage]);
+        userMessagePersisted = true;
+        logger.info('Persisted user message at start of agent loop', {
+          session_id,
+          message_id: userMessage.message_id
+        });
+      } catch (initialSaveError) {
+        logger.warn('Failed to persist user message at start; will retry at completion', {
+          session_id,
+          error: initialSaveError.message
+        });
+      }
+    }
+
     while (iteration < max_iterations) {
       throwIfCancelled('before_iteration');
       iteration++;
       logger.info(`=== Iteration ${iteration}/${max_iterations} ===`);
-      
+
       // Plan next action (with optional history)
       let nextAction = await planNextAction(
         query,
@@ -438,16 +460,16 @@ async function executeAgentLoop(opts) {
         logger
       );
       throwIfCancelled('after_planning');
-      
-      logger.info('Planned action', { 
-        action: nextAction.action, 
-        reasoning: nextAction.reasoning 
+
+      logger.info('Planned action', {
+        action: nextAction.action,
+        reasoning: nextAction.reasoning
       });
-      
+
       // PRE-EXECUTION DUPLICATE DETECTION
       // Check if this action is a duplicate before executing
       const duplicateCheck = isDuplicateAction(nextAction, executionTrace);
-      
+
       if (duplicateCheck.isDuplicate) {
         logger.warn('Duplicate action detected', {
           action: duplicateCheck.action,
@@ -455,7 +477,7 @@ async function executeAgentLoop(opts) {
           currentIteration: iteration,
           message: duplicateCheck.message
         });
-        
+
         // Emit SSE event for duplicate detection
         if (stream && responseStream) {
           emitSSE(responseStream, 'duplicate_detected', {
@@ -465,18 +487,18 @@ async function executeAgentLoop(opts) {
             message: duplicateCheck.message
           });
         }
-        
+
         // If we already have sufficient data, force finalization
         if (hasSufficientData(toolResults)) {
           logger.info('Forcing finalization due to duplicate action with sufficient data');
-          
+
           // Override action to FINALIZE
           nextAction = {
             action: 'FINALIZE',
             reasoning: `Duplicate action detected (already executed in iteration ${duplicateCheck.duplicateIteration}). Finalizing with existing data.`,
             parameters: {}
           };
-          
+
           // Emit SSE event
           if (stream && responseStream) {
             emitSSE(responseStream, 'forced_finalize', {
@@ -487,7 +509,7 @@ async function executeAgentLoop(opts) {
         } else {
           // No sufficient data yet, but still a duplicate
           logger.warn('Duplicate action detected but insufficient data - continuing to let planner adapt');
-          
+
           // Add a warning to trace
           const warningEntry = {
             iteration,
@@ -498,12 +520,12 @@ async function executeAgentLoop(opts) {
             status: 'warning'
           };
           executionTrace.push(warningEntry);
-          
+
           // Continue to next iteration to replan
           continue;
         }
       }
-      
+
       // Add to trace
       const traceEntry = {
         iteration,
@@ -513,7 +535,7 @@ async function executeAgentLoop(opts) {
         timestamp: new Date().toISOString()
       };
       executionTrace.push(traceEntry);
-      
+
       // Emit SSE event for tool selection
       if (stream && responseStream) {
         emitSSE(responseStream, 'tool_selected', {
@@ -523,7 +545,7 @@ async function executeAgentLoop(opts) {
           parameters: nextAction.parameters
         });
       }
-      
+
       // Check if we should finalize
       if (nextAction.action === 'FINALIZE') {
         throwIfCancelled('before_finalize_generation');
@@ -544,7 +566,7 @@ async function executeAgentLoop(opts) {
         );
         break;
       }
-      
+
       // Execute the tool
       try {
         if (typeof progressCallback === 'function') {
@@ -587,7 +609,7 @@ async function executeAgentLoop(opts) {
           typeof safeResult === 'object' &&
           (safeResult.isError === true || safeResult.error === true)
         );
-        
+
         // Log what we got from prepareToolResult for debugging
         logger.debug('Tool result prepared', {
           tool: nextAction.action,
@@ -596,7 +618,7 @@ async function executeAgentLoop(opts) {
           hasSummary: !!safeResult?.summary,
           summaryPreview: typeof safeResult?.summary === 'string' ? safeResult.summary.substring(0, 100) : null
         });
-        
+
         toolResults[nextAction.action] = safeResult;
         traceEntry.result = safeResult;
         traceEntry.status = isErrorResult ? 'error' : 'success';
@@ -625,9 +647,9 @@ async function executeAgentLoop(opts) {
             hasWorkflowIdField: !!safeResult?.workflow_id,
             resultPreview: safeResult ? JSON.stringify(safeResult).substring(0, 300) : 'null'
           });
-          
+
           const workflowId = extractWorkflowId(safeResult);
-          
+
           if (workflowId) {
             try {
               await addWorkflowIdToSession(session_id, workflowId);
@@ -658,14 +680,14 @@ async function executeAgentLoop(opts) {
             logger.warn('Failed to queue session facts update', { error: factsError.message });
           });
         }
-        
+
         logger.logToolExecution(
           nextAction.action,
           nextAction.parameters,
           safeResult,
           traceEntry.status
         );
-        
+
         logger.logAgentIteration(
           iteration,
           nextAction.action,
@@ -674,7 +696,7 @@ async function executeAgentLoop(opts) {
           safeResult,
           traceEntry.status
         );
-        
+
         // Emit SSE event for tool execution result
         if (stream && responseStream) {
           emitSSE(responseStream, 'tool_executed', {
@@ -708,34 +730,34 @@ async function executeAgentLoop(opts) {
         if (shouldFinalizeNow) {
           throwIfCancelled('before_finalize_tool_emit');
           logger.info('Finalize-category tool executed, finalizing immediately');
-          
+
           // Wrap the raw result in a consistent JSON object structure
           const finalizeResponse = {
             source_tool: nextAction.action,
             content: result
           };
-          
+
           // For non-streaming: keep as object (will be serialized in JSON response)
           // For streaming: will be stringified when emitting
           finalResponse = finalizeResponse;
           finalResponseSourceTool = nextAction.action;
-          
+
           logger.info('Sending finalize tool result as JSON object', {
             tool: nextAction.action,
             resultType: typeof result,
             isString: typeof result === 'string',
             isObject: typeof result === 'object' && result !== null
           });
-          
+
           // If streaming, emit the JSON object as a stringified chunk
           if (stream && responseStream) {
             const finalizeResponseStr = JSON.stringify(finalizeResponse, null, 2);
-            emitSSE(responseStream, 'final_response', { 
-              chunk: finalizeResponseStr, 
+            emitSSE(responseStream, 'final_response', {
+              chunk: finalizeResponseStr,
               tool: nextAction.action
             });
           }
-          
+
           break;
         }
       } catch (error) {
@@ -743,12 +765,12 @@ async function executeAgentLoop(opts) {
           throw error;
         }
 
-        logger.error('Tool execution failed', { 
-          tool: nextAction.action, 
+        logger.error('Tool execution failed', {
+          tool: nextAction.action,
           error: error.message,
-          stack: error.stack 
+          stack: error.stack
         });
-        
+
         logger.logToolExecution(
           nextAction.action,
           nextAction.parameters,
@@ -756,7 +778,7 @@ async function executeAgentLoop(opts) {
           'failed',
           error
         );
-        
+
         logger.logAgentIteration(
           iteration,
           nextAction.action,
@@ -765,11 +787,11 @@ async function executeAgentLoop(opts) {
           { error: error.message },
           'failed'
         );
-        
+
         traceEntry.error = error.message;
         traceEntry.status = 'failed';
         toolResults[nextAction.action] = { error: error.message };
-        
+
         // Emit SSE event for tool execution failure
         if (stream && responseStream) {
           emitSSE(responseStream, 'tool_executed', {
@@ -779,7 +801,7 @@ async function executeAgentLoop(opts) {
             error: error.message
           });
         }
-        
+
         // Try to recover from error
         const shouldContinue = await handleToolError(
           nextAction,
@@ -788,7 +810,7 @@ async function executeAgentLoop(opts) {
           toolResults,
           logger
         );
-        
+
         if (!shouldContinue) {
           // Generate response with partial results
           finalResponse = await generateFinalResponse(
@@ -809,7 +831,7 @@ async function executeAgentLoop(opts) {
         }
       }
     }
-    
+
     // Safety net: hit max iterations
     if (!finalResponse) {
       throwIfCancelled('before_max_iteration_finalize');
@@ -829,31 +851,31 @@ async function executeAgentLoop(opts) {
         workspace_items
       );
     }
-    
-    logger.info('Agent loop complete', { 
-      iterations: iteration, 
-      toolsUsed: Object.keys(toolResults).length 
+
+    logger.info('Agent loop complete', {
+      iterations: iteration,
+      toolsUsed: Object.keys(toolResults).length
     });
-    
+
     // Create assistant message with the final response
     const assistantMessage = createMessage('assistant', finalResponse);
-    
+
     // Add tool metadata if the response was generated by a specific tool
     if (finalResponseSourceTool) {
       assistantMessage.source_tool = finalResponseSourceTool;
     }
-    
+
     // Create system message with execution trace (for debugging/transparency)
     let systemMessage = null;
     if (system_prompt || executionTrace.length > 0) {
       const traceDetails = `Agent Execution:\n- Iterations: ${iteration}\n- Tools Used: ${Object.keys(toolResults).length}\n\nExecution Trace:\n${executionTrace.map(t => `[${t.iteration}] ${t.action}: ${t.reasoning}`).join('\n')}`;
-      
-      const systemContent = system_prompt 
+
+      const systemContent = system_prompt
         ? `${system_prompt}\n\n${traceDetails}`
         : traceDetails;
-      
+
       systemMessage = createMessage('system', systemContent);
-      
+
       // Attach full trace to system message for retrieval
       systemMessage.agent_trace = executionTrace;
       systemMessage.tool_results_summary = Object.keys(toolResults);
@@ -873,7 +895,7 @@ async function executeAgentLoop(opts) {
     if (responseSystemMessage && responseSystemMessage.documents) {
       delete responseSystemMessage.documents;
     }
-    
+
     // Save conversation to database (for both streaming and non-streaming)
     if (save_chat && session_id) {
       try {
@@ -881,12 +903,15 @@ async function executeAgentLoop(opts) {
         if (!chatSession) {
           await createChatSession(session_id, user_id);
         }
-        
+
         // Save messages
-        const messagesToSave = dbSystemMessage 
-          ? [userMessage, dbSystemMessage, assistantMessage]
-          : [userMessage, assistantMessage];
-        
+        const baseMessages = dbSystemMessage
+          ? [dbSystemMessage, assistantMessage]
+          : [assistantMessage];
+        const messagesToSave = userMessagePersisted
+          ? baseMessages
+          : [userMessage].concat(baseMessages);
+
         await addMessagesToSession(session_id, messagesToSave);
         logger.info(`Saved ${messagesToSave.length} messages to session ${session_id}`);
         const messageCount = (chatSession?.messages?.length || 0) + messagesToSave.length;
@@ -898,7 +923,7 @@ async function executeAgentLoop(opts) {
         // Don't fail the whole request if save fails
       }
     }
-    
+
     // If streaming, emit completion event and end the stream
     if (stream && responseStream) {
       emitSSE(responseStream, 'done', {
@@ -914,7 +939,7 @@ async function executeAgentLoop(opts) {
         message_id: assistantMessage.message_id
       };
     }
-    
+
     return {
       message: 'success',
       userMessage,
@@ -943,15 +968,15 @@ async function executeAgentLoop(opts) {
 async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', sessionMemory = null, workspace_items = null, logger = null) {
   try {
     const log = logger || createLogger('Agent-Planner');
-    
+
     // Load available tools
     const toolsDescription = await loadToolsForPrompt();
-    
+
     // Format conversation history if available
     const historyStr = historyContext
       ? `\n\nCONVERSATION HISTORY (for context):\n${historyContext}`
       : '';
-    
+
     // Format execution trace for prompt with duplicate detection
     let traceStr = 'No actions executed yet';
     if (executionTrace.length > 0) {
@@ -963,31 +988,31 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
         error: t.error,
         parameters: t.parameters // Include parameters for visibility
       }));
-      
+
       traceStr = JSON.stringify(formattedTrace, null, 2);
-      
+
       // Add duplicate warning section if there are duplicates
       const duplicateWarnings = [];
       const actionCounts = {};
-      
+
       for (const trace of executionTrace) {
         if (trace.status === 'success') {
           const key = trace.action;
           actionCounts[key] = (actionCounts[key] || 0) + 1;
         }
       }
-      
+
       for (const [action, count] of Object.entries(actionCounts)) {
         if (count > 1) {
           duplicateWarnings.push(`⚠️  WARNING: "${action}" has been executed ${count} times!`);
         }
       }
-      
+
       if (duplicateWarnings.length > 0) {
         traceStr = `${traceStr}\n\n=== DUPLICATE ACTION WARNINGS ===\n${duplicateWarnings.join('\n')}\n\nDO NOT repeat these actions with the same parameters!`;
       }
     }
-    
+
     // Format tool results for prompt (all results are now file references)
     const resultsStr = Object.keys(toolResults).length > 0
       ? JSON.stringify(
@@ -1011,7 +1036,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
                   note: 'Result saved to file. Use internal_server file tools to query/extract data.'
                 }];
               }
-              
+
               // Fallback for non-file-reference results (should be rare/error cases)
               const resultStr = JSON.stringify(value);
               if (resultStr.length > 2000) {
@@ -1024,16 +1049,16 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
           2
         )
       : 'No tool results yet';
-    
+
     const sessionMemoryStr = sessionMemory
       ? formatSessionMemory(sessionMemory)
       : 'No session memory available';
-    
+
     // Format workspace items if available
     const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
       ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
       : '';
-    
+
     // Log workspace items inclusion in prompt
     if (workspaceStr) {
       logger.info('Including workspace items in planning prompt', {
@@ -1052,10 +1077,10 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
         length: workspace_items ? workspace_items.length : 0
       });
     }
-    
+
     // Build planning prompt
     const finalSystemPrompt = (systemPrompt || 'No additional context') + historyStr + workspaceStr;
-    
+
     // Log the final system prompt composition
     logger.debug('Building planning prompt with system context', {
       base_system_prompt_length: (systemPrompt || 'No additional context').length,
@@ -1064,7 +1089,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       final_system_prompt_length: finalSystemPrompt.length,
       has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES')
     });
-    
+
     const planningPrompt = promptManager.formatPrompt(
       promptManager.getAgentPrompt('taskPlanning'),
       {
@@ -1076,16 +1101,16 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
         systemPrompt: finalSystemPrompt
       }
     );
-    
+
     // Get model data
     const modelData = await getModelData(model);
-    
+
     // Log the prompt being sent
     log.logPrompt('Task Planning', planningPrompt, model, {
       executionTraceLength: executionTrace.length,
       toolResultsCount: Object.keys(toolResults).length
     });
-    
+
     // Call LLM
     const response = await queryChatOnly({
       query: planningPrompt,
@@ -1093,23 +1118,23 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       system_prompt: 'You are a task planning agent. Always respond with valid JSON.',
       modelData
     });
-    
+
     // Log the response
     log.logResponse('Task Planning', response, model);
     log.debug('Raw LLM planning response', { response });
-    
+
     // Parse JSON response
     const parsed = safeParseJson(response);
     log.debug('Parsed planning JSON', { parsed });
-    
+
     if (!parsed || !parsed.action) {
-      log.error('JSON parsing failed or missing action field', { 
-        rawResponse: response, 
-        parsedResult: parsed 
+      log.error('JSON parsing failed or missing action field', {
+        rawResponse: response,
+        parsedResult: parsed
       });
       throw new Error('Invalid planning response: missing action field');
     }
-    
+
     return {
       action: parsed.action,
       reasoning: parsed.reasoning || 'No reasoning provided',
@@ -1128,30 +1153,30 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null, sessionMemory = null, workspace_items = null) {
   try {
     const log = logger || createLogger('Agent-FinalResponse');
-    
+
     // Check if this is a direct response (no tools used)
     const isDirectResponse = Object.keys(toolResults).length === 0;
-    log.info('Generating final response', { 
-      isDirectResponse, 
+    log.info('Generating final response', {
+      isDirectResponse,
       toolResultsCount: Object.keys(toolResults).length,
-      stream 
+      stream
     });
-    
+
     // Format conversation history if available
     const historyStr = historyContext
       ? `\n\nConversation history (for context):\n${historyContext}`
       : '';
-    
+
     // Format session memory if available
     const sessionMemoryStr = sessionMemory
       ? `\n\nSession Facts:\n${formatSessionMemory(sessionMemory)}`
       : '';
-    
+
     // Format workspace items if available
     const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
       ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
       : '';
-    
+
     // Log workspace items inclusion in final response prompt
     if (workspaceStr) {
       log.info('Including workspace items in final response prompt', {
@@ -1170,9 +1195,9 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         length: workspace_items ? workspace_items.length : 0
       });
     }
-    
+
     let promptToUse;
-    
+
     if (isDirectResponse) {
       const hasHistoryContext = typeof historyContext === 'string' && historyContext.trim().length > 0;
       const followUpInstruction = hasHistoryContext
@@ -1180,7 +1205,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         : '';
 
       const finalHistoryContext = historyStr + sessionMemoryStr + workspaceStr;
-      
+
       // Log the final context composition
       log.debug('Building direct response prompt with context', {
         history_str_length: historyStr.length,
@@ -1205,11 +1230,11 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       const traceStr = executionTrace.map((t, index) =>
         `Step ${index + 1} (Iteration ${t.iteration}): ${sanitizeToolNames(t.reasoning || '')} [${t.status || 'pending'}]`
       ).join('\n');
-      
+
       // Format gathered results while omitting MCP tool IDs and internal tool instructions.
       const resultsStr = Object.values(toolResults).map((result, index) => {
         const sourceLabel = `Result Source ${index + 1}`;
-        
+
         // Check if this is a file reference (expected for all results)
         if (result && result.type === 'file_reference') {
           if (result.isError === true || result.error === true) {
@@ -1225,7 +1250,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
                  `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
                  `File ID: ${result.file_id}\n`;
         }
-        
+
         // Fallback for non-file-reference results (should be rare/error cases)
         const resultStr = sanitizeToolNames(JSON.stringify(result, null, 2));
         if (resultStr.length > 3000) {
@@ -1233,9 +1258,9 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         }
         return `${sourceLabel}:\n${resultStr}\n`;
       }).join('\n---\n');
-      
+
       const finalSystemPrompt = (systemPrompt || 'No additional context') + sessionMemoryStr + workspaceStr;
-      
+
       // Log the final system prompt composition
       log.debug('Building tool-based response prompt with system context', {
         base_system_prompt_length: (systemPrompt || 'No additional context').length,
@@ -1244,7 +1269,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         final_system_prompt_length: finalSystemPrompt.length,
         has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES')
       });
-      
+
       // Build response prompt
       promptToUse = promptManager.formatPrompt(
         promptManager.getAgentPrompt('finalResponse'),
@@ -1256,21 +1281,21 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         }
       );
     }
-    
+
     // Get model data
     const modelData = await getModelData(model);
-    
+
     // Log the prompt being sent
     log.logPrompt('Final Response Generation', promptToUse, model, {
       isDirectResponse,
       stream
     });
-    
+
     // If streaming is enabled, stream the response
     if (stream && responseStream) {
       return await streamFinalResponse(promptToUse, model, modelData, responseStream, log, sourceTool);
     }
-    
+
     // Non-streaming: Call LLM to generate final response
     const response = await queryChatOnly({
       query: promptToUse,
@@ -1278,10 +1303,10 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       system_prompt: 'You are a helpful BV-BRC AI assistant.',
       modelData
     });
-    
+
     // Log the response
     log.logResponse('Final Response Generation', response, model);
-    
+
     return response;
   } catch (error) {
     const log = logger || createLogger('Agent-FinalResponse');
@@ -1297,9 +1322,9 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
   try {
     const log = logger || createLogger('Agent-StreamResponse');
     const systemPromptText = 'You are a helpful BV-BRC AI assistant.';
-    
+
     log.info('Starting streaming response', { model });
-    
+
     // Handle client-based models (OpenAI)
     if (modelData.queryType === 'client') {
       const client = setupOpenaiClient(modelData.apiKey, modelData.endpoint);
@@ -1311,7 +1336,7 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
         ],
         stream: true
       });
-      
+
       let fullResponse = '';
       for await (const part of stream) {
         const text = part.choices?.[0]?.delta?.content;
@@ -1320,13 +1345,13 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
           emitSSE(responseStream, 'final_response', { chunk: text, tool: sourceTool || null });
         }
       }
-      
+
       // Log the complete streamed response
       log.logResponse('Streaming Final Response', fullResponse, model);
-      
+
       return fullResponse;
     }
-    
+
     // Handle request-based models
     if (modelData.queryType === 'request') {
       const payload = {
@@ -1338,21 +1363,21 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
         ],
         stream: true
       };
-      
+
       let fullResponse = '';
       const onChunk = (text) => {
         fullResponse += text;
         emitSSE(responseStream, 'final_response', { chunk: text, tool: sourceTool || null });
       };
-      
+
       await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
-      
+
       // Log the complete streamed response
       log.logResponse('Streaming Final Response', fullResponse, model);
-      
+
       return fullResponse;
     }
-    
+
     throw new LLMServiceError(`Invalid queryType for streaming: ${modelData.queryType}`);
   } catch (error) {
     const log = logger || createLogger('Agent-StreamResponse');
@@ -1367,33 +1392,33 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
  */
 async function handleToolError(failedAction, error, executionTrace, toolResults, logger = null) {
   const log = logger || createLogger('Agent-ErrorHandler');
-  log.info('Handling tool error', { 
-    failedAction: failedAction.action, 
-    error: error.message 
+  log.info('Handling tool error', {
+    failedAction: failedAction.action,
+    error: error.message
   });
-  
+
   // For now, simple logic: continue if we have some results, otherwise stop
   const hasResults = Object.keys(toolResults).length > 0;
-  const isCriticalError = error.message.includes('session') || 
+  const isCriticalError = error.message.includes('session') ||
                           error.message.includes('authentication') ||
                           error.message.includes('not found');
-  
+
   // If critical error and no results yet, stop
   if (isCriticalError && !hasResults) {
     log.warn('Critical error with no results, stopping');
     return false;
   }
-  
+
   // If we have multiple failures in a row, stop
   const recentFailures = executionTrace
     .slice(-3)
     .filter(t => t.status === 'failed').length;
-  
+
   if (recentFailures >= 2) {
     log.warn('Multiple consecutive failures, stopping', { recentFailures });
     return false;
   }
-  
+
   // Otherwise, continue and let planner try alternative approach
   log.info('Continuing after error, planner will adapt');
   return true;
