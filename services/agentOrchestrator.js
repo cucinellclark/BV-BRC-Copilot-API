@@ -218,7 +218,8 @@ function isDuplicateAction(plannedAction, executionTrace) {
   
   // Only track duplicates for actions where re-running is costly or redundant
   const duplicateTrackedActions = new Set([
-    'bvbrc_server.query_collection'
+    'bvbrc_server.query_collection',
+    'bvbrc_server.bvbrc_global_data_search'
   ]);
 
   if (!duplicateTrackedActions.has(plannedAction.action)) {
@@ -282,6 +283,20 @@ function hasSufficientData(toolResults) {
   }
   
   return false;
+}
+
+/**
+ * Remove MCP tool identifiers from text before it is sent to final response generation.
+ */
+function sanitizeToolNames(text) {
+  if (typeof text !== 'string' || !text) return text;
+
+  return text
+    // Common MCP tool id format: server_name.tool_name
+    .replace(/\b[a-zA-Z0-9_-]+(?:_server)?\.[a-zA-Z0-9_.-]+\b/g, '[tool]')
+    // Defensive cleanup for internal server mentions in free text
+    .replace(/\binternal_server\b/gi, 'internal system')
+    .replace(/\bmcp\b/gi, 'internal system');
 }
 
 /**
@@ -1155,36 +1170,37 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         }
       );
     } else {
-      // Tool-based response: format execution trace and results
-      const traceStr = executionTrace.map(t => 
-        `Iteration ${t.iteration}: ${t.action} - ${t.reasoning} [${t.status || 'pending'}]`
+      // Tool-based response: include trace and results without exposing MCP tool identities.
+      const traceStr = executionTrace.map((t, index) =>
+        `Step ${index + 1} (Iteration ${t.iteration}): ${sanitizeToolNames(t.reasoning || '')} [${t.status || 'pending'}]`
       ).join('\n');
       
-      // Format tool results (all results are now file references)
-      const resultsStr = Object.entries(toolResults).map(([tool, result]) => {
+      // Format gathered results while omitting MCP tool IDs and internal tool instructions.
+      const resultsStr = Object.values(toolResults).map((result, index) => {
+        const sourceLabel = `Result Source ${index + 1}`;
+        
         // Check if this is a file reference (expected for all results)
         if (result && result.type === 'file_reference') {
           if (result.isError === true || result.error === true) {
-            return `${tool}:\n[ERROR SAVED]\n` +
+            return `${sourceLabel}:\n[ERROR SAVED]\n` +
                    `File ID: ${result.file_id}\n` +
                    `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
                    `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
-                   `Use internal_server file tools (e.g., preview_file, query_json) to inspect the saved error payload.\n`;
+                   `Error payload was captured for this step.\n`;
           }
-          return `${tool}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
+          return `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
                  `Data Type: ${result.summary.dataType}\n` +
                  `Fields: ${result.summary.fields.join(', ')}\n` +
                  `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
-                 `File ID: ${result.file_id}\n` +
-                 `Use internal_server file tools (e.g., preview_file, query_json, read_file_lines) to query/extract data.\n`;
+                 `File ID: ${result.file_id}\n`;
         }
         
         // Fallback for non-file-reference results (should be rare/error cases)
-        const resultStr = JSON.stringify(result, null, 2);
+        const resultStr = sanitizeToolNames(JSON.stringify(result, null, 2));
         if (resultStr.length > 3000) {
-          return `${tool}:\n[Result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
+          return `${sourceLabel}:\n[Result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
         }
-        return `${tool}:\n${resultStr}\n`;
+        return `${sourceLabel}:\n${resultStr}\n`;
       }).join('\n---\n');
       
       const finalSystemPrompt = (systemPrompt || 'No additional context') + sessionMemoryStr + workspaceStr;

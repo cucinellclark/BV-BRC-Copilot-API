@@ -347,13 +347,23 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
 }
 
 /**
- * Check if tool is a query_collection tool that supports pagination
+ * Check if tool supports cursor-based pagination in the executor
  */
 function isQueryCollectionTool(toolId) {
   if (!toolId) return false;
-  // Only match bvbrc_query_collection specifically
-  // Match both 'bvbrc_query_collection' and 'server.bvbrc_query_collection' formats
-  return toolId === 'bvbrc_query_collection' || toolId.endsWith('.bvbrc_query_collection');
+  // Match both 'tool_name' and 'server.tool_name' formats
+  return toolId === 'bvbrc_query_collection' || toolId.endsWith('.bvbrc_query_collection') ||
+         toolId === 'bvbrc_global_data_search' || toolId.endsWith('.bvbrc_global_data_search');
+}
+
+/**
+ * Check if tool should force TSV format
+ */
+function shouldForceTsvFormat(toolId) {
+  if (!toolId) return false;
+  // Match both 'tool_name' and 'server.tool_name' formats
+  return toolId === 'bvbrc_query_collection' || toolId.endsWith('.bvbrc_query_collection') ||
+         toolId === 'bvbrc_global_data_search' || toolId.endsWith('.bvbrc_global_data_search');
 }
 
 /**
@@ -370,6 +380,9 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
   // Check if pagination is needed
   const nextCursorId = firstResponse?.nextCursorId;
   const totalCount = firstResponse?.numFound || firstResponse?.count || 0;
+  const requestedLimit = Number.isInteger(originalParameters?.limit) && originalParameters.limit > 0
+    ? originalParameters.limit
+    : null;
   
   // Skip pagination for countOnly queries
   if (originalParameters.countOnly) {
@@ -434,9 +447,24 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
     // Fallback: try to get count from response
     currentCount = firstResponse?.count || 0;
   }
+
+  if (requestedLimit !== null && !isTsvFormat && allResults.length > requestedLimit) {
+    allResults = allResults.slice(0, requestedLimit);
+    currentCount = allResults.length;
+  }
+
+  if (requestedLimit !== null && isTsvFormat) {
+    const tsvLines = allTsv.split('\n').filter(line => line.trim().length > 0);
+    if (tsvLines.length > 0) {
+      const header = tsvLines[0];
+      const dataLines = tsvLines.slice(1, requestedLimit + 1);
+      allTsv = [header, ...dataLines].join('\n') + (dataLines.length > 0 ? '\n' : '');
+      currentCount = dataLines.length;
+    }
+  }
   
   let batchNumber = 1;
-  let cursor = nextCursorId;
+  let cursor = (requestedLimit !== null && currentCount >= requestedLimit) ? null : nextCursorId;
   const errors = [];
   const responseStream = context.responseStream;
   const MAX_PAGINATION_BATCHES = 200; // Safety limit to prevent runaway pagination
@@ -634,6 +662,30 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       }
       
       currentCount += batchCount;
+
+      // Respect caller-provided limit (used by global search in Copilot flow).
+      if (requestedLimit !== null && currentCount >= requestedLimit) {
+        if (isTsvFormat) {
+          const tsvLines = allTsv.split('\n').filter(line => line.trim().length > 0);
+          if (tsvLines.length > 0) {
+            const header = tsvLines[0];
+            const dataLines = tsvLines.slice(1, requestedLimit + 1);
+            allTsv = [header, ...dataLines].join('\n') + (dataLines.length > 0 ? '\n' : '');
+            currentCount = dataLines.length;
+          }
+        } else if (isJsonFormat) {
+          allResults = allResults.slice(0, requestedLimit);
+          currentCount = allResults.length;
+        } else {
+          currentCount = requestedLimit;
+        }
+        log.info('Pagination limit reached, stopping further cursor fetches', {
+          toolId,
+          requestedLimit,
+          currentCount
+        });
+        cursor = null;
+      }
       
       log.debug(`Pagination batch ${batchNumber} completed`, {
         batchCount,
@@ -671,7 +723,9 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       }
       
       // Update cursor for next iteration
-      cursor = nextCursor;
+      if (cursor !== null) {
+        cursor = nextCursor;
+      }
       
       // Break if no more pages
       if (!cursor || cursor === null) {
@@ -891,16 +945,20 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         });
         parameters.stream = false;
       }
-      
-      // Override format to always use TSV for query_collection tools
+    }
+    
+    // Force TSV format for tools that require it
+    if (shouldForceTsvFormat(toolId)) {
       if (parameters.format !== 'tsv') {
-        log.info('Overriding format parameter for query_collection - forcing TSV format', { 
+        log.info('Overriding format parameter - forcing TSV format', { 
           toolId,
           originalFormat: parameters.format 
         });
         parameters.format = 'tsv';
       }
-    } else {
+    }
+    
+    if (!isQueryCollectionTool(toolId)) {
       // Auto-enable streaming if tool has streamingHint annotation
       // Force streaming when streamingHint is present, regardless of parameter value
       const autoEnableStreaming = config.streaming?.autoEnableOnHint !== false;

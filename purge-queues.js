@@ -4,6 +4,7 @@
  * 
  * Standalone script to purge all jobs from Bull queues.
  * This will remove all waiting, active, delayed, completed, and failed jobs.
+ * Purges queues based on the configured queue category (showcase or development).
  * 
  * Usage:
  *   node purge-queues.js
@@ -13,12 +14,12 @@
 
 const Queue = require('bull');
 const config = require('./config.json');
+const { getQueueRedisConfig, getQueueCategory } = require('./services/queueRedisConfig');
 
-// Redis configuration
-const redisConfig = {
-    host: config.redis.host,
-    port: config.redis.port
-};
+// Get Redis configuration based on queue category (showcase or development)
+const redisConfig = getQueueRedisConfig();
+const queueCategory = getQueueCategory();
+const categoryName = queueCategory === 1 ? 'showcase' : 'development';
 
 // Parse command line arguments
 const args = process.argv.slice(2);
@@ -199,11 +200,13 @@ async function main() {
     console.log('='.repeat(60));
     console.log('Queue Purge Script');
     console.log('='.repeat(60));
+    console.log(`\nQueue Category: ${categoryName} (Redis DB: ${redisConfig.db})`);
     
     if (dryRun) {
         console.log('\n⚠ DRY RUN MODE - No jobs will be actually purged\n');
     } else {
         console.log('\n⚠ WARNING: This will permanently delete all jobs from the queues!');
+        console.log(`   Target: ${categoryName} queues (Redis DB ${redisConfig.db})`);
         if (stopActive) {
             console.log('   Active jobs will be stopped before purging.');
         }
@@ -227,6 +230,12 @@ async function main() {
         const summaryResult = await purgeQueue(summaryQueue, 'chat-summary');
         results.push(summaryResult);
         await summaryQueue.close();
+        
+        // Purge session facts queue if it exists
+        const factsQueue = new Queue('session-facts', { redis: redisConfig });
+        const factsResult = await purgeQueue(factsQueue, 'session-facts');
+        results.push(factsResult);
+        await factsQueue.close();
         
         // Summary
         console.log('\n' + '='.repeat(60));

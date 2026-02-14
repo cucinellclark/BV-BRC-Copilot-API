@@ -60,8 +60,19 @@ async function discoverTools() {
           ...metadata
         };
         
-        // Add tools to manifest
-        tools.forEach(tool => {
+        // Get list of disabled tools
+        const disabledTools = config.global_settings?.disabled_tools || [];
+        
+        // Filter out disabled tools
+        const enabledTools = tools.filter(tool => !disabledTools.includes(tool.name));
+        const disabledCount = tools.length - enabledTools.length;
+        
+        if (disabledCount > 0) {
+          console.log(`[MCP Tool Discovery] Filtered out ${disabledCount} disabled tool(s) from ${serverKey}`);
+        }
+        
+        // Add enabled tools to manifest
+        enabledTools.forEach(tool => {
           const toolId = `${serverKey}.${tool.name}`;
           toolsManifest.tools[toolId] = {
             ...tool,
@@ -71,7 +82,10 @@ async function discoverTools() {
           toolsManifest.tool_count++;
         });
         
-        console.log(`[MCP Tool Discovery] ✓ ${serverKey}: ${tools.length} tools`);
+        // Update server tool count to reflect enabled tools only
+        toolsManifest.servers[serverKey].tool_count = enabledTools.length;
+        
+        console.log(`[MCP Tool Discovery] ✓ ${serverKey}: ${enabledTools.length} tools${disabledCount > 0 ? ` (${disabledCount} disabled)` : ''}`);
       } else {
         toolsManifest.servers[serverKey] = {
           status: 'failed',
@@ -174,6 +188,12 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
       
       // Extract tools from JSON-RPC result
       const tools = responseData.result?.tools || [];
+      
+      // Log all tool names for debugging
+      if (tools.length > 0) {
+        const toolNames = tools.map(t => t.name).join(', ');
+        console.log(`[MCP Tool Discovery] Tools from ${serverKey}: ${toolNames}`);
+      }
       
       return {
         tools,
