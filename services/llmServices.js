@@ -33,14 +33,41 @@ async function postJson(url, data, apiKey = null) {
             body: JSON.stringify(data)
         });
         if (!res.ok) {
-            throw new LLMServiceError(`HTTP error: ${res.status} ${res.statusText}`);
+            let responseText = '';
+            try {
+                responseText = await res.text();
+            } catch (_error) {
+                responseText = '';
+            }
+            const snippet = responseText ? responseText.slice(0, 500) : '';
+            throw new LLMServiceError(`HTTP error: ${res.status} ${res.statusText}${snippet ? ` | body: ${snippet}` : ''}`);
         }
-        return await res.json();
+        const responseText = await res.text();
+        try {
+            return JSON.parse(responseText);
+        } catch (parseError) {
+            const snippet = responseText ? responseText.slice(0, 500) : '';
+            throw new LLMServiceError(`Failed to parse JSON response${snippet ? ` | body: ${snippet}` : ''}`, parseError);
+        }
     } catch (error) {
         if (error instanceof LLMServiceError) {
             throw error;
         }
         throw new LLMServiceError('Failed to make POST request', error);
+    }
+}
+
+function toPreview(value, maxLen = 800) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    if (typeof value === 'string') {
+        return value.slice(0, maxLen);
+    }
+    try {
+        return JSON.stringify(value).slice(0, maxLen);
+    } catch (_error) {
+        return String(value).slice(0, maxLen);
     }
 }
 
@@ -125,6 +152,12 @@ async function queryRequestChatArgo(url, model, system_prompt, query) {
         if (!url || !model || !query) {
             throw new LLMServiceError('Missing required parameters for queryRequestChatArgo');
         }
+        console.log('[ArgoDebug] queryRequestChatArgo request', {
+            url,
+            model,
+            query_length: query.length,
+            system_prompt_length: (system_prompt || '').length
+        });
         const res = await postJson(url, {
             model,
             prompt: [query],
@@ -132,11 +165,27 @@ async function queryRequestChatArgo(url, model, system_prompt, query) {
             user: "cucinell",
             temperature: 1.0
         });
+        console.log('[ArgoDebug] queryRequestChatArgo response', {
+            url,
+            model,
+            response_keys: res && typeof res === 'object' ? Object.keys(res) : null,
+            has_response_field: !!res?.response,
+            response_type: typeof res?.response,
+            response_length: typeof res?.response === 'string' ? res.response.length : null,
+            response_preview: toPreview(res?.response),
+            raw_response_preview: toPreview(res)
+        });
         if (!res?.response) {
             throw new LLMServiceError('Invalid response format from Argo API');
         }
         return res.response;
     } catch (error) {
+        console.error('[ArgoDebug] queryRequestChatArgo failed', {
+            url,
+            model,
+            error: error.message,
+            original_error: error.originalError?.message || null
+        });
         throw new LLMServiceError('Failed to query Argo API', error);
     }
 }
@@ -353,6 +402,39 @@ async function postJsonStream(url, data, onChunk, apiKey = null) {
         return new Promise((resolve, reject) => {
             let buffer = '';
 
+            const processPart = (rawPart) => {
+                let part = (rawPart || '').trim();
+                if (!part) return;
+
+                // Remove the SSE prefix if present (e.g., "data: ...")
+                if (part.startsWith('data:')) {
+                    part = part.slice(5).trim();
+                }
+
+                // Handle stream terminator
+                if (part === '[DONE]') {
+                    return;
+                }
+
+                // Try to parse JSON – fallback to raw text if parsing fails
+                let textChunk = '';
+                try {
+                    const parsed = JSON.parse(part);
+                    // Attempt to extract assistant text from common response formats
+                    textChunk =
+                        parsed.choices?.[0]?.delta?.content ||
+                        parsed.choices?.[0]?.message?.content ||
+                        parsed.response ||
+                        '';
+                } catch (_) {
+                    textChunk = part; // raw text
+                }
+
+                if (textChunk) {
+                    onChunk(textChunk);
+                }
+            };
+
             // node-fetch returns a Node.js Readable stream
             res.body.on('data', (chunk) => {
                 buffer += chunk.toString();
@@ -362,43 +444,30 @@ async function postJsonStream(url, data, onChunk, apiKey = null) {
                 // Keep the last partial line in the buffer
                 buffer = parts.pop();
 
-                for (let part of parts) {
-                    part = part.trim();
-                    if (!part) continue;
-
-                    // Remove the SSE prefix if present (e.g., "data: ...")
-                    if (part.startsWith('data:')) {
-                        part = part.slice(5).trim();
-                    }
-
-                    // Handle stream terminator
-                    if (part === '[DONE]') {
-                        return; // Ignore – end will be handled by 'end' event
-                    }
-
-                    // Try to parse JSON – fallback to raw text if parsing fails
-                    let textChunk = '';
+                for (const part of parts) {
                     try {
-                        const parsed = JSON.parse(part);
-                        // Attempt to extract the assistant text following the OpenAI spec
-                        textChunk = parsed.choices?.[0]?.delta?.content || parsed.response || '';
-                    } catch (_) {
-                        textChunk = part; // raw text
-                    }
-
-                    if (textChunk) {
-                        try {
-                            onChunk(textChunk);
-                        } catch (cbErr) {
-                            // If the consumer throws, stop streaming
-                            res.body.destroy();
-                            reject(cbErr);
-                        }
+                        processPart(part);
+                    } catch (cbErr) {
+                        // If the consumer throws, stop streaming
+                        res.body.destroy();
+                        reject(cbErr);
+                        return;
                     }
                 }
             });
 
-            res.body.on('end', () => resolve());
+            res.body.on('end', () => {
+                // Process any trailing buffered content (e.g., single JSON response with no newline).
+                if (buffer && buffer.trim()) {
+                    try {
+                        processPart(buffer);
+                    } catch (cbErr) {
+                        reject(cbErr);
+                        return;
+                    }
+                }
+                resolve();
+            });
             res.body.on('error', (err) => reject(new LLMServiceError('Stream read error', err)));
         });
     } catch (error) {
