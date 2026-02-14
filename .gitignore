@@ -19,3 +19,6 @@ services/mcp/tools.json
 services/mcp/tools-for-prompt.txt
 
 assets/
+
+/utilities/error.log
+/utilities/access.log
