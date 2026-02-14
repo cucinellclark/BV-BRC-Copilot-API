@@ -43,6 +43,8 @@ const jobProgress = new Map();
 
 // Map to store streaming callbacks (shared across workers in same process)
 const jobStreamCallbacks = new Map();
+// Track cancellation requests for active jobs (cooperative cancellation)
+const cancellationRequests = new Set();
 
 /**
  * Safely emit to stream, handling connection errors
@@ -85,6 +87,8 @@ if (config.queue.enabled !== false) {
     const jobLogger = createLogger('AgentWorker', job.data.session_id);
     const jobId = job.id;
     const hasStreamCallback = jobStreamCallbacks.has(jobId);
+    const cancellationKey = String(jobId);
+    const isCancellationRequested = () => cancellationRequests.has(cancellationKey);
     
     try {
         jobLogger.info('Starting agent job processing', {
@@ -117,6 +121,13 @@ if (config.queue.enabled !== false) {
 
         // Create progress callback for iterations/tools
         const progressCallback = (iteration, tool, status) => {
+            if (isCancellationRequested()) {
+                const cancelError = new Error('Job cancelled by user');
+                cancelError.name = 'JobCancelledError';
+                cancelError.isCancelled = true;
+                throw cancelError;
+            }
+
             const progress = jobProgress.get(job.id);
             if (progress) {
                 progress.currentIteration = iteration;
@@ -188,8 +199,16 @@ if (config.queue.enabled !== false) {
             workspace_items: job.data.workspace_items,
             stream: !!streamCallback,
             responseStream: responseStream,
-            progressCallback: progressCallback
+            progressCallback: progressCallback,
+            shouldCancel: isCancellationRequested
         });
+
+        if (isCancellationRequested()) {
+            const cancelError = new Error('Job cancelled by user');
+            cancelError.name = 'JobCancelledError';
+            cancelError.isCancelled = true;
+            throw cancelError;
+        }
 
         await job.progress(100);
         
@@ -217,6 +236,7 @@ if (config.queue.enabled !== false) {
 
         // Clean up callback
         jobStreamCallbacks.delete(jobId);
+        cancellationRequests.delete(cancellationKey);
 
         return {
             success: true,
@@ -226,6 +246,29 @@ if (config.queue.enabled !== false) {
         };
 
     } catch (error) {
+        if (error && error.isCancelled) {
+            const progress = jobProgress.get(job.id);
+            if (progress) {
+                progress.status = 'cancelled';
+                progress.error = null;
+                progress.updatedAt = new Date();
+                jobProgress.set(job.id, progress);
+            }
+
+            safeStreamEmit(jobId, 'cancelled', {
+                job_id: jobId,
+                message: 'Job cancelled by user',
+                timestamp: new Date().toISOString()
+            });
+
+            // Prevent retries for cancelled jobs.
+            await job.discard();
+            jobStreamCallbacks.delete(jobId);
+            cancellationRequests.delete(cancellationKey);
+
+            throw error;
+        }
+
         jobLogger.error('Agent job failed', {
             jobId: job.id,
             error: error.message,
@@ -254,6 +297,7 @@ if (config.queue.enabled !== false) {
 
         // Clean up callback
         jobStreamCallbacks.delete(jobId);
+        cancellationRequests.delete(cancellationKey);
 
         throw error;
     }
@@ -344,6 +388,7 @@ async function addAgentJob(jobData, options = {}) {
         startedAt: new Date(),
         updatedAt: new Date()
     });
+    cancellationRequests.delete(String(job.id));
 
     logger.info('Agent job added to queue', {
         jobId: job.id,
@@ -370,11 +415,12 @@ async function getJobStatus(jobId) {
 
     const state = await job.getState();
     const progress = jobProgress.get(jobId) || {};
+    const effectiveStatus = progress.status || state;
     
     return {
         found: true,
         jobId: job.id,
-        status: state, // 'waiting', 'active', 'completed', 'failed', 'delayed'
+        status: effectiveStatus, // includes local cooperative states like 'cancelling'/'cancelled'
         progress: {
             currentIteration: progress.currentIteration || 0,
             maxIterations: progress.maxIterations || 3,
@@ -445,6 +491,123 @@ function registerStreamCallback(jobId, callback) {
 }
 
 /**
+ * Abort/cancel a job
+ * @param {string} jobId - Bull job ID
+ * @returns {Object} Result object with success status
+ */
+async function abortJob(jobId) {
+    const job = await agentQueue.getJob(jobId);
+    
+    if (!job) {
+        return {
+            found: false,
+            success: false,
+            message: 'Job not found',
+            jobId
+        };
+    }
+
+    const state = await job.getState();
+    
+    try {
+        if (state === 'waiting' || state === 'delayed') {
+            // Update progress tracking
+            const progress = jobProgress.get(jobId);
+            if (progress) {
+                progress.status = 'cancelled';
+                progress.updatedAt = new Date();
+                jobProgress.set(jobId, progress);
+            }
+
+            safeStreamEmit(jobId, 'cancelled', {
+                job_id: jobId,
+                message: 'Job cancelled by user',
+                timestamp: new Date().toISOString()
+            });
+
+            // Remove waiting/delayed jobs
+            await job.remove();
+            jobStreamCallbacks.delete(jobId);
+            cancellationRequests.delete(String(jobId));
+            logger.info('Job removed from queue', { jobId, state });
+            return {
+                found: true,
+                success: true,
+                message: 'Job cancelled successfully',
+                jobId,
+                previousState: state
+            };
+        } else if (state === 'active') {
+            // Cooperative cancellation for active jobs; worker exits at safe checkpoints.
+            cancellationRequests.add(String(jobId));
+            const progress = jobProgress.get(jobId);
+            if (progress) {
+                progress.status = 'cancelling';
+                progress.updatedAt = new Date();
+                jobProgress.set(jobId, progress);
+            }
+
+            safeStreamEmit(jobId, 'cancel_requested', {
+                job_id: jobId,
+                message: 'Cancellation requested',
+                timestamp: new Date().toISOString()
+            });
+
+            logger.info('Active job cancellation requested', { jobId });
+            return {
+                found: true,
+                success: true,
+                accepted: true,
+                message: 'Cancellation requested for active job',
+                jobId,
+                previousState: state,
+                note: 'Job will stop at the next safe checkpoint'
+            };
+        } else if (state === 'completed' || state === 'failed') {
+            // Already finished, can't cancel but can remove
+            await job.remove();
+            jobStreamCallbacks.delete(jobId);
+            cancellationRequests.delete(String(jobId));
+            logger.info('Finished job removed', { jobId, state });
+            return {
+                found: true,
+                success: true,
+                message: 'Job already finished, removed from history',
+                jobId,
+                previousState: state
+            };
+        } else {
+            // Unknown state, try to remove anyway
+            await job.remove();
+            jobStreamCallbacks.delete(jobId);
+            cancellationRequests.delete(String(jobId));
+            logger.info('Job removed (unknown state)', { jobId, state });
+            return {
+                found: true,
+                success: true,
+                message: 'Job removed',
+                jobId,
+                previousState: state
+            };
+        }
+    } catch (error) {
+        logger.error('Failed to abort job', { 
+            jobId, 
+            error: error.message,
+            state 
+        });
+        return {
+            found: true,
+            success: false,
+            message: 'Failed to cancel job',
+            error: error.message,
+            jobId,
+            previousState: state
+        };
+    }
+}
+
+/**
  * Graceful shutdown
  */
 async function shutdown() {
@@ -452,6 +615,7 @@ async function shutdown() {
     await agentQueue.close();
     jobProgress.clear();
     jobStreamCallbacks.clear();
+    cancellationRequests.clear();
     logger.info('Queue service shut down');
 }
 
@@ -466,6 +630,7 @@ module.exports = {
     getQueueStats,
     cleanOldJobs,
     registerStreamCallback,
+    abortJob,
     shutdown
 };
 

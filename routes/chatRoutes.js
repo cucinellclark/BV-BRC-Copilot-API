@@ -23,7 +23,7 @@ const {
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
-const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback } = require('../services/queueService');
+const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback, abortJob } = require('../services/queueService');
 const { writeSseEvent } = require('../services/sseUtils');
 const config = require('../config.json');
 const router = express.Router();
@@ -401,6 +401,60 @@ router.get('/queue/stats', authenticate, async (req, res) => {
         
         res.status(500).json({
             message: 'Failed to retrieve queue statistics',
+            error: error.message
+        });
+    }
+});
+
+// ========== JOB ABORT ROUTE ==========
+router.post('/job/:jobId/abort', authenticate, async (req, res) => {
+    const logger = createLogger('JobAbort');
+
+    try {
+        const { jobId } = req.params;
+
+        logger.info('Job abort request', { jobId });
+
+        const result = await abortJob(jobId);
+
+        if (!result.found) {
+            return res.status(404).json({
+                message: 'Job not found',
+                job_id: jobId
+            });
+        }
+
+        if (!result.success) {
+            return res.status(409).json({
+                message: result.message,
+                job_id: jobId,
+                previous_state: result.previousState,
+                note: result.note
+            });
+        }
+
+        if (result.accepted) {
+            return res.status(202).json({
+                message: result.message,
+                job_id: jobId,
+                previous_state: result.previousState,
+                note: result.note
+            });
+        }
+
+        return res.status(200).json({
+            message: result.message,
+            job_id: jobId,
+            previous_state: result.previousState
+        });
+    } catch (error) {
+        logger.error('Failed to abort job', {
+            error: error.message,
+            jobId: req.params.jobId
+        });
+
+        return res.status(500).json({
+            message: 'Failed to abort job',
             error: error.message
         });
     }

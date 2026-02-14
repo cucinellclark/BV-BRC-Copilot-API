@@ -3,6 +3,19 @@
 const axios = require('axios');
 const { createLogger } = require('../logger');
 
+function createCancellationError(checkpoint = 'unknown') {
+  const error = new Error(`Job cancelled by user (${checkpoint})`);
+  error.name = 'JobCancelledError';
+  error.isCancelled = true;
+  return error;
+}
+
+function throwIfCancelled(context = {}, checkpoint = 'unknown') {
+  if (typeof context?.shouldCancel === 'function' && context.shouldCancel()) {
+    throw createCancellationError(checkpoint);
+  }
+}
+
 /**
  * Handle streaming responses from MCP tools
  * Accumulates batches and tracks size/count for threshold decisions
@@ -31,11 +44,12 @@ class McpStreamHandler {
    * Handles both streaming and non-streaming responses
    */
   async executeWithStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, context, toolId, log) {
+    throwIfCancelled(context, 'before_mcp_request');
     const isStreaming = jsonRpcRequest.params?.arguments?.stream === true;
 
     if (!isStreaming) {
       // Non-streaming: use regular axios post
-      return await this.executeNonStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, log);
+      return await this.executeNonStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, context, log);
     }
 
     // Streaming: use streaming HTTP client
@@ -45,12 +59,14 @@ class McpStreamHandler {
   /**
    * Execute non-streaming request (original behavior)
    */
-  async executeNonStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, log) {
+  async executeNonStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, context, log) {
+    throwIfCancelled(context, 'before_non_streaming_request');
     const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
       timeout,
       headers,
       withCredentials: true
     });
+    throwIfCancelled(context, 'after_non_streaming_request');
 
     log.debug('Non-streaming response received');
     return {
@@ -64,6 +80,7 @@ class McpStreamHandler {
    */
   async executeStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, context, toolId, log) {
     log.info('Starting streaming request');
+    throwIfCancelled(context, 'before_streaming_request');
 
     // Use streaming response type
     const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
@@ -72,6 +89,7 @@ class McpStreamHandler {
       withCredentials: true,
       responseType: 'stream'
     });
+    throwIfCancelled(context, 'after_streaming_request');
 
     log.debug('Streaming response received, accumulating batches');
 
@@ -99,6 +117,8 @@ class McpStreamHandler {
 
       stream.on('data', (chunk) => {
         try {
+          throwIfCancelled(context, 'stream_chunk_received');
+
           chunkCount++;
           const chunkStr = chunk.toString();
           if (chunkCount === 1) {
@@ -113,6 +133,8 @@ class McpStreamHandler {
           buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
           for (const line of lines) {
+            throwIfCancelled(context, 'stream_line_processed');
+
             const trimmedLine = line.trim();
             if (!trimmedLine) continue;
 
@@ -287,6 +309,11 @@ class McpStreamHandler {
 
       stream.on('end', () => {
         if (error) {
+          if (error.isCancelled) {
+            reject(error);
+            return;
+          }
+
           // Return error information
           const errorResult = {
             error: error.error || 'Stream error',
@@ -315,6 +342,11 @@ class McpStreamHandler {
       });
 
       stream.on('error', (err) => {
+        if (err && err.isCancelled) {
+          reject(err);
+          return;
+        }
+
         log.error('Stream error', { error: err.message });
         
         // Return partial results if we got any

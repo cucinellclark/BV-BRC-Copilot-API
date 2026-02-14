@@ -34,6 +34,19 @@ function shouldBypassFileHandling(toolId) {
   return bypassList.some(fragment => toolId.includes(fragment));
 }
 
+function createCancellationError(checkpoint = 'unknown') {
+  const error = new Error(`Job cancelled by user (${checkpoint})`);
+  error.name = 'JobCancelledError';
+  error.isCancelled = true;
+  return error;
+}
+
+function throwIfCancelled(context = {}, checkpoint = 'unknown') {
+  if (typeof context?.shouldCancel === 'function' && context.shouldCancel()) {
+    throw createCancellationError(checkpoint);
+  }
+}
+
 /**
  * Apply server-side overrides for parameters that should NOT be controlled by the LLM.
  *
@@ -377,6 +390,8 @@ function shouldForceTsvFormat(toolId) {
  * @returns {Promise<object>} Merged result with all paginated data
  */
 async function paginateQueryCollection(toolId, originalParameters, firstResponse, authToken, context, log) {
+  throwIfCancelled(context, 'before_pagination_start');
+
   // Check if pagination is needed
   const nextCursorId = firstResponse?.nextCursorId;
   const totalCount = firstResponse?.numFound || firstResponse?.count || 0;
@@ -486,6 +501,8 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
     batchNumber++;
     
     try {
+      throwIfCancelled(context, `before_pagination_batch_${batchNumber}`);
+
       log.debug(`Fetching pagination batch ${batchNumber}`, {
         cursor: cursor.substring(0, 20) + '...', // Log first 20 chars only
         currentCount,
@@ -556,6 +573,8 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         headers,
         withCredentials: true
       });
+
+      throwIfCancelled(context, `after_pagination_batch_${batchNumber}_response`);
       
       let responseData = response.data;
       
@@ -737,6 +756,10 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       }
       
     } catch (error) {
+      if (error && error.isCancelled) {
+        throw error;
+      }
+
       log.error(`Error during pagination batch ${batchNumber}`, {
         error: error.message,
         stack: error.stack,
@@ -868,6 +891,8 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
   const log = logger || createLogger('MCP-Executor', context.session_id);
   
   try {
+    throwIfCancelled(context, 'before_tool_definition');
+
     // Load tool definition
     let toolDef = await getToolDefinition(toolId);
     
@@ -915,6 +940,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     }
     
     // Get or create session
+    throwIfCancelled(context, 'before_get_or_create_session');
     const sessionId = await sessionManager.getOrCreateSession(serverKey, serverConfig, authToken);
     
     // Build headers with session ID
@@ -986,6 +1012,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     const timeout = config.global_settings?.tool_execution_timeout || 120000;
     
     // Execute tool with streaming support
+    throwIfCancelled(context, 'before_tool_execution');
     const executionResult = await streamHandler.executeWithStreaming(
       mcpEndpoint,
       jsonRpcRequest,
@@ -995,6 +1022,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       toolId,
       log
     );
+    throwIfCancelled(context, 'after_tool_execution');
     
     let responseData = executionResult.data;
     const isStreamingResponse = executionResult.streaming;
@@ -1165,6 +1193,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
           
           try {
             // Perform pagination
+            throwIfCancelled(context, 'before_paginate_query_collection');
             result = await paginateQueryCollection(
               toolId,
               parameters,
@@ -1173,6 +1202,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
               context,
               log
             );
+            throwIfCancelled(context, 'after_paginate_query_collection');
             
             log.info('Pagination completed', {
               toolId,
@@ -1300,6 +1330,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     
     return result;
   } catch (error) {
+    if (error && error.isCancelled) {
+      throw error;
+    }
+
     log.error('Error executing tool', { 
       toolId, 
       error: error.message, 

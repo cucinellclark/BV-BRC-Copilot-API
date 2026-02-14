@@ -318,7 +318,9 @@ async function executeAgentLoop(opts) {
     auth_token = null,
     workspace_items = null,
     stream = false,
-    responseStream = null
+    responseStream = null,
+    progressCallback = null,
+    shouldCancel = () => false
   } = opts;
   
   // Create logger for this session
@@ -408,9 +410,18 @@ async function executeAgentLoop(opts) {
   
   // Create user message
   const userMessage = createMessage('user', query);
+
+  const throwIfCancelled = (checkpoint) => {
+    if (!shouldCancel()) return;
+    const cancelError = new Error(`Job cancelled by user (${checkpoint})`);
+    cancelError.name = 'JobCancelledError';
+    cancelError.isCancelled = true;
+    throw cancelError;
+  };
   
   try {
     while (iteration < max_iterations) {
+      throwIfCancelled('before_iteration');
       iteration++;
       logger.info(`=== Iteration ${iteration}/${max_iterations} ===`);
       
@@ -426,6 +437,7 @@ async function executeAgentLoop(opts) {
         workspace_items,
         logger
       );
+      throwIfCancelled('after_planning');
       
       logger.info('Planned action', { 
         action: nextAction.action, 
@@ -514,6 +526,7 @@ async function executeAgentLoop(opts) {
       
       // Check if we should finalize
       if (nextAction.action === 'FINALIZE') {
+        throwIfCancelled('before_finalize_generation');
         logger.info('Planner decided to finalize');
         finalResponse = await generateFinalResponse(
           query,
@@ -534,6 +547,11 @@ async function executeAgentLoop(opts) {
       
       // Execute the tool
       try {
+        if (typeof progressCallback === 'function') {
+          progressCallback(iteration, nextAction.action, 'active');
+        }
+        throwIfCancelled('before_tool_execution');
+
         const result = await executeMcpTool(
           nextAction.action,
           nextAction.parameters,
@@ -547,10 +565,12 @@ async function executeAgentLoop(opts) {
             historyContext,
             sessionMemory,
             workspace_items,
-            responseStream: stream && responseStream ? responseStream : null
+            responseStream: stream && responseStream ? responseStream : null,
+            shouldCancel
           },
           logger
         );
+        throwIfCancelled('after_tool_execution');
 
         const { storage: ragStorage, safeResult } = prepareToolResult(
           nextAction.action,
@@ -686,6 +706,7 @@ async function executeAgentLoop(opts) {
         // Tools marked as FINALIZE should finalize immediately
         const shouldFinalizeNow = isFinalizeTool(nextAction.action);
         if (shouldFinalizeNow) {
+          throwIfCancelled('before_finalize_tool_emit');
           logger.info('Finalize-category tool executed, finalizing immediately');
           
           // Wrap the raw result in a consistent JSON object structure
@@ -718,6 +739,10 @@ async function executeAgentLoop(opts) {
           break;
         }
       } catch (error) {
+        if (error && error.isCancelled) {
+          throw error;
+        }
+
         logger.error('Tool execution failed', { 
           tool: nextAction.action, 
           error: error.message,
@@ -787,6 +812,7 @@ async function executeAgentLoop(opts) {
     
     // Safety net: hit max iterations
     if (!finalResponse) {
+      throwIfCancelled('before_max_iteration_finalize');
       logger.warn('Max iterations reached, finalizing');
       finalResponse = await generateFinalResponse(
         query,
