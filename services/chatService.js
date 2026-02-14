@@ -6,6 +6,7 @@ const {
   setupOpenaiClient,
   queryClient,
   queryRequestChat,
+  queryRequestChatArgo,
   queryRequestEmbedding,
   queryRequestEmbeddingTfidf,
   queryLambdaModel,
@@ -108,6 +109,14 @@ async function runModel(ctx, modelData) {
       ctx.prompt
     );
   }
+  if (modelData.queryType === 'argo') {
+    return await queryRequestChatArgo(
+      modelData.endpoint,
+      ctx.model,
+      ctx.systemPrompt,
+      ctx.prompt
+    );
+  }
   throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
 }
 
@@ -194,6 +203,8 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
         response = await queryClient(openai_client, model, context.messages);
       } else if (modelData.queryType === 'request') {
         response = await queryRequestChat(modelData.endpoint, model, modelSystemPrompt, context.prompt);
+      } else if (modelData.queryType === 'argo') {
+        response = await queryRequestChatArgo(modelData.endpoint, model, modelSystemPrompt, context.prompt);
       } else {
         throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
       }
@@ -224,8 +235,8 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
       });
     }
 
-    return { 
-      message: 'success', 
+    return {
+      message: 'success',
       userMessage,
       assistantMessage,
       ...(systemMessage && { systemMessage })
@@ -291,8 +302,8 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
       await addMessagesToSession(session_id, messagesToInsert);
     }
 
-    return { 
-      message: 'success', 
+    return {
+      message: 'success',
       userMessage,
       assistantMessage,
       ...(systemMessage && { systemMessage })
@@ -361,8 +372,8 @@ async function handleChatImageRequest({ query, model, session_id, user_id, image
       await addMessagesToSession(session_id, messagesToInsert);
     }
 
-    return { 
-      message: 'success', 
+    return {
+      message: 'success',
       userMessage,
       assistantMessage,
       ...(systemMessage && { systemMessage })
@@ -415,15 +426,15 @@ function createQueryFromMessages(query, messages, system_prompt, max_tokens) {
       resolve(data.prompt_query);
     } catch (error) {
       console.error('Error in createQueryFromMessages:', error);
-      
+
       // Fallback: format messages according to their roles
       let formattedMessages = [];
-      
+
       // Add system prompt if provided
       if (system_prompt && system_prompt.trim() !== '') {
         formattedMessages.push(`System: ${system_prompt}`);
       }
-      
+
       // Format existing messages according to their roles
       if (messages && messages.length > 0) {
         messages.forEach(msg => {
@@ -433,12 +444,12 @@ function createQueryFromMessages(query, messages, system_prompt, max_tokens) {
           }
         });
       }
-      
+
       // Add the current query as the final message
       if (query && query.trim() !== '') {
         formattedMessages.push(`Current User Query: ${query}`);
       }
-      
+
       const fallbackResponse = formattedMessages.join('\n\n');
       resolve(fallbackResponse);
     }
@@ -587,6 +598,23 @@ async function runModelStream(ctx, modelData, onChunk) {
     return;
   }
 
+  // ---------------------- argo-based models ----------------------
+  if (modelData.queryType === 'argo') {
+    // Argo uses a different payload format
+    const payload = {
+      model: ctx.model,
+      prompt: [ctx.prompt],
+      system: ctx.systemPrompt,
+      user: "cucinell",
+      temperature: 1.0,
+      stream: true
+    };
+
+    // Use streaming with custom response parsing for Argo
+    await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+    return;
+  }
+
   throw new LLMServiceError(`Invalid queryType for streaming: ${modelData.queryType}`);
 }
 
@@ -671,6 +699,7 @@ module.exports = {
   getOpenaiClient,
   queryModel,
   queryRequest,
+  queryRequestArgo: queryRequestChatArgo,
   runModel,
   runModelStream,
   getPathState
