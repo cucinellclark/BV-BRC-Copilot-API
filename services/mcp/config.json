@@ -33,7 +33,8 @@
       "helpdesk_service_usage",
       "plan_workflow",
       "submit_workflow",
-      "workspace_browse_tool"
+      "workspace_browse_tool",
+      "list_jobs"
     ],
     "bypass_file_handling_tools": [
       "workspace_browse_tool",
@@ -48,7 +49,8 @@
       "workspace_preview_file_tool",
       "bvbrc_plan_query_collection",
       "bvbrc_collection_fields_and_parameters",
-      "workspace_get_file_metadata_tool"
+      "workspace_get_file_metadata_tool",
+      "list_jobs"
     ],
     "context_aware_tools": [
       "plan_workflow"
@@ -56,6 +58,16 @@
     "disabled_tools": [
       "bvbrc_collection_fields_and_parameters",
       "submit_workflow"
-    ]
+    ],
+    "exclude_from_context": {
+      "unconditional": [
+        "list_jobs"
+      ],
+      "conditional": {
+        "workspace_browse_tool": {
+          "result_types": ["list_result", "search_result"]
+        }
+      }
+    }
   }
 }

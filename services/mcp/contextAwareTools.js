@@ -25,19 +25,20 @@ function buildEnhancedContext(opts = {}) {
     query = '',
     historyContext = '',
     sessionMemory = null,
-    session_id = null
+    session_id = null,
+    selected_jobs = null
   } = opts;
-  
+
   const parts = [];
   const maxTokens = mcpConfig.global_settings?.context_aware_settings?.max_context_tokens || 1000;
-  
+
   parts.push('=== CONVERSATION CONTEXT ===');
-  
+
   // Add current user query
   if (query) {
     parts.push(`\nCurrent User Query: ${truncateText(query, 200)}`);
   }
-  
+
   // Extract and add summary from history context
   if (historyContext) {
     const summaryMatch = historyContext.match(/Conversation summary:\s*(.+?)(?=\n(?:user:|assistant:)|$)/s);
@@ -45,7 +46,7 @@ function buildEnhancedContext(opts = {}) {
       const summary = summaryMatch[1].trim();
       parts.push(`\nConversation Summary:\n${truncateText(summary, 400)}`);
     }
-    
+
     // Extract recent messages
     const recentMatch = historyContext.match(/Recent Messages:\s*(.+?)(?=\nCurrent Query:|$)/s);
     if (recentMatch) {
@@ -53,15 +54,15 @@ function buildEnhancedContext(opts = {}) {
       parts.push(`\nRecent Messages:\n${truncateText(recent, 300)}`);
     }
   }
-  
+
   // Add session memory
   if (sessionMemory) {
     parts.push('\nSession State:');
-    
+
     if (sessionMemory.focus) {
       parts.push(`- Focus: ${JSON.stringify(sessionMemory.focus)}`);
     }
-    
+
     if (sessionMemory.last_tool) {
       parts.push(`- Last Tool Used: ${sessionMemory.last_tool.tool}`);
       if (sessionMemory.last_tool.parameters) {
@@ -71,18 +72,18 @@ function buildEnhancedContext(opts = {}) {
         }
       }
     }
-    
+
     // Add key facts if available
     if (sessionMemory.facts && Object.keys(sessionMemory.facts).length > 0) {
       const factCount = Object.keys(sessionMemory.facts).length;
       parts.push(`- Session Facts: ${factCount} facts stored`);
-      
+
       // Include most relevant facts (limit to 5)
       const factEntries = Object.entries(sessionMemory.facts).slice(0, 5);
       if (factEntries.length > 0) {
         factEntries.forEach(([key, value]) => {
-          const valueStr = typeof value === 'object' 
-            ? JSON.stringify(value) 
+          const valueStr = typeof value === 'object'
+            ? JSON.stringify(value)
             : String(value);
           if (valueStr.length < 100) {
             parts.push(`  * ${key}: ${valueStr}`);
@@ -91,14 +92,25 @@ function buildEnhancedContext(opts = {}) {
       }
     }
   }
-  
+
+  if (Array.isArray(selected_jobs) && selected_jobs.length > 0) {
+    const selectedIds = selected_jobs
+      .map(job => (job && typeof job.id === 'string' ? job.id : null))
+      .filter(Boolean)
+      .slice(0, 20);
+
+    if (selectedIds.length > 0) {
+      parts.push(`\nSelected Job IDs:\n${selectedIds.join(', ')}`);
+    }
+  }
+
   parts.push('\n=== TASK FOR THIS TOOL ===');
-  
+
   const contextStr = parts.join('\n');
-  
+
   // Rough token estimate (1 token ≈ 4 chars)
   const estimatedTokens = Math.ceil(contextStr.length / 4);
-  
+
   if (estimatedTokens > maxTokens) {
     logger.warn('Context exceeds token limit, truncating', {
       estimatedTokens,
@@ -107,7 +119,7 @@ function buildEnhancedContext(opts = {}) {
     });
     return truncateText(contextStr, maxTokens * 4);
   }
-  
+
   return contextStr;
 }
 
@@ -135,51 +147,52 @@ function truncateText(text, maxLength) {
  */
 function applyContextEnhancement(toolId, parameters = {}, context = {}, toolDef = null, logger = null) {
   const log = logger || createLogger('ContextAwareTools');
-  
+
   try {
     // Verify tool has user_query parameter
     if (!toolDef?.inputSchema?.properties?.user_query) {
       log.debug('Tool does not have user_query parameter, skipping enhancement', { toolId });
       return parameters;
     }
-    
+
     // Build enhanced context
     const enhancedContext = buildEnhancedContext({
       query: context.query,
       historyContext: context.historyContext,
       sessionMemory: context.sessionMemory,
-      session_id: context.session_id
+      session_id: context.session_id,
+      selected_jobs: context.selected_jobs
     });
-    
+
     // Get original user_query from LLM
     const originalQuery = parameters.user_query || '';
-    
+
     // Combine context with original query
-    const enhancedQuery = enhancedContext 
+    const enhancedQuery = enhancedContext
       ? `${enhancedContext}\n${originalQuery}`
       : originalQuery;
-    
+
     log.info('Enhanced context-aware tool query', {
       toolId,
       originalLength: originalQuery.length,
       enhancedLength: enhancedQuery.length,
       contextAdded: enhancedQuery.length - originalQuery.length
     });
-    
+
     // Build return parameters with enhanced query
     const enhancedParams = {
       ...parameters,
       user_query: enhancedQuery
     };
-    
+
     // For plan_workflow tool, inject workspace_items if available in context
     if (toolId.includes('plan_workflow') && context.workspace_items) {
       const workspaceItems = context.workspace_items;
-      
+
       // Only inject if workspace_items is a non-empty array
       if (Array.isArray(workspaceItems) && workspaceItems.length > 0) {
         enhancedParams.workspace_items = workspaceItems;
-        
+
         log.info('Injected workspace_items into plan_workflow call', {
           toolId,
           workspace_items_count: workspaceItems.length,
@@ -198,9 +211,9 @@ function applyContextEnhancement(toolId, parameters = {}, context = {}, toolDef 
         });
       }
     }
-    
+
     return enhancedParams;
-    
+
   } catch (error) {
     log.error('Failed to enhance context for tool', {
       toolId,

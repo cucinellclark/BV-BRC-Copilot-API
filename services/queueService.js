@@ -199,6 +199,7 @@ if (config.queue.enabled !== false) {
             max_iterations: job.data.max_iterations,
             auth_token: job.data.auth_token,
             workspace_items: job.data.workspace_items,
+            selected_jobs: job.data.selected_jobs,
             images: job.data.images,
             stream: !!streamCallback,
             responseStream: responseStream,

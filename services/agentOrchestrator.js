@@ -182,6 +182,7 @@ async function summarizeImageContext({
   historyContext = '',
   sessionMemory = null,
   workspace_items = null,
+  selected_jobs = null,
   logger
 }) {
   if (!image) {
@@ -209,6 +210,10 @@ async function summarizeImageContext({
     ? `\n\nWorkspace files (for context):\n${JSON.stringify(workspace_items, null, 2)}`
     : '';
 
+  const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
+    ? `\n\nSelected jobs (for context):\n${JSON.stringify(selected_jobs, null, 2)}`
+    : '';
+
   const imageInstruction = [
     'You are extracting visual context for a downstream BV-BRC tool-using agent.',
     'Return plain text only.',
@@ -223,7 +228,8 @@ async function summarizeImageContext({
     systemPrompt || 'No additional context',
     historyStr,
     sessionMemoryStr,
-    workspaceStr
+    workspaceStr,
+    selectedJobsStr
   ].join('\n');
 
   const summary = await queryChatImage({
@@ -427,6 +433,7 @@ async function executeAgentLoop(opts) {
     max_iterations = 3,
     auth_token = null,
     workspace_items = null,
+    selected_jobs = null,
     images = null,
     stream = false,
     responseStream = null,
@@ -453,7 +460,9 @@ async function executeAgentLoop(opts) {
     has_image: imageCount > 0,
     image_count: imageCount,
     has_workspace_items: !!workspace_items,
-    workspace_items_count: workspace_items ? workspace_items.length : 0
+    workspace_items_count: workspace_items ? workspace_items.length : 0,
+    has_selected_jobs: !!selected_jobs,
+    selected_jobs_count: Array.isArray(selected_jobs) ? selected_jobs.length : 0
   });
 
   // Log workspace items if present
@@ -466,6 +475,13 @@ async function executeAgentLoop(opts) {
         name: item.name,
         has_content: !!item.content
       }))
+    });
+  }
+
+  if (selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0) {
+    logger.info('Selected jobs available for this query', {
+      count: selected_jobs.length,
+      job_ids: selected_jobs.map(item => item && item.id).filter(Boolean)
     });
   }
 
@@ -548,6 +564,7 @@ async function executeAgentLoop(opts) {
           historyContext,
           sessionMemory,
           workspace_items,
+          selected_jobs,
           logger
         });
 
@@ -635,6 +652,7 @@ async function executeAgentLoop(opts) {
         historyContext,
         sessionMemory,
         workspace_items,
+        selected_jobs,
         logger
       );
       throwIfCancelled('after_planning');
@@ -740,7 +758,8 @@ async function executeAgentLoop(opts) {
           logger,
           null, // No specific tool for FINALIZE action
           sessionMemory,
-          workspace_items
+          workspace_items,
+          selected_jobs
         );
         break;
       }
@@ -765,6 +784,7 @@ async function executeAgentLoop(opts) {
             historyContext,
             sessionMemory,
             workspace_items,
+            selected_jobs,
             responseStream: stream && responseStream ? responseStream : null,
             shouldCancel
           },
@@ -1003,7 +1023,8 @@ async function executeAgentLoop(opts) {
             logger,
             null, // Error case, no specific tool
             sessionMemory,
-            workspace_items
+            workspace_items,
+            selected_jobs
           );
           break;
         }
@@ -1015,7 +1036,6 @@ async function executeAgentLoop(opts) {
       throwIfCancelled('before_max_iteration_finalize');
       logger.warn('Max iterations reached, finalizing');
       finalResponse = await generateFinalResponse(
-            queryForAgent,
         queryForAgent,
         system_prompt,
         executionTrace,
@@ -1027,7 +1047,8 @@ async function executeAgentLoop(opts) {
         logger,
         null, // Max iterations, no specific tool
         sessionMemory,
-        workspace_items
+        workspace_items,
+        selected_jobs
       );
     }
 
@@ -1145,7 +1166,7 @@ async function executeAgentLoop(opts) {
 /**
  * Plan the next action using LLM
  */
-async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', sessionMemory = null, workspace_items = null, logger = null) {
+async function planNextAction(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', sessionMemory = null, workspace_items = null, selected_jobs = null, logger = null) {
   try {
     const log = logger || createLogger('Agent-Planner');
 
@@ -1239,6 +1260,10 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
       : '';
 
+    const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
+      ? `\n\nSELECTED JOBS (available for reference):\n${JSON.stringify(selected_jobs, null, 2)}\n\nThese jobs were selected by the user in chat and may be relevant to the query.`
+      : '';
+
     // Log workspace items inclusion in prompt
     if (workspaceStr) {
       logger.info('Including workspace items in planning prompt', {
@@ -1250,7 +1275,23 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
           name: item.name
         }))
       });
+    }
+
+    if (selectedJobsStr) {
+      logger.info('Including selected jobs in planning prompt', {
+        selected_jobs_count: selected_jobs.length,
+        selected_jobs_str_length: selectedJobsStr.length,
+        job_ids: selected_jobs.map(item => item && item.id).filter(Boolean)
+      });
     } else {
+      logger.debug('No selected jobs to include in planning prompt', {
+        selected_jobs_provided: !!selected_jobs,
+        is_array: Array.isArray(selected_jobs),
+        length: selected_jobs ? selected_jobs.length : 0
+      });
+    }
+
+    if (!workspaceStr) {
       logger.debug('No workspace items to include in planning prompt', {
         workspace_items_provided: !!workspace_items,
         is_array: Array.isArray(workspace_items),
@@ -1259,13 +1300,14 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
     }
 
     // Build planning prompt
-    const finalSystemPrompt = (systemPrompt || 'No additional context') + historyStr + workspaceStr;
+    const finalSystemPrompt = (systemPrompt || 'No additional context') + historyStr + workspaceStr + selectedJobsStr;
 
     // Log the final system prompt composition
     logger.debug('Building planning prompt with system context', {
       base_system_prompt_length: (systemPrompt || 'No additional context').length,
       history_str_length: historyStr.length,
       workspace_str_length: workspaceStr.length,
+      selected_jobs_str_length: selectedJobsStr.length,
       final_system_prompt_length: finalSystemPrompt.length,
       has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES')
     });
@@ -1330,7 +1372,7 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 /**
  * Generate final response to user
  */
-async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null, sessionMemory = null, workspace_items = null) {
+async function generateFinalResponse(query, systemPrompt, executionTrace, toolResults, model, historyContext = '', stream = false, responseStream = null, logger = null, sourceTool = null, sessionMemory = null, workspace_items = null, selected_jobs = null) {
   try {
     const log = logger || createLogger('Agent-FinalResponse');
 
@@ -1357,6 +1399,10 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
       : '';
 
+    const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
+      ? `\n\nSELECTED JOBS (available for reference):\n${JSON.stringify(selected_jobs, null, 2)}\n\nThese jobs were selected by the user in chat and may be relevant to the query.`
+      : '';
+
     // Log workspace items inclusion in final response prompt
     if (workspaceStr) {
       log.info('Including workspace items in final response prompt', {
@@ -1368,7 +1414,23 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
           name: item.name
         }))
       });
+    }
+
+    if (selectedJobsStr) {
+      log.info('Including selected jobs in final response prompt', {
+        selected_jobs_count: selected_jobs.length,
+        selected_jobs_str_length: selectedJobsStr.length,
+        job_ids: selected_jobs.map(item => item && item.id).filter(Boolean)
+      });
     } else {
+      log.debug('No selected jobs to include in final response prompt', {
+        selected_jobs_provided: !!selected_jobs,
+        is_array: Array.isArray(selected_jobs),
+        length: selected_jobs ? selected_jobs.length : 0
+      });
+    }
+
+    if (!workspaceStr) {
       log.debug('No workspace items to include in final response prompt', {
         workspace_items_provided: !!workspace_items,
         is_array: Array.isArray(workspace_items),
@@ -1384,13 +1446,14 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         ? '\n\nFOLLOW-UP TURN INSTRUCTION:\nThis conversation is already in progress. Continue naturally from prior context and do NOT start with a greeting or re-introduce yourself.'
         : '';
 
-      const finalHistoryContext = historyStr + sessionMemoryStr + workspaceStr;
+      const finalHistoryContext = historyStr + sessionMemoryStr + workspaceStr + selectedJobsStr;
 
       // Log the final context composition
       log.debug('Building direct response prompt with context', {
         history_str_length: historyStr.length,
         session_memory_str_length: sessionMemoryStr.length,
         workspace_str_length: workspaceStr.length,
+        selected_jobs_str_length: selectedJobsStr.length,
         final_history_context_length: finalHistoryContext.length,
         has_workspace_in_context: finalHistoryContext.includes('WORKSPACE FILES')
       });
