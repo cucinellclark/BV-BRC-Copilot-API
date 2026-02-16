@@ -12,6 +12,7 @@ const {
 } = require('./dbUtils');
 const {
   queryChatOnly,
+  queryChatImage,
   LLMServiceError,
   setupOpenaiClient,
   postJsonStream
@@ -129,6 +130,115 @@ function createMessage(role, content) {
     role,
     content,
     timestamp: new Date()
+  };
+}
+
+function toBooleanFlag(value) {
+  return value === true || value === 1 || value === '1' || value === 'true';
+}
+
+function buildImageContextLabel(imageData) {
+  if (typeof imageData !== 'string') {
+    return 'Attached image';
+  }
+  if (imageData.startsWith('data:image/png')) {
+    return 'Attached PNG image';
+  }
+  if (imageData.startsWith('data:image/jpeg') || imageData.startsWith('data:image/jpg')) {
+    return 'Attached JPEG image';
+  }
+  if (imageData.startsWith('data:image/webp')) {
+    return 'Attached WEBP image';
+  }
+  if (imageData.startsWith('data:image/gif')) {
+    return 'Attached GIF image';
+  }
+  return 'Attached image';
+}
+
+function normalizeImagesInput(images, maxImages = 10) {
+  const normalized = [];
+
+  if (Array.isArray(images)) {
+    for (const entry of images) {
+      if (typeof entry === 'string' && entry.trim().length > 0) {
+        normalized.push(entry);
+      }
+    }
+  }
+
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  return normalized.slice(0, maxImages);
+}
+
+async function summarizeImageContext({
+  image,
+  query,
+  model,
+  systemPrompt = '',
+  historyContext = '',
+  sessionMemory = null,
+  workspace_items = null,
+  logger
+}) {
+  if (!image) {
+    return { summary: '', modelUsed: null, skipped: false, notice: null };
+  }
+
+  const log = logger || createLogger('Agent-ImageContext');
+  const modelData = await getModelData(model);
+
+  if (!toBooleanFlag(modelData.supports_image)) {
+    const notice = 'Image analysis skipped because the selected model does not support images.';
+    log.info(notice, { model });
+    return { summary: '', modelUsed: null, skipped: true, notice };
+  }
+
+  const historyStr = historyContext
+    ? `\n\nConversation history (for context):\n${historyContext}`
+    : '';
+
+  const sessionMemoryStr = sessionMemory
+    ? `\n\nSession facts:\n${formatSessionMemory(sessionMemory)}`
+    : '';
+
+  const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
+    ? `\n\nWorkspace files (for context):\n${JSON.stringify(workspace_items, null, 2)}`
+    : '';
+
+  const imageInstruction = [
+    'You are extracting visual context for a downstream BV-BRC tool-using agent.',
+    'Return plain text only.',
+    'Summarize only what is visible in the image and context-relevant to the user query.',
+    'Include labels, values, IDs, table columns, file names, statuses, and actionable UI controls when present.',
+    'Explicitly mention uncertainty for ambiguous items.',
+    '',
+    'User query:',
+    query || '',
+    '',
+    'System context:',
+    systemPrompt || 'No additional context',
+    historyStr,
+    sessionMemoryStr,
+    workspaceStr
+  ].join('\n');
+
+  const summary = await queryChatImage({
+    url: modelData.endpoint,
+    model,
+    query: imageInstruction,
+    image,
+    system_prompt: 'Extract accurate visual context for planning and final response generation.'
+  });
+
+  return {
+    summary: typeof summary === 'string' ? summary.trim() : '',
+    modelUsed: model,
+    skipped: false,
+    notice: 'Image context analyzed and integrated into agent reasoning.'
   };
 }
 
@@ -317,11 +427,15 @@ async function executeAgentLoop(opts) {
     max_iterations = 3,
     auth_token = null,
     workspace_items = null,
+    images = null,
     stream = false,
     responseStream = null,
     progressCallback = null,
     shouldCancel = () => false
   } = opts;
+
+  const normalizedImages = normalizeImagesInput(images, 10);
+  const imageCount = normalizedImages.length;
 
   // Create logger for this session
   const logger = createLogger('Agent', session_id);
@@ -336,6 +450,8 @@ async function executeAgentLoop(opts) {
     session_id,
     user_id,
     max_iterations,
+    has_image: imageCount > 0,
+    image_count: imageCount,
     has_workspace_items: !!workspace_items,
     workspace_items_count: workspace_items ? workspace_items.length : 0
   });
@@ -360,6 +476,8 @@ async function executeAgentLoop(opts) {
   let finalResponseSourceTool = null; // Track which tool generated the final response
   let finalResponse = null;
   let sessionMemory = null;
+  let queryForAgent = query;
+  let imageContextNotice = null;
 
   // Get auth token (from opts or config)
   const authToken = auth_token || config.auth_token;
@@ -408,8 +526,68 @@ async function executeAgentLoop(opts) {
     }
   }
 
+  if (imageCount > 0) {
+    try {
+      if (Array.isArray(images) && images.length > 10) {
+        const truncationNotice = 'Only the first 10 images were used for backend processing.';
+        if (stream && responseStream) {
+          emitSSE(responseStream, 'image_context', {
+            message: truncationNotice,
+            skipped: false
+          });
+        }
+      }
+
+      const summaries = [];
+      for (let idx = 0; idx < normalizedImages.length; idx++) {
+        const imageSummaryResult = await summarizeImageContext({
+          image: normalizedImages[idx],
+          query,
+          model,
+          systemPrompt: system_prompt,
+          historyContext,
+          sessionMemory,
+          workspace_items,
+          logger
+        });
+
+        imageContextNotice = imageSummaryResult.notice || imageContextNotice;
+        if (imageContextNotice && stream && responseStream) {
+          emitSSE(responseStream, 'image_context', {
+            message: `[Image ${idx + 1}/${normalizedImages.length}] ${imageContextNotice}`,
+            skipped: !!imageSummaryResult.skipped
+          });
+        }
+
+        if (imageSummaryResult.summary) {
+          summaries.push(`[Image ${idx + 1}] ${imageSummaryResult.summary}`);
+          logger.info('Prepared image context chunk for agent loop', {
+            image_index: idx + 1,
+            image_summary_length: imageSummaryResult.summary.length,
+            image_summary_model: imageSummaryResult.modelUsed
+          });
+        }
+      }
+
+      if (summaries.length > 0) {
+        queryForAgent = `${query}\n\nVisual context from attached images:\n${summaries.join('\n\n')}`;
+      }
+    } catch (imageError) {
+      logger.warn('Failed to summarize image context, proceeding with text-only query', {
+        error: imageError.message
+      });
+    }
+  }
+
   // Create user message
   const userMessage = createMessage('user', query);
+  if (imageCount > 0) {
+    userMessage.attachments = normalizedImages.map((img) => ({
+      type: 'image',
+      source: 'upload',
+      label: buildImageContextLabel(img)
+    }));
+  }
   let userMessagePersisted = false;
 
   const throwIfCancelled = (checkpoint) => {
@@ -449,7 +627,7 @@ async function executeAgentLoop(opts) {
 
       // Plan next action (with optional history)
       let nextAction = await planNextAction(
-        query,
+        queryForAgent,
         system_prompt,
         executionTrace,
         toolResults,
@@ -579,7 +757,7 @@ async function executeAgentLoop(opts) {
           nextAction.parameters,
           authToken,
           {
-            query,
+            query: queryForAgent,
             model,
             system_prompt,
             session_id,
@@ -671,7 +849,7 @@ async function executeAgentLoop(opts) {
           maybeQueueSessionFacts({
             session_id,
             user_id,
-            user_query: query,
+            user_query: queryForAgent,
             model,
             toolId: nextAction.action,
             parameters: nextAction.parameters,
@@ -814,7 +992,7 @@ async function executeAgentLoop(opts) {
         if (!shouldContinue) {
           // Generate response with partial results
           finalResponse = await generateFinalResponse(
-            query,
+          queryForAgent,
             system_prompt,
             executionTrace,
             toolResults,
@@ -837,7 +1015,8 @@ async function executeAgentLoop(opts) {
       throwIfCancelled('before_max_iteration_finalize');
       logger.warn('Max iterations reached, finalizing');
       finalResponse = await generateFinalResponse(
-        query,
+            queryForAgent,
+        queryForAgent,
         system_prompt,
         executionTrace,
         toolResults,
@@ -945,6 +1124,7 @@ async function executeAgentLoop(opts) {
       userMessage,
       assistantMessage,
       ...(responseSystemMessage && { systemMessage: responseSystemMessage }),
+      ...(imageContextNotice && { image_context_notice: imageContextNotice }),
       agent_metadata: {
         iterations: iteration,
         tools_used: Object.keys(toolResults).length,

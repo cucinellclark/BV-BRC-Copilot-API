@@ -110,7 +110,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             include_history = true,
             auth_token = null,
             stream = true,  // Default to streaming
-            workspace_items = null
+            workspace_items = null,
+            images = null
         } = req.body;
 
         // Validate required fields
@@ -137,7 +138,9 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             max_iterations,
             streaming: stream,
             has_workspace_items: !!workspace_items,
-            workspace_items_count: workspace_items ? workspace_items.length : 0
+            workspace_items_count: workspace_items ? workspace_items.length : 0,
+            has_images: Array.isArray(images) && images.length > 0,
+            images_count: Array.isArray(images) ? images.length : 0
         });
 
         // Log workspace items if present
@@ -246,7 +249,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 include_history,
                 max_iterations,
                 auth_token,
-                workspace_items
+                workspace_items,
+                images
             }, {
                 streamCallback
             });
@@ -294,7 +298,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 include_history,
                 max_iterations,
                 auth_token,
-                workspace_items
+                workspace_items,
+                images
             });
 
             logger.info('Agent job queued successfully', {
