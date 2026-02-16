@@ -200,6 +200,7 @@ if (config.queue.enabled !== false) {
             auth_token: job.data.auth_token,
             workspace_items: job.data.workspace_items,
             selected_jobs: job.data.selected_jobs,
+            selected_workflows: job.data.selected_workflows,
             images: job.data.images,
             stream: !!streamCallback,
             responseStream: responseStream,
