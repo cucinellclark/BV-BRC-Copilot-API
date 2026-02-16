@@ -819,6 +819,37 @@ async function getSessionStorageSize(sessionId) {
   }
 }
 
+/**
+ * Get unique workflow IDs referenced by any chat session for a user.
+ * @param {string} userId - The user ID
+ * @returns {Array<string>} Unique workflow IDs
+ */
+async function getUserWorkflowIds(userId) {
+  try {
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+
+    const sessions = await chatCollection
+      .find({ user_id: userId })
+      .project({ workflow_ids: 1 })
+      .toArray();
+
+    const uniqueIds = new Set();
+    sessions.forEach((session) => {
+      const ids = Array.isArray(session.workflow_ids) ? session.workflow_ids : [];
+      ids.forEach((id) => {
+        if (typeof id === 'string' && id.trim().length > 0) {
+          uniqueIds.add(id.trim());
+        }
+      });
+    });
+
+    return Array.from(uniqueIds);
+  } catch (error) {
+    throw new LLMServiceError('Failed to get user workflow IDs', error);
+  }
+}
+
 module.exports = {
   getModelData,
   getActiveModels,
@@ -851,5 +882,6 @@ module.exports = {
   getSessionFiles,
   getSessionFilesPaginated,
   deleteFileMetadata,
-  getSessionStorageSize
+  getSessionStorageSize,
+  getUserWorkflowIds
 };
