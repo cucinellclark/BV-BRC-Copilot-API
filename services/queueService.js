@@ -64,7 +64,7 @@ function safeStreamEmit(jobId, eventType, data) {
         }
         return;
     }
-    
+
     try {
         callback(eventType, data);
     } catch (error) {
@@ -89,13 +89,15 @@ if (config.queue.enabled !== false) {
     const hasStreamCallback = jobStreamCallbacks.has(jobId);
     const cancellationKey = String(jobId);
     const isCancellationRequested = () => cancellationRequests.has(cancellationKey);
-    
+
     try {
         jobLogger.info('Starting agent job processing', {
             jobId: job.id,
             userId: job.data.user_id,
             query: job.data.query.substring(0, 100),
-            streaming: hasStreamCallback
+            streaming: hasStreamCallback,
+            has_images: Array.isArray(job.data.images) && job.data.images.length > 0,
+            images_count: Array.isArray(job.data.images) ? job.data.images.length : 0
         });
 
         // Initialize progress tracking
@@ -136,7 +138,7 @@ if (config.queue.enabled !== false) {
                 progress.updatedAt = new Date();
                 jobProgress.set(job.id, progress);
             }
-            
+
             // Stream progress event
             const percentage = Math.min(90, 10 + (iteration / job.data.max_iterations) * 80);
             safeStreamEmit(jobId, 'progress', {
@@ -147,13 +149,13 @@ if (config.queue.enabled !== false) {
                 percentage: Math.floor(percentage),
                 timestamp: new Date().toISOString()
             });
-            
+
             job.progress(percentage);
         };
 
         // Get streaming callback if exists
         const streamCallback = jobStreamCallbacks.get(jobId);
-        
+
         // Create response stream wrapper for agent if streaming
         const responseStream = streamCallback ? {
             write: (data) => {
@@ -162,11 +164,11 @@ if (config.queue.enabled !== false) {
                     const lines = data.split('\n');
                     const eventLine = lines.find(l => l.startsWith('event:'));
                     const dataLine = lines.find(l => l.startsWith('data:'));
-                    
+
                     if (eventLine && dataLine) {
                         const eventType = eventLine.replace('event:', '').trim();
                         const eventData = dataLine.replace('data:', '').trim();
-                        
+
                         try {
                             const parsed = JSON.parse(eventData);
                             safeStreamEmit(jobId, eventType, parsed);
@@ -197,6 +199,7 @@ if (config.queue.enabled !== false) {
             max_iterations: job.data.max_iterations,
             auth_token: job.data.auth_token,
             workspace_items: job.data.workspace_items,
+            images: job.data.images,
             stream: !!streamCallback,
             responseStream: responseStream,
             progressCallback: progressCallback,
@@ -211,7 +214,7 @@ if (config.queue.enabled !== false) {
         }
 
         await job.progress(100);
-        
+
         const progress = jobProgress.get(job.id);
         if (progress) {
             progress.status = 'completed';
@@ -319,7 +322,7 @@ if (config.queue.enabled !== false) {
         throw error;
     }
     });
-    
+
     logger.info('Agent queue processor registered', {
         workerConcurrency: config.queue.workerConcurrency || 3,
         enabled: true
@@ -342,16 +345,16 @@ agentQueue.on('completed', (job, result) => {
         return;
     }
 
-    logger.info('Job completed', { 
-        jobId: job.id, 
+    logger.info('Job completed', {
+        jobId: job.id,
         userId: job.data.user_id,
         duration: Date.now() - job.timestamp
     });
 });
 
 agentQueue.on('failed', (job, error) => {
-    logger.error('Job failed', { 
-        jobId: job.id, 
+    logger.error('Job failed', {
+        jobId: job.id,
         userId: job.data.user_id,
         error: error.message,
         attempts: job.attemptsMade
@@ -359,7 +362,7 @@ agentQueue.on('failed', (job, error) => {
 });
 
 agentQueue.on('stalled', (job) => {
-    logger.warn('Job stalled', { 
+    logger.warn('Job stalled', {
         jobId: job.id,
         userId: job.data.user_id
     });
@@ -379,7 +382,7 @@ agentQueue.on('error', (error) => {
  */
 async function addAgentJob(jobData, options = {}) {
     const { streamCallback = null, priority = 0, ...bullOptions } = options;
-    
+
     logger.info('Adding agent job to queue', {
         userId: jobData.user_id,
         sessionId: jobData.session_id,
@@ -395,7 +398,7 @@ async function addAgentJob(jobData, options = {}) {
     // Store callback reference for worker to access
     if (streamCallback) {
         jobStreamCallbacks.set(job.id, streamCallback);
-        
+
         // Emit queued event immediately
         safeStreamEmit(job.id, 'queued', {
             job_id: job.id,
@@ -432,7 +435,7 @@ async function addAgentJob(jobData, options = {}) {
  */
 async function getJobStatus(jobId) {
     const job = await agentQueue.getJob(jobId);
-    
+
     if (!job) {
         return {
             found: false,
@@ -443,7 +446,7 @@ async function getJobStatus(jobId) {
     const state = await job.getState();
     const progress = jobProgress.get(jobId) || {};
     const effectiveStatus = progress.status || state;
-    
+
     return {
         found: true,
         jobId: job.id,
@@ -524,7 +527,7 @@ function registerStreamCallback(jobId, callback) {
  */
 async function abortJob(jobId) {
     const job = await agentQueue.getJob(jobId);
-    
+
     if (!job) {
         return {
             found: false,
@@ -535,7 +538,7 @@ async function abortJob(jobId) {
     }
 
     const state = await job.getState();
-    
+
     try {
         if (state === 'waiting' || state === 'delayed') {
             // Update progress tracking
@@ -618,10 +621,10 @@ async function abortJob(jobId) {
             };
         }
     } catch (error) {
-        logger.error('Failed to abort job', { 
-            jobId, 
+        logger.error('Failed to abort job', {
+            jobId,
             error: error.message,
-            state 
+            state
         });
         return {
             found: true,
