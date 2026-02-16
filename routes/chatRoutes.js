@@ -1,6 +1,7 @@
 // routes/chatRoutes.js
 
 const express = require('express');
+const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const { connectToDatabase } = require('../database');
 const ChatService = require('../services/chatService');
@@ -16,10 +17,12 @@ const {
   getUserPrompts,
   saveUserPrompt,
   registerChatSession,
+  addWorkflowIdToSession,
   rateConversation,
   rateMessage,
   getSessionFilesPaginated,
-  getSessionStorageSize
+  getSessionStorageSize,
+  getUserWorkflowIds
 } = require('../services/dbUtils');
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
@@ -68,6 +71,77 @@ function mapWorkflowIdsToGridRows(workflowIds) {
             id: workflowId,
             workflow_id: workflowId
         }));
+}
+
+function normalizeWorkflowStatus(rawStatus) {
+    const value = String(rawStatus || '').toLowerCase();
+    if (value === 'queued' || value === 'init' || value === 'pending') return 'pending';
+    if (value === 'in-progress' || value === 'running') return 'running';
+    if (value === 'completed' || value === 'complete' || value === 'success' || value === 'succeeded') return 'completed';
+    if (value === 'failed' || value === 'error' || value === 'cancelled' || value === 'canceled') return 'failed';
+    return value || 'unknown';
+}
+
+function workflowSortKey(workflow) {
+    const ts = workflow && (workflow.submitted_at || workflow.created_at || workflow.updated_at);
+    const parsed = Date.parse(ts || 0);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeWorkflowRecord(workflow, workflowId) {
+    const id = (workflow && (workflow.workflow_id || workflow.id)) || workflowId;
+    const workflowName = (workflow && (workflow.workflow_name || workflow.name)) || 'Workflow';
+    const rawStatus = workflow && workflow.status ? workflow.status : 'unknown';
+    const status = normalizeWorkflowStatus(rawStatus);
+    const submittedAt = (workflow && (workflow.submitted_at || workflow.created_at)) || null;
+    const completedAt = (workflow && workflow.completed_at) || null;
+    const stepCount = (workflow && Array.isArray(workflow.steps)) ? workflow.steps.length :
+        ((workflow && typeof workflow.step_count === 'number') ? workflow.step_count : null);
+
+    return {
+        id: String(id),
+        workflow_id: String(id),
+        workflow_name: workflowName,
+        status,
+        raw_status: rawStatus,
+        submitted_at: submittedAt,
+        completed_at: completedAt,
+        step_count: stepCount,
+        raw: workflow || null
+    };
+}
+
+async function fetchWorkflowDetail(workflowBaseUrl, workflowId, authHeader) {
+    const headers = { Accept: 'application/json' };
+    if (authHeader) {
+        headers.Authorization = authHeader;
+    }
+    const response = await axios.get(`${workflowBaseUrl}/workflows/${encodeURIComponent(workflowId)}`, {
+        headers,
+        timeout: 15000
+    });
+    return response && response.data ? response.data : null;
+}
+
+async function getUserWorkflowsWithDetail(userId, authHeader) {
+    const workflowIds = await getUserWorkflowIds(userId);
+    const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
+
+    const workflows = await Promise.all(workflowIds.map(async (workflowId) => {
+        try {
+            const detail = await fetchWorkflowDetail(workflowBaseUrl, workflowId, authHeader);
+            return normalizeWorkflowRecord(detail, workflowId);
+        } catch (error) {
+            return normalizeWorkflowRecord({
+                workflow_id: workflowId,
+                workflow_name: 'Unavailable',
+                status: 'error'
+            }, workflowId);
+        }
+    }));
+
+    workflows.sort((a, b) => workflowSortKey(b) - workflowSortKey(a));
+    return workflows;
 }
 
 // ========== MAIN CHAT ROUTES ==========
@@ -142,6 +216,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             stream = true,  // Default to streaming
             workspace_items = null,
             selected_jobs = null,
+            selected_workflows = null,
             images = null
         } = req.body;
 
@@ -172,6 +247,8 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             workspace_items_count: workspace_items ? workspace_items.length : 0,
             has_selected_jobs: !!selected_jobs,
             selected_jobs_count: Array.isArray(selected_jobs) ? selected_jobs.length : 0,
+            has_selected_workflows: !!selected_workflows,
+            selected_workflows_count: Array.isArray(selected_workflows) ? selected_workflows.length : 0,
             has_images: Array.isArray(images) && images.length > 0,
             images_count: Array.isArray(images) ? images.length : 0
         });
@@ -284,6 +361,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 auth_token,
                 workspace_items,
                 selected_jobs,
+                selected_workflows,
                 images
             }, {
                 streamCallback
@@ -334,6 +412,7 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 auth_token,
                 workspace_items,
                 selected_jobs,
+                selected_workflows,
                 images
             });
 
@@ -744,6 +823,33 @@ router.post('/register-session', authenticate, async (req, res) => {
     }
 });
 
+router.post('/add-workflow-to-session', authenticate, async (req, res) => {
+    try {
+        const { session_id, workflow_id, user_id } = req.body || {};
+        if (!session_id || !workflow_id || !user_id) {
+            return res.status(400).json({ message: 'session_id, workflow_id, and user_id are required' });
+        }
+
+        const session = await getChatSession(session_id);
+        if (!session) {
+            return res.status(404).json({ message: 'Session not found' });
+        }
+        if (session.user_id && session.user_id !== user_id) {
+            return res.status(403).json({ message: 'Not authorized to modify this session' });
+        }
+
+        await addWorkflowIdToSession(session_id, workflow_id);
+        return res.status(200).json({
+            status: 'ok',
+            session_id,
+            workflow_id
+        });
+    } catch (error) {
+        console.error('Error adding workflow to session:', error);
+        return res.status(500).json({ message: 'Failed to add workflow to session', error: error.message });
+    }
+});
+
 router.get('/get-session-messages', authenticate, async (req, res) => {
     try {
         const session_id = req.query.session_id;
@@ -916,6 +1022,75 @@ router.get('/get-all-sessions', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Error retrieving chat sessions:', error);
         res.status(500).json({ message: 'Failed to retrieve chat sessions', error: error.message });
+    }
+});
+
+router.get('/get-user-workflows', authenticate, async (req, res) => {
+    try {
+        const user_id = req.query.user_id;
+        if (!user_id) {
+            return res.status(400).json({ message: 'user_id is required' });
+        }
+
+        const limitParam = parseInt(req.query.limit, 10);
+        const offsetParam = parseInt(req.query.offset, 10);
+        const limit = (!isNaN(limitParam) && limitParam > 0) ? Math.min(limitParam, 1000) : 200;
+        const offset = (!isNaN(offsetParam) && offsetParam >= 0) ? offsetParam : 0;
+        const statusFilter = req.query.status ? String(req.query.status).toLowerCase().trim() : '';
+
+        const authHeader = req.headers ? req.headers.authorization : '';
+        const allWorkflows = await getUserWorkflowsWithDetail(user_id, authHeader);
+        const filtered = statusFilter
+            ? allWorkflows.filter((workflow) => String(workflow.status).toLowerCase() === statusFilter)
+            : allWorkflows;
+        const rows = filtered.slice(offset, offset + limit);
+
+        return res.status(200).json({
+            user_id,
+            workflows: rows,
+            total: filtered.length,
+            limit,
+            offset,
+            has_more: offset + rows.length < filtered.length
+        });
+    } catch (error) {
+        console.error('Error retrieving user workflows:', error);
+        return res.status(500).json({ message: 'Failed to retrieve user workflows', error: error.message });
+    }
+});
+
+router.get('/get-user-workflow-summary', authenticate, async (req, res) => {
+    try {
+        const user_id = req.query.user_id;
+        if (!user_id) {
+            return res.status(400).json({ message: 'user_id is required' });
+        }
+
+        const authHeader = req.headers ? req.headers.authorization : '';
+        const workflows = await getUserWorkflowsWithDetail(user_id, authHeader);
+
+        const summary = {
+            pending: 0,
+            running: 0,
+            completed: 0,
+            failed: 0
+        };
+
+        workflows.forEach((workflow) => {
+            const key = workflow.status;
+            if (Object.prototype.hasOwnProperty.call(summary, key)) {
+                summary[key] += 1;
+            }
+        });
+
+        return res.status(200).json({
+            user_id,
+            summary,
+            total: workflows.length
+        });
+    } catch (error) {
+        console.error('Error retrieving user workflow summary:', error);
+        return res.status(500).json({ message: 'Failed to retrieve user workflow summary', error: error.message });
     }
 });
 
