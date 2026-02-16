@@ -40,6 +40,36 @@ function parseBooleanFlag(value, defaultValue = false) {
     return defaultValue;
 }
 
+function buildGridEnvelope(entityType, opts = {}) {
+    return {
+        schema_version: '1.0',
+        entity_type: entityType,
+        source: opts.source || 'bvbrc-copilot-api',
+        result_type: opts.resultType || 'list_result',
+        capabilities: {
+            selectable: opts.selectable !== false,
+            multi_select: opts.multiSelect !== false,
+            sortable: opts.sortable !== false
+        },
+        pagination: opts.pagination || null,
+        sort: opts.sort || null,
+        columns: Array.isArray(opts.columns) ? opts.columns : [],
+        items: Array.isArray(opts.items) ? opts.items : []
+    };
+}
+
+function mapWorkflowIdsToGridRows(workflowIds) {
+    if (!Array.isArray(workflowIds)) {
+        return [];
+    }
+    return workflowIds
+        .filter((workflowId) => typeof workflowId === 'string' && workflowId.trim().length > 0)
+        .map((workflowId) => ({
+            id: workflowId,
+            workflow_id: workflowId
+        }));
+}
+
 // ========== MAIN CHAT ROUTES ==========
 router.post('/copilot', authenticate, async (req, res) => {
     const logger = createLogger('CopilotRoute', req.body.session_id);
@@ -736,10 +766,24 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
 
         const messages = await getSessionMessages(session_id);
 
+        const workflowRows = mapWorkflowIdsToGridRows(workflowIds);
+        const workflowGrid = buildGridEnvelope('workflow', {
+            source: 'bvbrc-copilot-session',
+            resultType: 'list_result',
+            selectable: true,
+            multiSelect: true,
+            sortable: false,
+            columns: [
+                { key: 'workflow_id', label: 'Workflow ID', sortable: false }
+            ],
+            items: workflowRows
+        });
+
         if (!includeFiles) {
             return res.status(200).json({
                 messages,
-                workflow_ids: workflowIds
+                workflow_ids: workflowIds,
+                workflow_grid: workflowGrid
             });
         }
 
@@ -751,6 +795,7 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
         res.status(200).json({
             messages,
             workflow_ids: workflowIds,
+            workflow_grid: workflowGrid,
             session_files: sessionFiles.files,
             session_files_pagination: {
                 total: sessionFiles.total,
@@ -792,6 +837,30 @@ router.get('/get-session-files', authenticate, async (req, res) => {
             getSessionStorageSize(session_id)
         ]);
 
+        const fileGrid = buildGridEnvelope('session_file', {
+            source: 'bvbrc-copilot-session',
+            resultType: 'list_result',
+            selectable: true,
+            multiSelect: true,
+            sortable: true,
+            pagination: {
+                total: sessionFiles.total,
+                limit: sessionFiles.limit,
+                offset: sessionFiles.offset,
+                has_more: sessionFiles.has_more
+            },
+            columns: [
+                { key: 'file_name', label: 'File', sortable: true },
+                { key: 'tool_id', label: 'Tool', sortable: true },
+                { key: 'created_at', label: 'Created', sortable: true },
+                { key: 'size_bytes', label: 'Size (bytes)', sortable: true },
+                { key: 'record_count', label: 'Records', sortable: true },
+                { key: 'data_type', label: 'Type', sortable: true },
+                { key: 'is_error', label: 'Error Output', sortable: true }
+            ],
+            items: sessionFiles.files
+        });
+
         res.status(200).json({
             session_id,
             files: sessionFiles.files,
@@ -804,7 +873,8 @@ router.get('/get-session-files', authenticate, async (req, res) => {
             summary: {
                 total_files: sessionFiles.total,
                 total_size_bytes: totalSize
-            }
+            },
+            grid: fileGrid
         });
     } catch (error) {
         console.error('Error retrieving session files:', error);
