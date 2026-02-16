@@ -16,6 +16,7 @@ const {
   getUserPrompts,
   saveUserPrompt,
   registerChatSession,
+  addWorkflowIdToSession,
   rateConversation,
   rateMessage,
   getSessionFilesPaginated,
@@ -746,6 +747,33 @@ router.post('/register-session', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Error registering chat session:', error);
         return res.status(500).json({ message: 'Failed to register session', error: error.message });
+    }
+});
+
+router.post('/add-workflow-to-session', authenticate, async (req, res) => {
+    try {
+        const { session_id, workflow_id, user_id } = req.body || {};
+        if (!session_id || !workflow_id || !user_id) {
+            return res.status(400).json({ message: 'session_id, workflow_id, and user_id are required' });
+        }
+
+        const session = await getChatSession(session_id);
+        if (!session) {
+            return res.status(404).json({ message: 'Session not found' });
+        }
+        if (session.user_id && session.user_id !== user_id) {
+            return res.status(403).json({ message: 'Not authorized to modify this session' });
+        }
+
+        await addWorkflowIdToSession(session_id, workflow_id);
+        return res.status(200).json({
+            status: 'ok',
+            session_id,
+            workflow_id
+        });
+    } catch (error) {
+        console.error('Error adding workflow to session:', error);
+        return res.status(500).json({ message: 'Failed to add workflow to session', error: error.message });
     }
 });
 
