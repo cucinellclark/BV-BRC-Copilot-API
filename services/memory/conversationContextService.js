@@ -1,4 +1,5 @@
 const config = require('../../config.json');
+const mcpConfig = require('../mcp/config.json');
 const { getChatSession, getSummaryBySessionId } = require('../dbUtils');
 const { createLogger } = require('../logger');
 
@@ -37,26 +38,41 @@ function normalizeContent(content) {
 function shouldExcludeByToolResult(traceEntry) {
   if (!traceEntry || !traceEntry.action) return false;
   
-  // Check if this is workspace_browse_tool
-  if (!traceEntry.action.includes('workspace_browse_tool')) return false;
+  const excludeConfig = mcpConfig.global_settings?.exclude_from_context || {};
+  const unconditional = excludeConfig.unconditional || [];
+  const conditional = excludeConfig.conditional || {};
   
-  // Check if the result has a result_type of list_result or search_result
-  if (traceEntry.result) {
-    // The result might be nested in different ways
-    let resultType = null;
-    
-    // Direct result_type field
-    if (traceEntry.result.result_type) {
-      resultType = traceEntry.result.result_type;
-    }
-    // Nested in result.result.result_type (from file_reference)
-    else if (traceEntry.result.result && traceEntry.result.result.result_type) {
-      resultType = traceEntry.result.result.result_type;
-    }
-    
-    // Exclude if result_type is list_result or search_result
-    if (resultType === 'list_result' || resultType === 'search_result') {
+  // Check unconditional exclusions (tools that should always be excluded)
+  for (const toolName of unconditional) {
+    if (traceEntry.action.includes(toolName)) {
       return true;
+    }
+  }
+  
+  // Check conditional exclusions (tools excluded based on result_type)
+  for (const [toolName, conditions] of Object.entries(conditional)) {
+    if (traceEntry.action.includes(toolName)) {
+      const resultTypes = conditions.result_types || [];
+      if (resultTypes.length === 0) continue;
+      
+      // Extract result_type from the result (might be nested)
+      if (traceEntry.result) {
+        let resultType = null;
+        
+        // Direct result_type field
+        if (traceEntry.result.result_type) {
+          resultType = traceEntry.result.result_type;
+        }
+        // Nested in result.result.result_type (from file_reference)
+        else if (traceEntry.result.result && traceEntry.result.result.result_type) {
+          resultType = traceEntry.result.result.result_type;
+        }
+        
+        // Exclude if result_type matches any of the configured types
+        if (resultType && resultTypes.includes(resultType)) {
+          return true;
+        }
+      }
     }
   }
   
@@ -87,7 +103,7 @@ function selectRecentMessages(messages, maxTokens) {
     if (shouldExcludeMessage(msg)) {
       excludedCount++;
       
-      // If this is a system message with agent_trace, check if any tool was workspace_browse with list/search result
+      // If this is a system message with agent_trace, check if any tool result should be excluded from context
       if (msg.agent_trace && Array.isArray(msg.agent_trace)) {
         for (const traceEntry of msg.agent_trace) {
           if (shouldExcludeByToolResult(traceEntry)) {
@@ -101,7 +117,7 @@ function selectRecentMessages(messages, maxTokens) {
       continue;
     }
     
-    // Check if this assistant message should be excluded due to workspace_browse_tool usage
+    // Check if this assistant message should be excluded due to excluded tool usage
     if (msg.role === 'assistant' && nextAssistantShouldBeExcluded) {
       excludedCount++;
       nextAssistantShouldBeExcluded = false; // Reset the flag
