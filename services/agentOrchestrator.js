@@ -118,6 +118,14 @@ function extractWorkflowId(result) {
     }
   }
 
+  // Validation failures may include a generated partial workflow
+  if (result.partial_workflow && typeof result.partial_workflow === 'object') {
+    const partialId = result.partial_workflow.workflow_id;
+    if (partialId && typeof partialId === 'string') {
+      return partialId.trim();
+    }
+  }
+
   return null;
 }
 
@@ -211,82 +219,30 @@ function buildAssistantToolDisplayMetadata(toolId, toolResult) {
   const displayResult = unwrapDisplayResult(toolResult);
 
   if (isWorkspaceBrowseTool(toolId)) {
-    const items = Array.isArray(displayResult.items)
-      ? displayResult.items
-      : (displayResult.ui_grid && Array.isArray(displayResult.ui_grid.items) ? displayResult.ui_grid.items : []);
-    const resultType = displayResult.result_type || 'list_result';
-    const inferredCount = flattenWorkspaceItems(items).length;
-    const count = typeof displayResult.count === 'number'
-      ? displayResult.count
-      : (resultType === 'search_result' ? inferredCount : items.length);
-    const path = displayResult.path || null;
-    const summary = `Found ${count} ${count === 1 ? 'result' : 'results'} in ${path || 'unknown path'}`;
-
     return {
       isWorkspaceBrowse: true,
-      isWorkspaceListing: resultType === 'list_result' || resultType === 'search_result',
-      workspaceBrowseResult: {
-        tool_name: displayResult.tool_name || 'workspace_browse_tool',
-        result_type: resultType,
-        count,
-        path,
-        source: displayResult.source || null,
-        items
-      },
-      workspaceData: {
-        path,
-        items
-      },
-      chatSummary: summary,
-      uiPayload: {
-        tool_name: displayResult.tool_name || 'workspace_browse_tool',
-        result_type: resultType,
-        count,
-        path,
-        source: displayResult.source || null,
-        items
-      },
+      chatSummary: 'Workspace results are available. Open Workspace Tab to load.',
       uiAction: 'open_workspace_tab'
     };
   }
 
   if (isJobsBrowseTool(toolId)) {
-    const jobs = Array.isArray(displayResult.items)
-      ? displayResult.items
-      : (displayResult.ui_grid && Array.isArray(displayResult.ui_grid.items) ? displayResult.ui_grid.items : []);
-    const count = typeof displayResult.count === 'number' ? displayResult.count : jobs.length;
-    const summary = `Found ${count} ${count === 1 ? 'job' : 'jobs'}`;
-
     return {
       isJobsBrowse: true,
-      jobsBrowseResult: {
-        jobs,
-        count,
-        total: typeof displayResult.total === 'number' ? displayResult.total : jobs.length,
-        sort_by: displayResult.sort_by || null,
-        sort_dir: displayResult.sort_dir || null,
-        status: displayResult.status || null,
-        service: displayResult.service || null
-      },
-      chatSummary: summary,
-      uiPayload: {
-        jobs,
-        count,
-        total: typeof displayResult.total === 'number' ? displayResult.total : jobs.length,
-        sort_by: displayResult.sort_by || null,
-        sort_dir: displayResult.sort_dir || null,
-        status: displayResult.status || null,
-        service: displayResult.service || null
-      },
+      chatSummary: 'Job results are available. Open Jobs Tab to load.',
       uiAction: 'open_jobs_tab'
     };
   }
 
   if (isWorkflowTool(toolId)) {
-    if (displayResult.workflow_id || displayResult.workflow_name || displayResult.status) {
+    if (displayResult.workflow_id || displayResult.workflow_name || displayResult.status || displayResult.partial_workflow) {
+      const resolvedWorkflowId = extractWorkflowId(displayResult);
       return {
         isWorkflow: true,
-        workflowData: displayResult
+        workflow_id: resolvedWorkflowId || null,
+        workflow_name: displayResult.workflow_name || null,
+        workflow_status: displayResult.status || null,
+        uiAction: 'open_workflow_viewer'
       };
     }
   }
@@ -1253,6 +1209,33 @@ async function executeAgentLoop(opts) {
           assistantMessage,
           buildAssistantToolDisplayMetadata(finalResponseSourceTool, finalToolResult)
         );
+
+        // Persist canonical workflow_id on the assistant message so reloaded sessions
+        // can hydrate review/submit dialogs even when workflowData is lightweight.
+        if (isWorkflowTool(finalResponseSourceTool)) {
+          const resolvedWorkflowId = extractWorkflowId(finalToolResult);
+          if (resolvedWorkflowId) {
+            assistantMessage.workflow_id = resolvedWorkflowId;
+            if (!assistantMessage.workflowData || typeof assistantMessage.workflowData !== 'object') {
+              assistantMessage.workflowData = {
+                workflow_id: resolvedWorkflowId,
+                execution_metadata: {
+                  workflow_id: resolvedWorkflowId
+                }
+              };
+            } else if (!assistantMessage.workflowData.workflow_id) {
+              assistantMessage.workflowData.workflow_id = resolvedWorkflowId;
+            }
+            if (!assistantMessage.workflowData.execution_metadata ||
+                typeof assistantMessage.workflowData.execution_metadata !== 'object') {
+              assistantMessage.workflowData.execution_metadata = {};
+            }
+            if (!assistantMessage.workflowData.execution_metadata.workflow_id) {
+              assistantMessage.workflowData.execution_metadata.workflow_id = resolvedWorkflowId;
+            }
+            assistantMessage.isWorkflow = true;
+          }
+        }
       } else {
         assistantMessage.tool_call = {
           tool: finalResponseSourceTool,
