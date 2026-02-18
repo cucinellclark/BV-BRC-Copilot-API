@@ -973,7 +973,8 @@ async function executeAgentLoop(opts) {
         }
 
         // Store workflow IDs directly on chat_sessions for straightforward retrieval.
-        if (session_id && nextAction.action && nextAction.action.includes('submit_workflow')) {
+        // Extract from both plan_workflow (workflow_id assigned at registration) and submit_workflow
+        if (session_id && nextAction.action && isWorkflowTool(nextAction.action)) {
           logger.debug('Attempting to extract workflow ID', {
             tool: nextAction.action,
             resultType: typeof safeResult,
@@ -999,7 +1000,7 @@ async function executeAgentLoop(opts) {
               logger.warn('Failed to store workflow ID on chat session', { error: workflowError.message, workflow_id: workflowId });
             }
           } else {
-            logger.warn('No workflow ID found in workflow submission result', {
+            logger.warn('No workflow ID found in workflow tool result', {
               session_id,
               tool: nextAction.action,
               resultType: typeof safeResult,
