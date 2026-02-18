@@ -49,7 +49,7 @@
       "workspace_preview_file_tool",
       "bvbrc_plan_query_collection",
       "bvbrc_collection_fields_and_parameters",
-      "workspace_get_file_metadata_tool",
+      "get_file_metadata",
       "list_jobs"
     ],
     "context_aware_tools": [
