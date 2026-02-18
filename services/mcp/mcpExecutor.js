@@ -1265,7 +1265,8 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       source: unwrappedResult?.source,
       isArray: Array.isArray(unwrappedResult),
       hasResults: !!unwrappedResult?.results,
-      hasNextCursorId: !!unwrappedResult?.nextCursorId
+      hasNextCursorId: !!unwrappedResult?.nextCursorId,
+      unwrappedPreview: unwrappedResult ? JSON.stringify(unwrappedResult).substring(0, 800) : 'null/undefined'
     });
     result = unwrappedResult;
 

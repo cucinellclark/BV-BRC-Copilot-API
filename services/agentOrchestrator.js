@@ -1591,6 +1591,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
     // Check if this is a direct response (no tools used)
     const isDirectResponse = Object.keys(toolResults).length === 0;
+    
     log.info('Generating final response', {
       isDirectResponse,
       toolResultsCount: Object.keys(toolResults).length,
@@ -1713,7 +1714,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       let remainingToolChars = Math.max(4000, maxToolResultChars);
       const resultChunks = [];
 
-      Object.values(toolResults).forEach((result, index) => {
+      Object.entries(toolResults).forEach(([toolId, result], index) => {
         if (remainingToolChars <= 0) {
           return;
         }
@@ -1740,8 +1741,15 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
           }
         } else {
           // Fallback for non-file-reference results (workspace/jobs and other bypass tools)
-          const resultStr = sanitizeToolNames(JSON.stringify(result, null, 2));
-          chunk = `${sourceLabel}:\n${resultStr}\n`;
+          const llmResult = (isJobsBrowseTool(toolId) &&
+            result &&
+            typeof result === 'object' &&
+            !Array.isArray(result) &&
+            Array.isArray(result.items))
+            ? result.items
+            : result;
+          const resultStr = sanitizeToolNames(JSON.stringify(llmResult, null, 2));
+          chunk = `${sourceLabel}:\n${resultStr}\n\n Do not use the phrase 'Found X Jobs'`;
         }
 
         if (chunk.length > remainingToolChars) {

@@ -12,10 +12,18 @@ function safeParseJson(text) {
   if (!text || typeof text !== 'string') return null;
 
   // Remove ```json ``` or ``` fences that LLM responses often include
-  const cleaned = text
+  let cleaned = text
     .replace(/```json[\s\S]*?```/gi, (m) => m.replace(/```json|```/gi, ''))
     .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ''))
     .trim();
+
+  // Remove JavaScript-style comments that some LLMs add
+  // Remove single-line comments (// comment)
+  cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+  // Remove multi-line comments (/* comment */)
+  cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+  // Clean up any trailing commas before closing braces/brackets
+  cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
 
   try {
     return JSON.parse(cleaned);
