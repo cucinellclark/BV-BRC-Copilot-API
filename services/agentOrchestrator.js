@@ -984,6 +984,12 @@ async function executeAgentLoop(opts) {
           });
 
           const workflowId = extractWorkflowId(safeResult);
+          logger.info('Extracted workflow_id from tool result', {
+            workflow_id: workflowId,
+            tool: nextAction.action,
+            safeResultKeys: safeResult ? Object.keys(safeResult) : [],
+            safeResult: JSON.stringify(safeResult).substring(0, 500)
+          });
 
           if (workflowId) {
             try {
@@ -1214,8 +1220,15 @@ async function executeAgentLoop(opts) {
         // can hydrate review/submit dialogs even when workflowData is lightweight.
         if (isWorkflowTool(finalResponseSourceTool)) {
           const resolvedWorkflowId = extractWorkflowId(finalToolResult);
+          logger.info('Resolving workflow_id for assistant message', {
+            resolvedWorkflowId,
+            finalResponseSourceTool,
+            finalToolResultKeys: finalToolResult ? Object.keys(finalToolResult) : [],
+            finalToolResultPreview: JSON.stringify(finalToolResult).substring(0, 500)
+          });
           if (resolvedWorkflowId) {
             assistantMessage.workflow_id = resolvedWorkflowId;
+            logger.info('Set assistant message workflow_id', { workflow_id: resolvedWorkflowId });
             if (!assistantMessage.workflowData || typeof assistantMessage.workflowData !== 'object') {
               assistantMessage.workflowData = {
                 workflow_id: resolvedWorkflowId,
