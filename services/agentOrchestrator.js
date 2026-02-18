@@ -133,6 +133,167 @@ function createMessage(role, content) {
   };
 }
 
+function isWorkspaceBrowseTool(toolId) {
+  return typeof toolId === 'string' && toolId.includes('workspace_browse_tool');
+}
+
+function isJobsBrowseTool(toolId) {
+  if (typeof toolId !== 'string') return false;
+  return toolId.includes('list_jobs') || toolId.includes('get_recent_jobs');
+}
+
+function isWorkflowTool(toolId) {
+  if (typeof toolId !== 'string') return false;
+  return toolId.includes('plan_workflow') || toolId.includes('submit_workflow');
+}
+
+function unwrapDisplayResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  if (result.result && typeof result.result === 'object' && !Array.isArray(result.result)) {
+    return result.result;
+  }
+  return result;
+}
+
+function flattenWorkspaceItems(items) {
+  if (!Array.isArray(items)) return [];
+  const flattened = [];
+  for (const item of items) {
+    if (Array.isArray(item)) {
+      flattened.push(item);
+      continue;
+    }
+    if (item && typeof item === 'object') {
+      for (const key of Object.keys(item)) {
+        if (Array.isArray(item[key])) {
+          flattened.push(...item[key]);
+        }
+      }
+    }
+  }
+  return flattened;
+}
+
+function findLatestToolParameters(executionTrace, toolId) {
+  if (!Array.isArray(executionTrace) || !toolId) return {};
+  for (let i = executionTrace.length - 1; i >= 0; i -= 1) {
+    const trace = executionTrace[i];
+    if (trace && trace.action === toolId && trace.parameters && typeof trace.parameters === 'object') {
+      return trace.parameters;
+    }
+  }
+  return {};
+}
+
+function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
+  const call = toolResult && typeof toolResult.call === 'object' ? toolResult.call : {};
+  const args = (call.arguments_executed && typeof call.arguments_executed === 'object')
+    ? call.arguments_executed
+    : findLatestToolParameters(executionTrace, toolId);
+
+  const envelope = {
+    tool: call.tool || toolId,
+    arguments_executed: args || {},
+    replayable: call.replayable === true
+  };
+
+  if (typeof call.backend_method === 'string' && call.backend_method.length > 0) {
+    envelope.backend_method = call.backend_method;
+  }
+  return envelope;
+}
+
+function buildAssistantToolDisplayMetadata(toolId, toolResult) {
+  if (!toolId || !toolResult || typeof toolResult !== 'object') {
+    return {};
+  }
+
+  const displayResult = unwrapDisplayResult(toolResult);
+
+  if (isWorkspaceBrowseTool(toolId)) {
+    const items = Array.isArray(displayResult.items)
+      ? displayResult.items
+      : (displayResult.ui_grid && Array.isArray(displayResult.ui_grid.items) ? displayResult.ui_grid.items : []);
+    const resultType = displayResult.result_type || 'list_result';
+    const inferredCount = flattenWorkspaceItems(items).length;
+    const count = typeof displayResult.count === 'number'
+      ? displayResult.count
+      : (resultType === 'search_result' ? inferredCount : items.length);
+    const path = displayResult.path || null;
+    const summary = `Found ${count} ${count === 1 ? 'result' : 'results'} in ${path || 'unknown path'}`;
+
+    return {
+      isWorkspaceBrowse: true,
+      isWorkspaceListing: resultType === 'list_result' || resultType === 'search_result',
+      workspaceBrowseResult: {
+        tool_name: displayResult.tool_name || 'workspace_browse_tool',
+        result_type: resultType,
+        count,
+        path,
+        source: displayResult.source || null,
+        items
+      },
+      workspaceData: {
+        path,
+        items
+      },
+      chatSummary: summary,
+      uiPayload: {
+        tool_name: displayResult.tool_name || 'workspace_browse_tool',
+        result_type: resultType,
+        count,
+        path,
+        source: displayResult.source || null,
+        items
+      },
+      uiAction: 'open_workspace_tab'
+    };
+  }
+
+  if (isJobsBrowseTool(toolId)) {
+    const jobs = Array.isArray(displayResult.items)
+      ? displayResult.items
+      : (displayResult.ui_grid && Array.isArray(displayResult.ui_grid.items) ? displayResult.ui_grid.items : []);
+    const count = typeof displayResult.count === 'number' ? displayResult.count : jobs.length;
+    const summary = `Found ${count} ${count === 1 ? 'job' : 'jobs'}`;
+
+    return {
+      isJobsBrowse: true,
+      jobsBrowseResult: {
+        jobs,
+        count,
+        total: typeof displayResult.total === 'number' ? displayResult.total : jobs.length,
+        sort_by: displayResult.sort_by || null,
+        sort_dir: displayResult.sort_dir || null,
+        status: displayResult.status || null,
+        service: displayResult.service || null
+      },
+      chatSummary: summary,
+      uiPayload: {
+        jobs,
+        count,
+        total: typeof displayResult.total === 'number' ? displayResult.total : jobs.length,
+        sort_by: displayResult.sort_by || null,
+        sort_dir: displayResult.sort_dir || null,
+        status: displayResult.status || null,
+        service: displayResult.service || null
+      },
+      uiAction: 'open_jobs_tab'
+    };
+  }
+
+  if (isWorkflowTool(toolId)) {
+    if (displayResult.workflow_id || displayResult.workflow_name || displayResult.status) {
+      return {
+        isWorkflow: true,
+        workflowData: displayResult
+      };
+    }
+  }
+
+  return {};
+}
+
 function toBooleanFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
@@ -1081,6 +1242,24 @@ async function executeAgentLoop(opts) {
     // Add tool metadata if the response was generated by a specific tool
     if (finalResponseSourceTool) {
       assistantMessage.source_tool = finalResponseSourceTool;
+      const finalToolResult = toolResults[finalResponseSourceTool];
+      if (finalToolResult && typeof finalToolResult === 'object') {
+        assistantMessage.tool_call = buildToolCallEnvelope(
+          finalResponseSourceTool,
+          finalToolResult,
+          executionTrace
+        );
+        Object.assign(
+          assistantMessage,
+          buildAssistantToolDisplayMetadata(finalResponseSourceTool, finalToolResult)
+        );
+      } else {
+        assistantMessage.tool_call = {
+          tool: finalResponseSourceTool,
+          arguments_executed: findLatestToolParameters(executionTrace, finalResponseSourceTool),
+          replayable: false
+        };
+      }
     }
 
     // Create system message with execution trace (for debugging/transparency)
