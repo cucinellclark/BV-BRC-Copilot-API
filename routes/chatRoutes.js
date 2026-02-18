@@ -29,6 +29,7 @@ const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
 const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback, abortJob } = require('../services/queueService');
 const { writeSseEvent } = require('../services/sseUtils');
+const { executeMcpTool, isReplayableTool } = require('../services/mcp/mcpExecutor');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -455,6 +456,88 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
                 stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
             });
         }
+    }
+});
+
+router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
+    const logger = createLogger('McpReplayRoute', req.body && req.body.session_id);
+    try {
+        const authHeader = req.headers.authorization || '';
+        if (!authHeader) {
+            return res.status(401).json({
+                message: 'Missing Authorization header'
+            });
+        }
+
+        const toolCall = req.body && typeof req.body.tool_call === 'object' ? req.body.tool_call : {};
+        const toolId = req.body.tool_id || toolCall.tool || toolCall.tool_id;
+        const parameters = req.body.parameters || req.body.arguments_executed || toolCall.arguments_executed || toolCall.arguments || {};
+        const sessionId = req.body.session_id || null;
+        const userId = req.user || req.body.user_id || null;
+
+        if (!toolId || typeof toolId !== 'string') {
+            return res.status(400).json({
+                message: 'tool_id (or tool_call.tool) is required'
+            });
+        }
+        if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
+            return res.status(400).json({
+                message: 'parameters (or tool_call.arguments_executed) must be an object'
+            });
+        }
+
+        if (!isReplayableTool(toolId)) {
+            return res.status(403).json({
+                message: `Tool is not replayable: ${toolId}`,
+                tool_id: toolId
+            });
+        }
+
+        const executionContext = {
+            session_id: sessionId,
+            user_id: userId,
+            auth_token: authHeader,
+            authToken: authHeader
+        };
+
+        logger.info('Replaying MCP tool call', {
+            tool_id: toolId,
+            session_id: sessionId,
+            user_id: userId,
+            parameter_keys: Object.keys(parameters || {})
+        });
+
+        const result = await executeMcpTool(
+            toolId,
+            parameters,
+            authHeader,
+            executionContext,
+            logger
+        );
+
+        const normalizedCall = (result && result.call && typeof result.call === 'object')
+            ? result.call
+            : {
+                tool: toolId,
+                arguments_executed: parameters,
+                replayable: isReplayableTool(toolId)
+            };
+
+        return res.status(200).json({
+            message: 'Tool replay executed successfully',
+            tool_id: toolId,
+            call: normalizedCall,
+            result
+        });
+    } catch (error) {
+        logger.error('Tool replay failed', {
+            error: error.message,
+            stack: error.stack
+        });
+        return res.status(500).json({
+            message: 'Tool replay failed',
+            error: error.message
+        });
     }
 });
 

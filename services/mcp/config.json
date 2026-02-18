@@ -36,6 +36,15 @@
       "workspace_browse_tool",
       "list_jobs"
     ],
+    "replayable_tools": [
+      "workspace_browse_tool",
+      "workspace_get_file_metadata_tool",
+      "list_jobs",
+      "get_recent_jobs",
+      "bvbrc_query_collection",
+      "plan_workflow",
+      "submit_workflow"
+    ],
     "bypass_file_handling_tools": [
       "workspace_browse_tool",
       "plan_workflow",

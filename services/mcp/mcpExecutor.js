@@ -28,6 +28,20 @@ function isFinalizeTool(toolId) {
   return finalizeList.some(fragment => toolId.includes(fragment));
 }
 
+function isReplayableTool(toolId) {
+  if (!toolId) return false;
+  const replayableList = config.global_settings?.replayable_tools || [
+    'workspace_browse_tool',
+    'workspace_get_file_metadata_tool',
+    'list_jobs',
+    'get_recent_jobs',
+    'bvbrc_query_collection',
+    'plan_workflow',
+    'submit_workflow'
+  ];
+  return replayableList.some(fragment => toolId.includes(fragment));
+}
+
 function shouldBypassFileHandling(toolId) {
   if (!toolId) return false;
   const bypassList = config.global_settings?.bypass_file_handling_tools || [];
@@ -1251,10 +1265,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
 
     // Attach normalized call metadata so clients can replay selected queries.
     if (result && typeof result === 'object' && !Array.isArray(result)) {
-      const replayable =
-        isQueryCollectionTool(toolId) ||
-        toolId.includes('workspace_browse_tool') ||
-        toolId.includes('list_jobs');
+      const replayable = isReplayableTool(toolId);
       if (!result.call || typeof result.call !== 'object') {
         result.call = {
           tool: toolId,
@@ -1413,6 +1424,7 @@ module.exports = {
   validateToolParameters,
   sessionManager,
   isRagTool,
-  isFinalizeTool
+  isFinalizeTool,
+  isReplayableTool
 };
 
