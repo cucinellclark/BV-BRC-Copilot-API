@@ -193,6 +193,22 @@ function findLatestToolParameters(executionTrace, toolId) {
   return {};
 }
 
+function extractResultTypeFromSafeResult(safeResult) {
+  if (!safeResult || typeof safeResult !== 'object') return null;
+  if (typeof safeResult.result_type === 'string' && safeResult.result_type) {
+    return safeResult.result_type;
+  }
+  if (
+    safeResult.result &&
+    typeof safeResult.result === 'object' &&
+    typeof safeResult.result.result_type === 'string' &&
+    safeResult.result.result_type
+  ) {
+    return safeResult.result.result_type;
+  }
+  return null;
+}
+
 function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
   const call = toolResult && typeof toolResult.call === 'object' ? toolResult.call : {};
   const args = (call.arguments_executed && typeof call.arguments_executed === 'object')
@@ -955,7 +971,11 @@ async function executeAgentLoop(opts) {
         });
 
         toolResults[nextAction.action] = safeResult;
-        traceEntry.result = safeResult;
+        const resultType = extractResultTypeFromSafeResult(safeResult);
+        traceEntry.result_meta = {
+          has_result: safeResult != null,
+          result_type: resultType
+        };
         traceEntry.status = isErrorResult ? 'error' : 'success';
 
         if (session_id) {
@@ -1216,7 +1236,6 @@ async function executeAgentLoop(opts) {
           assistantMessage,
           buildAssistantToolDisplayMetadata(finalResponseSourceTool, finalToolResult)
         );
-
         // Persist canonical workflow_id on the assistant message so reloaded sessions
         // can hydrate review/submit dialogs even when workflowData is lightweight.
         if (isWorkflowTool(finalResponseSourceTool)) {

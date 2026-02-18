@@ -165,53 +165,77 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
     }
   }
 
-  // Override path parameter for workspace_browse_tool to ensure first segment is the actual user_id
-  // Extract user_id from auth token to get the full email address (e.g., user@patricbrc.org)
-  if (toolId && toolId.includes('workspace_browse_tool') && safeParams.path) {
-    const originalPath = safeParams.path;
+  // Override path parameter for workspace_browse_tool to ensure path is rooted to the
+  // authenticated user's workspace. Invalid paths fall back to the user's home directory.
+  if (toolId && toolId.includes('workspace_browse_tool')) {
+    const originalPath = (typeof safeParams.path === 'string') ? safeParams.path.trim() : '';
 
     // Extract user_id from auth token (authoritative source)
     const authToken = context?.authToken || context?.auth_token;
-    console.log('authToken', authToken);
     let actualUserId = null;
 
     if (authToken) {
       actualUserId = workspaceService.extractUserId(authToken);
     }
-    console.log('actualUserId', actualUserId);
     // Fallback to context.user_id if token extraction fails
     if (!actualUserId && context?.user_id) {
       actualUserId = context.user_id;
     }
 
     if (actualUserId) {
-      // Parse the path to extract segments
-      // Path format: /user1@patricbrc.org/home/Genome Groups or /user1@patricbrc.org/
-      // IMPORTANT: The @ symbol in email addresses should NOT be split on, only split on /
-      const hasTrailingSlash = originalPath.endsWith('/');
+      const userHomePath = `/${actualUserId}/home`;
+      let correctedPath = userHomePath;
 
-      // Split by '/' and get the first segment (the user_id part)
-      const pathParts = originalPath.split('/');
+      if (originalPath && originalPath !== '/') {
+        const hasTrailingSlash = originalPath.endsWith('/');
+        const normalizedOriginal = originalPath.replace(/\/+/g, '/');
+        const trimmed = normalizedOriginal.replace(/^\/+|\/+$/g, '');
+        const segments = trimmed ? trimmed.split('/') : [];
 
-      // pathParts[0] is empty (before the leading /), pathParts[1] is the user_id
-      if (pathParts.length > 1 && pathParts[1]) {
-        // Replace the first path segment with the actual user_id extracted from token
-        pathParts[1] = actualUserId;
+        if (segments.length > 0) {
+          const firstSegment = segments[0];
+          const secondSegment = segments[1] || '';
+          const isPublicAbsolutePath =
+            normalizedOriginal.startsWith('/public/') ||
+            normalizedOriginal === '/public' ||
+            (firstSegment === 'workspace' && secondSegment === 'public');
 
-        // Reconstruct the path, preserving trailing slash
-        const correctedPath = pathParts.join('/') + (hasTrailingSlash && !pathParts[pathParts.length - 1] ? '' : hasTrailingSlash ? '/' : '');
+          // Preserve explicit public workspace roots.
+          if (isPublicAbsolutePath) {
+            correctedPath = normalizedOriginal;
+          }
+          // If path already has a user root, force it to the authenticated user.
+          else if (firstSegment === actualUserId) {
+            correctedPath = `/${segments.join('/')}`;
+          } else if (firstSegment.includes('@')) {
+            correctedPath = `/${actualUserId}/${segments.slice(1).join('/')}`;
+          } else if (firstSegment === 'home') {
+            correctedPath = `/${actualUserId}/${segments.join('/')}`;
+          } else {
+            // Treat short/relative paths (e.g., "/MCP_Dev") as children of user home.
+            correctedPath = `${userHomePath}/${segments.join('/')}`;
+          }
 
-        if (correctedPath !== originalPath) {
-          logger.info('[MCP] Overriding workspace_browse_tool path with actual user_id from token', {
-            toolId,
-            originalPath,
-            correctedPath,
-            tokenExtractedUserId: actualUserId,
-            contextUserId: context.user_id || 'not provided'
-          });
-          safeParams.path = correctedPath;
+          if (hasTrailingSlash && !correctedPath.endsWith('/')) {
+            correctedPath = `${correctedPath}/`;
+          }
         }
       }
+
+      if (!correctedPath || correctedPath === '/') {
+        correctedPath = userHomePath;
+      }
+
+      if (correctedPath !== originalPath) {
+        logger.info('[MCP] Overriding workspace_browse_tool path with actual user_id from token', {
+          toolId,
+          originalPath,
+          correctedPath,
+          tokenExtractedUserId: actualUserId,
+          contextUserId: context.user_id || 'not provided'
+        });
+      }
+      safeParams.path = correctedPath;
     } else {
       logger.warn('[MCP] Could not extract user_id for workspace_browse_tool path override', {
         toolId,

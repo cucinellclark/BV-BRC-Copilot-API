@@ -369,6 +369,8 @@ async function addMessagesToSession(sessionId, messages) {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
 
+    console.log('********** messages **********', messages);
+
     return await chatCollection.updateOne(
       { session_id: sessionId },
       {
