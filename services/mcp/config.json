@@ -11,7 +11,7 @@
     },
     "internal_server": {
       "name": "Internal MCP Server",
-      "url": "http://140.221.78.67:8052",
+      "url": "http://140.221.78.67:8054",
       "type": "mcp",
       "auth": null,
       "timeout": 30000,

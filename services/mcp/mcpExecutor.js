@@ -1,6 +1,8 @@
 // services/mcp/mcpExecutor.js
 
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const { getToolDefinition, loadToolsManifest } = require('./toolDiscovery');
 const { sessionManager } = require('./mcpSessionManager');
 const { McpStreamHandler } = require('./mcpStreamHandler');
@@ -15,6 +17,8 @@ const streamHandler = new McpStreamHandler(fileManager);
 const config = require('./config.json');
 
 const DEFAULT_RAG_FRAGMENTS = ['helpdesk_service_usage'];
+const LOCAL_SESSION_BASE_PATH = '/tmp/copilot/sessions';
+const WORKSPACE_PATH_IN_CODE_REGEX = /\/[^/\s"'`]+\/home\/(?:CopilotDownloads|CopilotCodeDev)\/[^\s"'`]+/g;
 
 function isRagTool(toolId) {
   if (!toolId) return false;
@@ -32,6 +36,58 @@ function shouldBypassFileHandling(toolId) {
   if (!toolId) return false;
   const bypassList = config.global_settings?.bypass_file_handling_tools || [];
   return bypassList.some(fragment => toolId.includes(fragment));
+}
+
+function isRunPythonCodeTool(toolId) {
+  if (!toolId) return false;
+  return toolId === 'run_python_code' || toolId.endsWith('.run_python_code') || toolId.includes('run_python_code');
+}
+
+function findWorkspacePathsInCode(code = '') {
+  if (typeof code !== 'string' || !code) return [];
+  return Array.from(new Set(code.match(WORKSPACE_PATH_IN_CODE_REGEX) || []));
+}
+
+function rewriteWorkspacePathsToLocalTmp(code = '', sessionId = null, logger = console) {
+  if (typeof code !== 'string' || !code) {
+    return { code, replacements: 0, unresolved: [] };
+  }
+
+  const workspacePaths = findWorkspacePathsInCode(code);
+  if (workspacePaths.length === 0) {
+    return { code, replacements: 0, unresolved: [] };
+  }
+
+  let rewritten = code;
+  let replacements = 0;
+  const unresolved = [];
+
+  for (const workspacePath of workspacePaths) {
+    const fileName = path.basename(workspacePath);
+    if (!sessionId || !fileName) {
+      unresolved.push(workspacePath);
+      continue;
+    }
+
+    const localTmpPath = path.join(LOCAL_SESSION_BASE_PATH, sessionId, 'downloads', fileName);
+    rewritten = rewritten.split(workspacePath).join(localTmpPath);
+    replacements += 1;
+
+    if (!fs.existsSync(localTmpPath)) {
+      logger.warn('[MCP] Rewrote workspace path to session local tmp path, but file does not currently exist', {
+        workspacePath,
+        localTmpPath,
+        sessionId
+      });
+    }
+  }
+
+  const remainingWorkspacePaths = findWorkspacePathsInCode(rewritten);
+  return {
+    code: rewritten,
+    replacements,
+    unresolved: [...unresolved, ...remainingWorkspacePaths]
+  };
 }
 
 function createCancellationError(checkpoint = 'unknown') {
@@ -162,6 +218,54 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
         });
         safeParams[param] = null;
       }
+    }
+  }
+
+  // Enforce local tmp paths for run_python_code input.
+  // The Python runtime can only read local filesystem paths (e.g. /tmp/...),
+  // not remote workspace identifiers like /<user>/home/CopilotDownloads/...
+  if (isRunPythonCodeTool(toolId) && typeof safeParams.code === 'string') {
+    const rewriteResult = rewriteWorkspacePathsToLocalTmp(
+      safeParams.code,
+      context?.session_id || null,
+      logger
+    );
+
+    if (rewriteResult.replacements > 0) {
+      logger.info('[MCP] Rewrote workspace paths in run_python_code input to local tmp paths', {
+        toolId,
+        replacements: rewriteResult.replacements,
+        sessionId: context?.session_id || null
+      });
+      safeParams.code = rewriteResult.code;
+    }
+
+    if (rewriteResult.unresolved.length > 0) {
+      throw new Error(
+        `run_python_code input contains workspace paths. Use local tmp paths only (e.g. /tmp/copilot/sessions/${context?.session_id || '<session_id>'}/downloads/<file>).`
+      );
+    }
+    
+    // CRITICAL: Always inject session_id for run_python_code
+    // The MCP server needs this to bind the session directory to the Singularity container
+    if (context?.session_id) {
+      const provided = safeParams.session_id;
+      if (provided && provided !== context.session_id) {
+        logger.warn('[MCP] Overriding run_python_code session_id from untrusted parameters', {
+          toolId,
+          providedSessionId: provided,
+          forcedSessionId: context.session_id
+        });
+      }
+      safeParams.session_id = context.session_id;
+      logger.debug('[MCP] Injected session_id into run_python_code parameters', {
+        toolId,
+        sessionId: context.session_id
+      });
+    } else {
+      logger.warn('[MCP] No session_id in context for run_python_code - tool may fail', {
+        toolId
+      });
     }
   }
 

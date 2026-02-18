@@ -1248,14 +1248,16 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
                   file_id: value.file_id,
                   errorType: value.errorType,
                   errorMessage: value.errorMessage,
-                  message: value.message,
+                  local_tmp_path: value.filePath || null,
+                  message: 'Tool returned an error payload saved to a local /tmp session file.',
                   note: 'Tool returned an error payload saved to file. Inspect it with internal_server file tools and adjust inputs/tool choice.'
                 } : {
                   type: 'FILE_SAVED',
                   file_id: value.file_id,
                   summary: value.summary,
-                  message: value.message,
-                  note: 'Result saved to file. Use internal_server file tools to query/extract data.'
+                  local_tmp_path: value.filePath || null,
+                  message: 'Result saved to a local /tmp session file.',
+                  note: 'Result saved to a local /tmp session file. Prefer local_tmp_path for any downstream file access.'
                 }];
               }
 
