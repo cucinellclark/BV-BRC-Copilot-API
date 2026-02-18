@@ -75,7 +75,7 @@ function mapWorkflowIdsToGridRows(workflowIds) {
 
 function normalizeWorkflowStatus(rawStatus) {
     const value = String(rawStatus || '').toLowerCase();
-    if (value === 'queued' || value === 'init' || value === 'pending') return 'pending';
+    if (value === 'planned' || value === 'queued' || value === 'init' || value === 'pending') return 'pending';
     if (value === 'in-progress' || value === 'running') return 'running';
     if (value === 'completed' || value === 'complete' || value === 'success' || value === 'succeeded') return 'completed';
     if (value === 'failed' || value === 'error' || value === 'cancelled' || value === 'canceled') return 'failed';
@@ -106,8 +106,7 @@ function normalizeWorkflowRecord(workflow, workflowId) {
         raw_status: rawStatus,
         submitted_at: submittedAt,
         completed_at: completedAt,
-        step_count: stepCount,
-        raw: workflow || null
+        step_count: stepCount
     };
 }
 
