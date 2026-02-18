@@ -30,8 +30,13 @@ async function initializeServer() {
   }
   
   // Start the server
-  var server = app.listen(app.get('port'), '0.0.0.0', function () {
-    console.log('[Startup] Express server listening on port ' + server.address().port);
+  const bindHost = conf.api_url || '0.0.0.0';
+  var server = app.listen(app.get('port'), bindHost, function () {
+    const port = server.address().port;
+    const host = server.address().address;
+    const apiUrl = conf.api_url ? `http://${conf.api_url}:${port}` : `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`;
+    console.log('[Startup] Express server listening on port ' + port);
+    console.log('[Startup] API URL: ' + apiUrl);
     console.log('[Startup] Health checks available at:');
     console.log('[Startup]   - /copilot-api/health/live (liveness)');
     console.log('[Startup]   - /copilot-api/health/ready (readiness)');

@@ -67,8 +67,18 @@ async function discoverTools() {
         const enabledTools = tools.filter(tool => !disabledTools.includes(tool.name));
         const disabledCount = tools.length - enabledTools.length;
         
+        // Log enabled tools only (after filtering) to avoid confusion
+        if (enabledTools.length > 0) {
+          const enabledToolNames = enabledTools.map(t => t.name).join(', ');
+          console.log(`[MCP Tool Discovery] Tools from ${serverKey}: ${enabledToolNames}`);
+        }
+        
         if (disabledCount > 0) {
-          console.log(`[MCP Tool Discovery] Filtered out ${disabledCount} disabled tool(s) from ${serverKey}`);
+          const disabledToolNames = tools
+            .filter(tool => disabledTools.includes(tool.name))
+            .map(t => t.name)
+            .join(', ');
+          console.log(`[MCP Tool Discovery] Filtered out ${disabledCount} disabled tool(s) from ${serverKey}: ${disabledToolNames}`);
         }
         
         // Add enabled tools to manifest
@@ -179,7 +189,9 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
         }
       }
       
-      console.log(`[MCP Tool Discovery] Discovered ${responseData.result?.tools?.length || 0} tools from ${serverKey}`);
+      // Note: This shows total tools discovered from server before filtering
+      // Filtered/disabled tools will be logged separately in discoverTools()
+      console.log(`[MCP Tool Discovery] Discovered ${responseData.result?.tools?.length || 0} tools from ${serverKey} (before filtering)`);
       
       // Check for JSON-RPC error
       if (responseData.error) {
@@ -189,11 +201,8 @@ async function fetchServerTools(serverKey, serverConfig, globalSettings, authTok
       // Extract tools from JSON-RPC result
       const tools = responseData.result?.tools || [];
       
-      // Log all tool names for debugging
-      if (tools.length > 0) {
-        const toolNames = tools.map(t => t.name).join(', ');
-        console.log(`[MCP Tool Discovery] Tools from ${serverKey}: ${toolNames}`);
-      }
+      // Don't log all tool names here - they'll be logged after filtering in discoverTools()
+      // This avoids confusion where disabled tools appear in logs
       
       return {
         tools,

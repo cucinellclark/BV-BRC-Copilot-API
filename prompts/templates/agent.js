@@ -97,6 +97,12 @@ Generate a natural, helpful response that:
 
 Format your response in clear paragraphs. Use markdown for formatting when appropriate (tables, lists, bold, and links).
 
+CRITICAL - TABLE FORMATTING:
+- If TOOL RESULTS already contains a properly formatted markdown table, include it EXACTLY as provided
+- DO NOT attempt to reformat, recreate, or modify pre-formatted tables
+- DO NOT extract data from JSON and create your own table if a table is already provided
+- Simply include the pre-formatted table in your response with appropriate context
+
 When including hyperlinks, use standard markdown link syntax: [link text](URL)
 
 IMPORTANT - URL GUIDELINES:

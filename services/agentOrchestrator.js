@@ -118,6 +118,14 @@ function extractWorkflowId(result) {
     }
   }
 
+  // Validation failures may include a generated partial workflow
+  if (result.partial_workflow && typeof result.partial_workflow === 'object') {
+    const partialId = result.partial_workflow.workflow_id;
+    if (partialId && typeof partialId === 'string') {
+      return partialId.trim();
+    }
+  }
+
   return null;
 }
 
@@ -131,6 +139,115 @@ function createMessage(role, content) {
     content,
     timestamp: new Date()
   };
+}
+
+function isWorkspaceBrowseTool(toolId) {
+  return typeof toolId === 'string' && toolId.includes('workspace_browse_tool');
+}
+
+function isJobsBrowseTool(toolId) {
+  if (typeof toolId !== 'string') return false;
+  return toolId.includes('list_jobs') || toolId.includes('get_recent_jobs');
+}
+
+function isWorkflowTool(toolId) {
+  if (typeof toolId !== 'string') return false;
+  return toolId.includes('plan_workflow') || toolId.includes('submit_workflow');
+}
+
+function unwrapDisplayResult(result) {
+  if (!result || typeof result !== 'object') return result;
+  if (result.result && typeof result.result === 'object' && !Array.isArray(result.result)) {
+    return result.result;
+  }
+  return result;
+}
+
+function flattenWorkspaceItems(items) {
+  if (!Array.isArray(items)) return [];
+  const flattened = [];
+  for (const item of items) {
+    if (Array.isArray(item)) {
+      flattened.push(item);
+      continue;
+    }
+    if (item && typeof item === 'object') {
+      for (const key of Object.keys(item)) {
+        if (Array.isArray(item[key])) {
+          flattened.push(...item[key]);
+        }
+      }
+    }
+  }
+  return flattened;
+}
+
+function findLatestToolParameters(executionTrace, toolId) {
+  if (!Array.isArray(executionTrace) || !toolId) return {};
+  for (let i = executionTrace.length - 1; i >= 0; i -= 1) {
+    const trace = executionTrace[i];
+    if (trace && trace.action === toolId && trace.parameters && typeof trace.parameters === 'object') {
+      return trace.parameters;
+    }
+  }
+  return {};
+}
+
+function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
+  const call = toolResult && typeof toolResult.call === 'object' ? toolResult.call : {};
+  const args = (call.arguments_executed && typeof call.arguments_executed === 'object')
+    ? call.arguments_executed
+    : findLatestToolParameters(executionTrace, toolId);
+
+  const envelope = {
+    tool: call.tool || toolId,
+    arguments_executed: args || {},
+    replayable: call.replayable === true
+  };
+
+  if (typeof call.backend_method === 'string' && call.backend_method.length > 0) {
+    envelope.backend_method = call.backend_method;
+  }
+  return envelope;
+}
+
+function buildAssistantToolDisplayMetadata(toolId, toolResult) {
+  if (!toolId || !toolResult || typeof toolResult !== 'object') {
+    return {};
+  }
+
+  const displayResult = unwrapDisplayResult(toolResult);
+
+  if (isWorkspaceBrowseTool(toolId)) {
+    return {
+      isWorkspaceBrowse: true,
+      chatSummary: 'Workspace results are available. Open Workspace Tab to load.',
+      uiAction: 'open_workspace_tab'
+    };
+  }
+
+  if (isJobsBrowseTool(toolId)) {
+    return {
+      isJobsBrowse: true,
+      chatSummary: 'Job results are available. Open Jobs Tab to load.',
+      uiAction: 'open_jobs_tab'
+    };
+  }
+
+  if (isWorkflowTool(toolId)) {
+    if (displayResult.workflow_id || displayResult.workflow_name || displayResult.status || displayResult.partial_workflow) {
+      const resolvedWorkflowId = extractWorkflowId(displayResult);
+      return {
+        isWorkflow: true,
+        workflow_id: resolvedWorkflowId || null,
+        workflow_name: displayResult.workflow_name || null,
+        workflow_status: displayResult.status || null,
+        uiAction: 'open_workflow_viewer'
+      };
+    }
+  }
+
+  return {};
 }
 
 function toBooleanFlag(value) {
@@ -505,6 +622,7 @@ async function executeAgentLoop(opts) {
   const collectedRagDocs = [];
   let iteration = 0;
   let finalResponseSourceTool = null; // Track which tool generated the final response
+  let finalizeAfterTerminalTool = null; // Terminal tool executed; synthesize final response next
   let finalResponse = null;
   let sessionMemory = null;
   let queryForAgent = query;
@@ -855,7 +973,8 @@ async function executeAgentLoop(opts) {
         }
 
         // Store workflow IDs directly on chat_sessions for straightforward retrieval.
-        if (session_id && nextAction.action && nextAction.action.includes('submit_workflow')) {
+        // Extract from both plan_workflow (workflow_id assigned at registration) and submit_workflow
+        if (session_id && nextAction.action && isWorkflowTool(nextAction.action)) {
           logger.debug('Attempting to extract workflow ID', {
             tool: nextAction.action,
             resultType: typeof safeResult,
@@ -866,6 +985,12 @@ async function executeAgentLoop(opts) {
           });
 
           const workflowId = extractWorkflowId(safeResult);
+          logger.info('Extracted workflow_id from tool result', {
+            workflow_id: workflowId,
+            tool: nextAction.action,
+            safeResultKeys: safeResult ? Object.keys(safeResult) : [],
+            safeResult: JSON.stringify(safeResult).substring(0, 500)
+          });
 
           if (workflowId) {
             try {
@@ -875,7 +1000,7 @@ async function executeAgentLoop(opts) {
               logger.warn('Failed to store workflow ID on chat session', { error: workflowError.message, workflow_id: workflowId });
             }
           } else {
-            logger.warn('No workflow ID found in workflow submission result', {
+            logger.warn('No workflow ID found in workflow tool result', {
               session_id,
               tool: nextAction.action,
               resultType: typeof safeResult,
@@ -942,39 +1067,14 @@ async function executeAgentLoop(opts) {
           }
         }
 
-        // Tools marked as FINALIZE should finalize immediately
+        // Terminal tools end planning, but still go through final response synthesis.
         const shouldFinalizeNow = isFinalizeTool(nextAction.action);
         if (shouldFinalizeNow) {
           throwIfCancelled('before_finalize_tool_emit');
-          logger.info('Finalize-category tool executed, finalizing immediately');
-
-          // Wrap the raw result in a consistent JSON object structure
-          const finalizeResponse = {
-            source_tool: nextAction.action,
-            content: result
-          };
-
-          // For non-streaming: keep as object (will be serialized in JSON response)
-          // For streaming: will be stringified when emitting
-          finalResponse = finalizeResponse;
-          finalResponseSourceTool = nextAction.action;
-
-          logger.info('Sending finalize tool result as JSON object', {
-            tool: nextAction.action,
-            resultType: typeof result,
-            isString: typeof result === 'string',
-            isObject: typeof result === 'object' && result !== null
+          logger.info('Terminal tool executed, ending planning loop and generating final response', {
+            tool: nextAction.action
           });
-
-          // If streaming, emit the JSON object as a stringified chunk
-          if (stream && responseStream) {
-            const finalizeResponseStr = JSON.stringify(finalizeResponse, null, 2);
-            emitSSE(responseStream, 'final_response', {
-              chunk: finalizeResponseStr,
-              tool: nextAction.action
-            });
-          }
-
+          finalizeAfterTerminalTool = nextAction.action;
           break;
         }
       } catch (error) {
@@ -1051,6 +1151,27 @@ async function executeAgentLoop(opts) {
       }
     }
 
+    if (!finalResponse && finalizeAfterTerminalTool) {
+      throwIfCancelled('before_terminal_tool_finalize_generation');
+      finalResponse = await generateFinalResponse(
+        queryForAgent,
+        system_prompt,
+        executionTrace,
+        toolResults,
+        model,
+        historyContext,
+        stream,
+        responseStream,
+        logger,
+        finalizeAfterTerminalTool,
+        sessionMemory,
+        workspace_items,
+        selected_jobs,
+        selected_workflows
+      );
+      finalResponseSourceTool = finalizeAfterTerminalTool;
+    }
+
     // Safety net: hit max iterations
     if (!finalResponse) {
       throwIfCancelled('before_max_iteration_finalize');
@@ -1084,6 +1205,58 @@ async function executeAgentLoop(opts) {
     // Add tool metadata if the response was generated by a specific tool
     if (finalResponseSourceTool) {
       assistantMessage.source_tool = finalResponseSourceTool;
+      const finalToolResult = toolResults[finalResponseSourceTool];
+      if (finalToolResult && typeof finalToolResult === 'object') {
+        assistantMessage.tool_call = buildToolCallEnvelope(
+          finalResponseSourceTool,
+          finalToolResult,
+          executionTrace
+        );
+        Object.assign(
+          assistantMessage,
+          buildAssistantToolDisplayMetadata(finalResponseSourceTool, finalToolResult)
+        );
+
+        // Persist canonical workflow_id on the assistant message so reloaded sessions
+        // can hydrate review/submit dialogs even when workflowData is lightweight.
+        if (isWorkflowTool(finalResponseSourceTool)) {
+          const resolvedWorkflowId = extractWorkflowId(finalToolResult);
+          logger.info('Resolving workflow_id for assistant message', {
+            resolvedWorkflowId,
+            finalResponseSourceTool,
+            finalToolResultKeys: finalToolResult ? Object.keys(finalToolResult) : [],
+            finalToolResultPreview: JSON.stringify(finalToolResult).substring(0, 500)
+          });
+          if (resolvedWorkflowId) {
+            assistantMessage.workflow_id = resolvedWorkflowId;
+            logger.info('Set assistant message workflow_id', { workflow_id: resolvedWorkflowId });
+            if (!assistantMessage.workflowData || typeof assistantMessage.workflowData !== 'object') {
+              assistantMessage.workflowData = {
+                workflow_id: resolvedWorkflowId,
+                execution_metadata: {
+                  workflow_id: resolvedWorkflowId
+                }
+              };
+            } else if (!assistantMessage.workflowData.workflow_id) {
+              assistantMessage.workflowData.workflow_id = resolvedWorkflowId;
+            }
+            if (!assistantMessage.workflowData.execution_metadata ||
+                typeof assistantMessage.workflowData.execution_metadata !== 'object') {
+              assistantMessage.workflowData.execution_metadata = {};
+            }
+            if (!assistantMessage.workflowData.execution_metadata.workflow_id) {
+              assistantMessage.workflowData.execution_metadata.workflow_id = resolvedWorkflowId;
+            }
+            assistantMessage.isWorkflow = true;
+          }
+        }
+      } else {
+        assistantMessage.tool_call = {
+          tool: finalResponseSourceTool,
+          arguments_executed: findLatestToolParameters(executionTrace, finalResponseSourceTool),
+          replayable: false
+        };
+      }
     }
 
     // Create system message with execution trace (for debugging/transparency)
@@ -1248,14 +1421,16 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
                   file_id: value.file_id,
                   errorType: value.errorType,
                   errorMessage: value.errorMessage,
-                  message: value.message,
+                  local_tmp_path: value.filePath || null,
+                  message: 'Tool returned an error payload saved to a local /tmp session file.',
                   note: 'Tool returned an error payload saved to file. Inspect it with internal_server file tools and adjust inputs/tool choice.'
                 } : {
                   type: 'FILE_SAVED',
                   file_id: value.file_id,
                   summary: value.summary,
-                  message: value.message,
-                  note: 'Result saved to file. Use internal_server file tools to query/extract data.'
+                  local_tmp_path: value.filePath || null,
+                  message: 'Result saved to a local /tmp session file.',
+                  note: 'Result saved to a local /tmp session file. Prefer local_tmp_path for any downstream file access.'
                 }];
               }
 
@@ -1417,6 +1592,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
     // Check if this is a direct response (no tools used)
     const isDirectResponse = Object.keys(toolResults).length === 0;
+    
     log.info('Generating final response', {
       isDirectResponse,
       toolResultsCount: Object.keys(toolResults).length,
@@ -1532,32 +1708,67 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       ).join('\n');
 
       // Format gathered results while omitting MCP tool IDs and internal tool instructions.
-      const resultsStr = Object.values(toolResults).map((result, index) => {
+      // Use a global character budget so we include as much tool output as possible.
+      const maxToolResultChars = Number.isFinite(mcpConfig.global_settings?.final_response_tool_chars)
+        ? mcpConfig.global_settings.final_response_tool_chars
+        : 24000;
+      let remainingToolChars = Math.max(4000, maxToolResultChars);
+      const resultChunks = [];
+
+      Object.entries(toolResults).forEach(([toolId, result], index) => {
+        if (remainingToolChars <= 0) {
+          return;
+        }
+
         const sourceLabel = `Result Source ${index + 1}`;
+        let chunk = '';
 
         // Check if this is a file reference (expected for all results)
         if (result && result.type === 'file_reference') {
           if (result.isError === true || result.error === true) {
-            return `${sourceLabel}:\n[ERROR SAVED]\n` +
-                   `File ID: ${result.file_id}\n` +
-                   `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
-                   `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
-                   `Error payload was captured for this step.\n`;
+            chunk = `${sourceLabel}:\n[ERROR SAVED]\n` +
+                    `File ID: ${result.file_id}\n` +
+                    `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
+                    `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
+                    `Error payload was captured for this step.\n`;
+          } else {
+            const sampleRecordStr = sanitizeToolNames(JSON.stringify(result.summary?.sampleRecord, null, 2));
+            chunk = `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
+                    `Data Type: ${result.summary.dataType}\n` +
+                    `Fields: ${Array.isArray(result.summary.fields) ? result.summary.fields.join(', ') : ''}\n` +
+                    `Sample Record: ${sampleRecordStr}\n` +
+                    `File ID: ${result.file_id}\n` +
+                    `${result.queryParameters ? `Query Parameters: ${sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n` : ''}`;
           }
-          return `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
-                 `Data Type: ${result.summary.dataType}\n` +
-                 `Fields: ${result.summary.fields.join(', ')}\n` +
-                 `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
-                 `File ID: ${result.file_id}\n`;
+        } else {
+          // Fallback for non-file-reference results (workspace/jobs and other bypass tools)
+          const llmResult = (isJobsBrowseTool(toolId) &&
+            result &&
+            typeof result === 'object' &&
+            !Array.isArray(result) &&
+            Array.isArray(result.items))
+            ? result.items
+            : result;
+          const resultStr = sanitizeToolNames(JSON.stringify(llmResult, null, 2));
+          chunk = `${sourceLabel}:\n${resultStr}\n\n Do not use the phrase 'Found X Jobs'`;
         }
 
-        // Fallback for non-file-reference results (should be rare/error cases)
-        const resultStr = sanitizeToolNames(JSON.stringify(result, null, 2));
-        if (resultStr.length > 3000) {
-          return `${sourceLabel}:\n[Result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
+        if (chunk.length > remainingToolChars) {
+          const trimmed = Math.max(300, remainingToolChars - 120);
+          chunk = `${chunk.substring(0, trimmed)}\n...[truncated to fit prompt budget]\n`;
         }
-        return `${sourceLabel}:\n${resultStr}\n`;
-      }).join('\n---\n');
+
+        resultChunks.push(chunk);
+        remainingToolChars -= chunk.length;
+      });
+
+      if (Object.keys(toolResults).length > resultChunks.length) {
+        resultChunks.push(
+          `Additional tool outputs were omitted due to prompt budget constraints.`
+        );
+      }
+
+      const resultsStr = resultChunks.join('\n---\n');
 
       const finalSystemPrompt = (systemPrompt || 'No additional context') + sessionMemoryStr + workspaceStr + selectedJobsStr + selectedWorkflowsStr;
 

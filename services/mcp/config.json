@@ -11,7 +11,7 @@
     },
     "internal_server": {
       "name": "Internal MCP Server",
-      "url": "http://140.221.78.67:8052",
+      "url": "http://140.221.78.67:8054",
       "type": "mcp",
       "auth": null,
       "timeout": 30000,
@@ -36,6 +36,15 @@
       "workspace_browse_tool",
       "list_jobs"
     ],
+    "replayable_tools": [
+      "workspace_browse_tool",
+      "workspace_get_file_metadata_tool",
+      "list_jobs",
+      "get_recent_jobs",
+      "bvbrc_query_collection",
+      "plan_workflow",
+      "submit_workflow"
+    ],
     "bypass_file_handling_tools": [
       "workspace_browse_tool",
       "plan_workflow",
@@ -49,15 +58,14 @@
       "workspace_preview_file_tool",
       "bvbrc_plan_query_collection",
       "bvbrc_collection_fields_and_parameters",
-      "workspace_get_file_metadata_tool",
+      "get_file_metadata",
       "list_jobs"
     ],
     "context_aware_tools": [
       "plan_workflow"
     ],
     "disabled_tools": [
-      "bvbrc_collection_fields_and_parameters",
-      "submit_workflow"
+      "bvbrc_collection_fields_and_parameters"
     ],
     "exclude_from_context": {
       "unconditional": [
