@@ -505,6 +505,7 @@ async function executeAgentLoop(opts) {
   const collectedRagDocs = [];
   let iteration = 0;
   let finalResponseSourceTool = null; // Track which tool generated the final response
+  let finalizeAfterTerminalTool = null; // Terminal tool executed; synthesize final response next
   let finalResponse = null;
   let sessionMemory = null;
   let queryForAgent = query;
@@ -942,39 +943,14 @@ async function executeAgentLoop(opts) {
           }
         }
 
-        // Tools marked as FINALIZE should finalize immediately
+        // Terminal tools end planning, but still go through final response synthesis.
         const shouldFinalizeNow = isFinalizeTool(nextAction.action);
         if (shouldFinalizeNow) {
           throwIfCancelled('before_finalize_tool_emit');
-          logger.info('Finalize-category tool executed, finalizing immediately');
-
-          // Wrap the raw result in a consistent JSON object structure
-          const finalizeResponse = {
-            source_tool: nextAction.action,
-            content: result
-          };
-
-          // For non-streaming: keep as object (will be serialized in JSON response)
-          // For streaming: will be stringified when emitting
-          finalResponse = finalizeResponse;
-          finalResponseSourceTool = nextAction.action;
-
-          logger.info('Sending finalize tool result as JSON object', {
-            tool: nextAction.action,
-            resultType: typeof result,
-            isString: typeof result === 'string',
-            isObject: typeof result === 'object' && result !== null
+          logger.info('Terminal tool executed, ending planning loop and generating final response', {
+            tool: nextAction.action
           });
-
-          // If streaming, emit the JSON object as a stringified chunk
-          if (stream && responseStream) {
-            const finalizeResponseStr = JSON.stringify(finalizeResponse, null, 2);
-            emitSSE(responseStream, 'final_response', {
-              chunk: finalizeResponseStr,
-              tool: nextAction.action
-            });
-          }
-
+          finalizeAfterTerminalTool = nextAction.action;
           break;
         }
       } catch (error) {
@@ -1049,6 +1025,27 @@ async function executeAgentLoop(opts) {
           break;
         }
       }
+    }
+
+    if (!finalResponse && finalizeAfterTerminalTool) {
+      throwIfCancelled('before_terminal_tool_finalize_generation');
+      finalResponse = await generateFinalResponse(
+        queryForAgent,
+        system_prompt,
+        executionTrace,
+        toolResults,
+        model,
+        historyContext,
+        stream,
+        responseStream,
+        logger,
+        finalizeAfterTerminalTool,
+        sessionMemory,
+        workspace_items,
+        selected_jobs,
+        selected_workflows
+      );
+      finalResponseSourceTool = finalizeAfterTerminalTool;
     }
 
     // Safety net: hit max iterations
@@ -1534,32 +1531,60 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       ).join('\n');
 
       // Format gathered results while omitting MCP tool IDs and internal tool instructions.
-      const resultsStr = Object.values(toolResults).map((result, index) => {
+      // Use a global character budget so we include as much tool output as possible.
+      const maxToolResultChars = Number.isFinite(mcpConfig.global_settings?.final_response_tool_chars)
+        ? mcpConfig.global_settings.final_response_tool_chars
+        : 24000;
+      let remainingToolChars = Math.max(4000, maxToolResultChars);
+      const resultChunks = [];
+
+      Object.values(toolResults).forEach((result, index) => {
+        if (remainingToolChars <= 0) {
+          return;
+        }
+
         const sourceLabel = `Result Source ${index + 1}`;
+        let chunk = '';
 
         // Check if this is a file reference (expected for all results)
         if (result && result.type === 'file_reference') {
           if (result.isError === true || result.error === true) {
-            return `${sourceLabel}:\n[ERROR SAVED]\n` +
-                   `File ID: ${result.file_id}\n` +
-                   `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
-                   `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
-                   `Error payload was captured for this step.\n`;
+            chunk = `${sourceLabel}:\n[ERROR SAVED]\n` +
+                    `File ID: ${result.file_id}\n` +
+                    `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
+                    `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
+                    `Error payload was captured for this step.\n`;
+          } else {
+            const sampleRecordStr = sanitizeToolNames(JSON.stringify(result.summary?.sampleRecord, null, 2));
+            chunk = `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
+                    `Data Type: ${result.summary.dataType}\n` +
+                    `Fields: ${Array.isArray(result.summary.fields) ? result.summary.fields.join(', ') : ''}\n` +
+                    `Sample Record: ${sampleRecordStr}\n` +
+                    `File ID: ${result.file_id}\n` +
+                    `${result.queryParameters ? `Query Parameters: ${sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n` : ''}`;
           }
-          return `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
-                 `Data Type: ${result.summary.dataType}\n` +
-                 `Fields: ${result.summary.fields.join(', ')}\n` +
-                 `Sample Record: ${JSON.stringify(result.summary.sampleRecord, null, 2)}\n` +
-                 `File ID: ${result.file_id}\n`;
+        } else {
+          // Fallback for non-file-reference results (workspace/jobs and other bypass tools)
+          const resultStr = sanitizeToolNames(JSON.stringify(result, null, 2));
+          chunk = `${sourceLabel}:\n${resultStr}\n`;
         }
 
-        // Fallback for non-file-reference results (should be rare/error cases)
-        const resultStr = sanitizeToolNames(JSON.stringify(result, null, 2));
-        if (resultStr.length > 3000) {
-          return `${sourceLabel}:\n[Result - ${resultStr.length} chars]\n${resultStr.substring(0, 3000)}...\n`;
+        if (chunk.length > remainingToolChars) {
+          const trimmed = Math.max(300, remainingToolChars - 120);
+          chunk = `${chunk.substring(0, trimmed)}\n...[truncated to fit prompt budget]\n`;
         }
-        return `${sourceLabel}:\n${resultStr}\n`;
-      }).join('\n---\n');
+
+        resultChunks.push(chunk);
+        remainingToolChars -= chunk.length;
+      });
+
+      if (Object.keys(toolResults).length > resultChunks.length) {
+        resultChunks.push(
+          `Additional tool outputs were omitted due to prompt budget constraints.`
+        );
+      }
+
+      const resultsStr = resultChunks.join('\n---\n');
 
       const finalSystemPrompt = (systemPrompt || 'No additional context') + sessionMemoryStr + workspaceStr + selectedJobsStr + selectedWorkflowsStr;
 

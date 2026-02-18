@@ -56,8 +56,7 @@
       "plan_workflow"
     ],
     "disabled_tools": [
-      "bvbrc_collection_fields_and_parameters",
-      "submit_workflow"
+      "bvbrc_collection_fields_and_parameters"
     ],
     "exclude_from_context": {
       "unconditional": [

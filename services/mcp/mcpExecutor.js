@@ -115,7 +115,7 @@ function throwIfCancelled(context = {}, checkpoint = 'unknown') {
  */
 function applySystemParameterOverrides(toolId, parameters = {}, context = {}, log = null, toolDef = null) {
   const safeParams = (parameters && typeof parameters === 'object') ? { ...parameters } : {};
-  
+
   // Create a safe logger wrapper that falls back to console if log is null
   const logger = log || {
     warn: (...args) => console.warn(...args),
@@ -155,12 +155,12 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
   // Extract user_id from auth token to get the full email address (e.g., user@patricbrc.org)
   if (toolId && toolId.includes('workspace_browse_tool') && safeParams.path) {
     const originalPath = safeParams.path;
-    
+
     // Extract user_id from auth token (authoritative source)
     const authToken = context?.authToken || context?.auth_token;
     console.log('authToken', authToken);
     let actualUserId = null;
-    
+
     if (authToken) {
       actualUserId = workspaceService.extractUserId(authToken);
     }
@@ -169,24 +169,24 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
     if (!actualUserId && context?.user_id) {
       actualUserId = context.user_id;
     }
-    
+
     if (actualUserId) {
       // Parse the path to extract segments
       // Path format: /user1@patricbrc.org/home/Genome Groups or /user1@patricbrc.org/
       // IMPORTANT: The @ symbol in email addresses should NOT be split on, only split on /
       const hasTrailingSlash = originalPath.endsWith('/');
-      
+
       // Split by '/' and get the first segment (the user_id part)
       const pathParts = originalPath.split('/');
-      
+
       // pathParts[0] is empty (before the leading /), pathParts[1] is the user_id
       if (pathParts.length > 1 && pathParts[1]) {
         // Replace the first path segment with the actual user_id extracted from token
         pathParts[1] = actualUserId;
-        
+
         // Reconstruct the path, preserving trailing slash
         const correctedPath = pathParts.join('/') + (hasTrailingSlash && !pathParts[pathParts.length - 1] ? '' : hasTrailingSlash ? '/' : '');
-        
+
         if (correctedPath !== originalPath) {
           logger.info('[MCP] Overriding workspace_browse_tool path with actual user_id from token', {
             toolId,
@@ -205,7 +205,7 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
         hasContextUserId: !!context?.user_id
       });
     }
-    
+
     // Sanitize list-type parameters: convert empty strings to null
     // The MCP server expects these to be arrays or null, not empty strings
     const listParams = ['filename_search_terms', 'file_extension', 'file_types'];
@@ -286,7 +286,7 @@ function unwrapMcpContent(result) {
   if (!result || typeof result !== 'object') {
     return result;
   }
-  
+
   // Try structuredContent.result first (preferred)
   if (result.structuredContent?.result) {
     try {
@@ -301,7 +301,7 @@ function unwrapMcpContent(result) {
       return result.structuredContent.result;
     }
   }
-  
+
   // Fallback to content[0].text
   if (result.content && Array.isArray(result.content) && result.content[0]?.text !== undefined) {
     const textContent = result.content[0].text;
@@ -324,7 +324,7 @@ function unwrapMcpContent(result) {
       return textContent;
     }
   }
-  
+
   // Check for FastMCP format: content array with type "text" and text field containing JSON
   if (result.content && Array.isArray(result.content) && result.content.length > 0) {
     const firstContent = result.content[0];
@@ -342,7 +342,7 @@ function unwrapMcpContent(result) {
       }
     }
   }
-  
+
   // Check if result.result exists and is a JSON string (some MCP servers wrap this way)
   if (result.result !== undefined) {
     if (typeof result.result === 'string') {
@@ -365,7 +365,7 @@ function unwrapMcpContent(result) {
       return result.result;
     }
   }
-  
+
   // No wrapper detected, return as-is
   return result;
 }
@@ -385,7 +385,7 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
 
   // Try multiple possible field names for documents
   let docs = [];
-  
+
   // Helper function to safely parse JSON strings
   const parseIfString = (value) => {
     if (typeof value === 'string') {
@@ -410,7 +410,7 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
       if (parsed) docs = parsed;
     }
   }
-  
+
   if (docs.length === 0 && rawResult.results) {
     if (Array.isArray(rawResult.results)) {
       docs = rawResult.results;
@@ -419,7 +419,7 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
       if (parsed) docs = parsed;
     }
   }
-  
+
   if (docs.length === 0 && rawResult.documents) {
     if (Array.isArray(rawResult.documents)) {
       docs = rawResult.documents;
@@ -428,7 +428,7 @@ function normalizeRagResult(rawResult, maxDocs = 5) {
       if (parsed) docs = parsed;
     }
   }
-  
+
   if (docs.length === 0 && Array.isArray(rawResult)) {
     // If the result itself is an array, use it directly
     docs = rawResult;
@@ -502,24 +502,24 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
   const requestedLimit = Number.isInteger(originalParameters?.limit) && originalParameters.limit > 0
     ? originalParameters.limit
     : null;
-  
+
   // Skip pagination for countOnly queries
   if (originalParameters.countOnly) {
     log.debug('Skipping pagination for countOnly query', { totalCount });
     return firstResponse;
   }
-  
+
   // Skip pagination if cursorId was provided in original parameters
   // This means the caller is already doing manual pagination
   if (originalParameters.cursorId && originalParameters.cursorId !== '*') {
-    log.debug('Skipping auto-pagination - cursorId already provided in request', { 
+    log.debug('Skipping auto-pagination - cursorId already provided in request', {
       cursorId: originalParameters.cursorId.substring(0, 20) + '...',
       totalCount,
       message: 'Caller is handling pagination manually'
     });
     return firstResponse;
   }
-  
+
   if (!nextCursorId || nextCursorId === null) {
     log.debug('No pagination needed - single page result', {
       totalCount,
@@ -527,7 +527,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
     });
     return firstResponse;
   }
-  
+
   log.info('Starting cursor-based pagination', {
     toolId,
     totalCount,
@@ -535,7 +535,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
     estimatedBatches: Math.ceil(totalCount / (firstResponse?.results?.length || 1000)),
     nextCursorId
   });
-  
+
   // Warn if very large result set
   if (totalCount > 50000) {
     log.warn('Large result set detected - pagination may take time and use significant memory', {
@@ -543,11 +543,11 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       estimatedBatches: Math.ceil(totalCount / (firstResponse?.results?.length || 1000))
     });
   }
-  
+
   // Detect format: TSV (string) or JSON (array)
   const isTsvFormat = firstResponse.tsv !== undefined && typeof firstResponse.tsv === 'string';
   const isJsonFormat = Array.isArray(firstResponse.results);
-  
+
   // Initialize accumulator based on format
   let allResults = [];
   let allTsv = '';
@@ -581,13 +581,13 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       currentCount = dataLines.length;
     }
   }
-  
+
   let batchNumber = 1;
   let cursor = (requestedLimit !== null && currentCount >= requestedLimit) ? null : nextCursorId;
   const errors = [];
   const responseStream = context.responseStream;
   const MAX_PAGINATION_BATCHES = 200; // Safety limit to prevent runaway pagination
-  
+
   // Send initial progress update
   if (responseStream && totalCount > 0) {
     emitSSE(responseStream, 'query_progress', {
@@ -599,11 +599,11 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       timestamp: new Date().toISOString()
     });
   }
-  
+
   // Pagination loop
   while (cursor && cursor !== null && batchNumber < MAX_PAGINATION_BATCHES) {
     batchNumber++;
-    
+
     try {
       throwIfCancelled(context, `before_pagination_batch_${batchNumber}`);
 
@@ -612,51 +612,51 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         currentCount,
         totalCount
       });
-      
+
       // Create pagination parameters - preserve all original params, add cursorId
       const paginationParams = {
         ...originalParameters,
         cursorId: cursor
       };
-      
+
       // Execute pagination request
       // We need to call the tool again, but we'll do it through the same execution path
       // Get tool definition again
       const toolDef = await getToolDefinition(toolId);
-      
+
       if (!toolDef) {
         throw new Error(`Tool definition not found for pagination: ${toolId}`);
       }
-      
+
       // Get server config
       const serverKey = toolDef.server;
       const serverConfig = config.servers[serverKey];
       if (!serverConfig) {
         throw new Error(`Server configuration not found for: ${serverKey}`);
       }
-      
+
       // Get or create session
       const sessionId = await sessionManager.getOrCreateSession(serverKey, serverConfig, authToken);
-      
+
       // Build headers
       const headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/event-stream',
         'mcp-session-id': sessionId
       };
-      
+
       // Add auth token if needed
       const allowlist = config.global_settings?.token_server_allowlist || [];
       const shouldIncludeToken = allowlist.includes(serverKey);
-      
+
       if (shouldIncludeToken && authToken) {
         headers['Authorization'] = authToken.startsWith('Bearer ') ? authToken : `Bearer ${authToken}`;
       }
-      
+
       if (serverConfig.auth) {
         headers['Authorization'] = serverConfig.auth.startsWith('Bearer ') ? serverConfig.auth : `Bearer ${serverConfig.auth}`;
       }
-      
+
       // Build JSON-RPC request for pagination
       const jsonRpcRequest = {
         jsonrpc: '2.0',
@@ -667,10 +667,10 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
           arguments: paginationParams
         }
       };
-      
+
       const mcpEndpoint = `${serverConfig.url}/mcp`;
       const timeout = config.global_settings?.tool_execution_timeout || 120000;
-      
+
       // Execute pagination request (non-streaming for pagination)
       const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
         timeout,
@@ -679,9 +679,9 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       });
 
       throwIfCancelled(context, `after_pagination_batch_${batchNumber}_response`);
-      
+
       let responseData = response.data;
-      
+
       // Parse SSE format if needed (MCP server may return SSE even for non-streaming requests)
       if (typeof responseData === 'string') {
         log.debug(`Pagination batch ${batchNumber} returned string, parsing SSE format`);
@@ -704,23 +704,23 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
           throw new Error('Invalid SSE format in pagination response');
         }
       }
-      
+
       // Check for errors
       if (responseData.error) {
         throw new Error(`Pagination error: ${responseData.error.message || JSON.stringify(responseData.error)}`);
       }
-      
+
       // Unwrap MCP content
       let batchResult = responseData.result;
-      
+
       log.debug(`Raw pagination batch ${batchNumber} response`, {
         hasResult: !!responseData.result,
         resultType: typeof responseData.result,
         resultKeys: responseData.result ? Object.keys(responseData.result) : []
       });
-      
+
       batchResult = unwrapMcpContent(batchResult);
-      
+
       log.debug(`Unwrapped pagination batch ${batchNumber}`, {
         hasBatchResult: !!batchResult,
         batchResultType: typeof batchResult,
@@ -731,7 +731,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         resultsType: batchResult?.results ? typeof batchResult.results : 'undefined',
         resultsIsArray: Array.isArray(batchResult?.results)
       });
-      
+
       // Validate batch result structure
       if (!batchResult || typeof batchResult !== 'object') {
         log.error(`Invalid batch result structure for batch ${batchNumber}`, {
@@ -741,21 +741,21 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         });
         throw new Error('Invalid batch result structure');
       }
-      
+
       // Check for error in result
       if (batchResult.error) {
         throw new Error(`Batch error: ${batchResult.error}`);
       }
-      
+
       // Extract batch data based on format
       let batchCount = 0;
       const nextCursor = batchResult.nextCursorId;
-      
+
       if (isTsvFormat && batchResult.tsv) {
         // TSV format: extract TSV string and append (skip header line for batches after the first)
         const batchTsv = batchResult.tsv;
         const tsvLines = batchTsv.split('\n').filter(line => line.trim().length > 0);
-        
+
         if (tsvLines.length > 0) {
           // Skip header line (first line) for all batches in the loop (batchNumber >= 2)
           // The first batch header is already in allTsv
@@ -774,7 +774,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         // Fallback: try to get count
         batchCount = batchResult.count || 0;
       }
-      
+
       // Safety check: if batch is empty and cursor is still present, something is wrong
       if (batchCount === 0 && nextCursor && nextCursor !== null) {
         log.warn('Empty batch with non-null cursor - stopping pagination to prevent infinite loop', {
@@ -783,7 +783,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         });
         break;
       }
-      
+
       currentCount += batchCount;
 
       // Respect caller-provided limit (used by global search in Copilot flow).
@@ -809,27 +809,27 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         });
         cursor = null;
       }
-      
+
       log.debug(`Pagination batch ${batchNumber} completed`, {
         batchCount,
         cumulativeCount: currentCount,
         totalCount,
         hasNextCursor: !!nextCursor
       });
-      
+
       // Send progress update
       if (responseStream) {
-        const percentage = totalCount > 0 
+        const percentage = totalCount > 0
           ? Math.floor((currentCount / totalCount) * 100)
           : 0;
-        
+
         log.info(`Sending pagination progress update for batch ${batchNumber}`, {
           current: currentCount,
           total: totalCount,
           percentage,
           batchNumber
         });
-        
+
         emitSSE(responseStream, 'query_progress', {
           tool: toolId,
           current: currentCount,
@@ -844,12 +844,12 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
           contextKeys: context ? Object.keys(context) : []
         });
       }
-      
+
       // Update cursor for next iteration
       if (cursor !== null) {
         cursor = nextCursor;
       }
-      
+
       // Break if no more pages
       if (!cursor || cursor === null) {
         log.info('Pagination complete - no more pages', {
@@ -858,7 +858,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         });
         break;
       }
-      
+
     } catch (error) {
       if (error && error.isCancelled) {
         throw error;
@@ -869,13 +869,13 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         stack: error.stack,
         cursor: cursor ? cursor.substring(0, 20) + '...' : null
       });
-      
+
       errors.push({
         batchNumber,
         error: error.message,
         cursor: cursor ? cursor.substring(0, 20) + '...' : null
       });
-      
+
       // Send error event
       if (responseStream) {
         emitSSE(responseStream, 'query_error', {
@@ -888,7 +888,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
           batchNumber: batchNumber
         });
       }
-      
+
       // Return partial results with error
       const partialResult = {
         count: isTsvFormat ? currentCount : allResults.length,
@@ -901,17 +901,17 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         expectedTotal: totalCount,
         paginationErrors: errors
       };
-      
+
       if (isTsvFormat) {
         partialResult.tsv = allTsv;
       } else {
         partialResult.results = allResults;
       }
-      
+
       return partialResult;
     }
   }
-  
+
   // Check if we hit the safety limit
   if (batchNumber >= MAX_PAGINATION_BATCHES && cursor && cursor !== null) {
     log.warn('Reached maximum pagination batch limit', {
@@ -920,7 +920,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       expectedTotal: totalCount,
       hasMoreData: true
     });
-    
+
     // Send warning via SSE
     if (responseStream) {
       emitSSE(responseStream, 'query_warning', {
@@ -933,7 +933,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       });
     }
   }
-  
+
   // Pagination complete - merge all results
   const finalCount = isTsvFormat ? currentCount : allResults.length;
   log.info('Pagination completed successfully', {
@@ -944,7 +944,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
     format: isTsvFormat ? 'tsv' : 'json',
     complete: finalCount >= totalCount || !cursor
   });
-  
+
   // Return merged result based on format
   const mergedResult = {
     count: finalCount,
@@ -955,7 +955,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       errors: errors.length > 0 ? errors : undefined
     }
   };
-  
+
   // Preserve query parameters from the parameters that were actually used
   // Note: originalParameters here refers to the parameters passed to this function,
   // which have already been modified (e.g., format forced to 'tsv') before pagination
@@ -965,13 +965,13 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
     delete queryParams.cursorId;
     mergedResult.queryParameters = queryParams;
   }
-  
+
   if (isTsvFormat) {
     mergedResult.tsv = allTsv;
   } else {
     mergedResult.results = allResults;
   }
-  
+
   return mergedResult;
 }
 
@@ -983,7 +983,7 @@ fileManager.init().catch(err => {
 
 /**
  * Execute an MCP tool
- * 
+ *
  * @param {string} toolId - Full tool ID (e.g., "bvbrc_server.query_collection")
  * @param {object} parameters - Tool parameters
  * @param {string} authToken - Authentication token
@@ -993,24 +993,24 @@ fileManager.init().catch(err => {
  */
 async function executeMcpTool(toolId, parameters = {}, authToken = null, context = {}, logger = null) {
   const log = logger || createLogger('MCP-Executor', context.session_id);
-  
+
   try {
     throwIfCancelled(context, 'before_tool_definition');
 
     // Load tool definition
     let toolDef = await getToolDefinition(toolId);
-    
+
     // If tool not found, try to find it by name across all servers (even if a prefix was provided)
     if (!toolDef) {
       const manifest = await loadToolsManifest();
       if (manifest && manifest.tools) {
         const toolName = toolId.includes('.') ? toolId.split('.').pop() : toolId;
-        
+
         // Find tool by name across all servers
         const foundTool = Object.entries(manifest.tools).find(
           ([fullToolId, tool]) => tool.name === toolName
         );
-        
+
         if (foundTool) {
           const [fullToolId, tool] = foundTool;
           log.info('Found tool by name, using full ID', { originalId: toolId, fullToolId });
@@ -1019,7 +1019,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         }
       }
     }
-    
+
     if (!toolDef) {
       log.error('Tool not found', { toolId });
       throw new Error(`Tool not found: ${toolId}`);
@@ -1035,59 +1035,59 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     parameters = applySystemParameterOverrides(toolId, parameters, contextWithAuth, log, toolDef);
 
     log.info(`Executing tool: ${toolId}`, { parameters });
-    
+
     // Get server config
     const serverKey = toolDef.server;
     const serverConfig = config.servers[serverKey];
     if (!serverConfig) {
       throw new Error(`Server configuration not found for: ${serverKey}`);
     }
-    
+
     // Get or create session
     throwIfCancelled(context, 'before_get_or_create_session');
     const sessionId = await sessionManager.getOrCreateSession(serverKey, serverConfig, authToken);
-    
+
     // Build headers with session ID
     const headers = {
       'Content-Type': 'application/json',
       'Accept': 'application/json, text/event-stream',
       'mcp-session-id': sessionId
     };
-    
+
     // Add auth token if needed
     const allowlist = config.global_settings?.token_server_allowlist || [];
     const shouldIncludeToken = allowlist.includes(serverKey);
-    
+
     if (shouldIncludeToken && authToken) {
       headers['Authorization'] = authToken.startsWith('Bearer ') ? authToken : `Bearer ${authToken}`;
     }
-    
+
     if (serverConfig.auth) {
       headers['Authorization'] = serverConfig.auth.startsWith('Bearer ') ? serverConfig.auth : `Bearer ${serverConfig.auth}`;
     }
-    
+
     // Disable streaming for query_collection tools - they use cursor pagination instead
     // MCP streaming (SSE batches) conflicts with cursor-based pagination (multiple HTTP requests)
     if (isQueryCollectionTool(toolId)) {
       if (parameters.stream === true) {
-        log.info('Disabling stream parameter for query_collection - using cursor pagination instead', { 
-          toolId 
+        log.info('Disabling stream parameter for query_collection - using cursor pagination instead', {
+          toolId
         });
         parameters.stream = false;
       }
     }
-    
+
     // Force TSV format for tools that require it
     if (shouldForceTsvFormat(toolId)) {
       if (parameters.format !== 'tsv') {
-        log.info('Overriding format parameter - forcing TSV format', { 
+        log.info('Overriding format parameter - forcing TSV format', {
           toolId,
-          originalFormat: parameters.format 
+          originalFormat: parameters.format
         });
         parameters.format = 'tsv';
       }
     }
-    
+
     if (!isQueryCollectionTool(toolId)) {
       // Auto-enable streaming if tool has streamingHint annotation
       // Force streaming when streamingHint is present, regardless of parameter value
@@ -1100,7 +1100,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         log.debug('Streaming enabled based on streamingHint annotation', { toolId });
       }
     }
-    
+
     // Build JSON-RPC request
     const jsonRpcRequest = {
       jsonrpc: '2.0',
@@ -1111,10 +1111,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         arguments: parameters
       }
     };
-    
+
     const mcpEndpoint = `${serverConfig.url}/mcp`;
     const timeout = config.global_settings?.tool_execution_timeout || 120000;
-    
+
     // Execute tool with streaming support
     throwIfCancelled(context, 'before_tool_execution');
     const executionResult = await streamHandler.executeWithStreaming(
@@ -1127,10 +1127,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       log
     );
     throwIfCancelled(context, 'after_tool_execution');
-    
+
     let responseData = executionResult.data;
     const isStreamingResponse = executionResult.streaming;
-    
+
     if (isStreamingResponse) {
       log.info('Streaming response received and merged', {
         totalBatches: responseData._batchCount,
@@ -1142,19 +1142,19 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         log.debug('Parsing SSE format response', {
           stringPreview: responseData.substring(0, 200)
         });
-        
+
         // SSE format: "event: message\r\ndata: {...}\r\n"
         // Extract the data line
         const lines = responseData.split(/\r?\n/);
         let dataLine = null;
-        
+
         for (const line of lines) {
           if (line.trim().startsWith('data:')) {
             dataLine = line.trim().substring(5).trim(); // Remove "data:" prefix
             break;
           }
         }
-        
+
         if (dataLine) {
           try {
             responseData = JSON.parse(dataLine);
@@ -1176,21 +1176,21 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         }
       }
     }
-    
+
     // Check for JSON-RPC error or MCP error
     if (responseData.error) {
-      log.error('Tool execution error', { 
-        toolId, 
+      log.error('Tool execution error', {
+        toolId,
         error: responseData.error,
         partial: responseData.partial,
         mcpError: responseData.mcpError
       });
-      
+
       // If MCP error (not partial data), throw immediately
       if (responseData.mcpError) {
         throw new Error(`MCP tool error: ${responseData.error}`);
       }
-      
+
       // If partial results from streaming, return what we have with error flag
       if (responseData.partial && responseData.batchesReceived > 0) {
         log.warn('Returning partial streaming results', {
@@ -1206,10 +1206,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
           message: `Partial results: ${responseData.error}`
         };
       }
-      
+
       throw new Error(`Tool execution failed: ${responseData.error.message || JSON.stringify(responseData.error)}`);
     }
-    
+
     // DEBUG: Log responseData structure
     log.info('ResponseData structure before extracting result', {
       toolId,
@@ -1221,11 +1221,11 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       hasStructuredContent: !!responseData?.structuredContent,
       responseDataPreview: responseData ? JSON.stringify(responseData).substring(0, 500) : 'null/undefined'
     });
-    
+
     let result = isStreamingResponse ? responseData : responseData.result;
-    log.info('Tool executed successfully', { 
+    log.info('Tool executed successfully', {
       toolId,
-      isStreamingResponse 
+      isStreamingResponse
     });
 
     // DEBUG: Log raw result structure before unwrapping
@@ -1268,25 +1268,25 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         numFound: result?.numFound,
         count: result?.count,
         resultKeys: result ? Object.keys(result) : [],
-        parametersUsed: { 
+        parametersUsed: {
           countOnly: parameters.countOnly,
           cursorId: parameters.cursorId ? 'provided' : 'not provided'
         }
       });
-      
+
       if (result && typeof result === 'object') {
         const nextCursorId = result.nextCursorId;
         // Check for results in either format (TSV or JSON)
         const hasResults = (Array.isArray(result.results) && result.results.length > 0) ||
                           (result.tsv && typeof result.tsv === 'string' && result.tsv.trim().length > 0);
-      
+
         // Only paginate if there's a nextCursorId and we have results
         if (nextCursorId && nextCursorId !== null && hasResults) {
           // Get first batch count - handle both TSV and JSON formats
-          const firstBatchCount = Array.isArray(result.results) 
-            ? result.results.length 
+          const firstBatchCount = Array.isArray(result.results)
+            ? result.results.length
             : (result.count || (result.tsv ? result.tsv.split('\n').filter(l => l.trim()).length - 1 : 0));
-          
+
           log.info('Detected query_collection with pagination - starting cursor pagination', {
             toolId,
             firstBatchCount: firstBatchCount,
@@ -1294,7 +1294,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
             nextCursorId: nextCursorId.substring(0, 20) + '...',
             format: result.tsv ? 'tsv' : 'json'
           });
-          
+
           try {
             // Perform pagination
             throwIfCancelled(context, 'before_paginate_query_collection');
@@ -1307,7 +1307,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
               log
             );
             throwIfCancelled(context, 'after_paginate_query_collection');
-            
+
             log.info('Pagination completed', {
               toolId,
               totalResults: result.count || (Array.isArray(result.results) ? result.results.length : 0),
@@ -1317,10 +1317,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
             });
           } catch (paginationError) {
             // Get first batch count - handle both TSV and JSON formats
-            const firstBatchCount = Array.isArray(result.results) 
-              ? result.results.length 
+            const firstBatchCount = Array.isArray(result.results)
+              ? result.results.length
               : (result.count || (result.tsv ? result.tsv.split('\n').filter(l => l.trim()).length - 1 : 0));
-            
+
             log.error('Pagination failed, returning first batch only', {
               error: paginationError.message,
               firstBatchCount: firstBatchCount
@@ -1335,7 +1335,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
           });
         }
       }
-      
+
       // Add query parameters as metadata for query_collection tools
       // Use the actual parameters that were executed (after format override, etc.)
       if (result && typeof result === 'object') {
@@ -1350,6 +1350,23 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
           queryParameters: Object.keys(queryParams),
           format: queryParams.format
         });
+      }
+    }
+
+    // Attach normalized call metadata so clients can replay selected queries.
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const replayable =
+        isQueryCollectionTool(toolId) ||
+        toolId.includes('workspace_browse_tool') ||
+        toolId.includes('list_jobs');
+      if (!result.call || typeof result.call !== 'object') {
+        result.call = {
+          tool: toolId,
+          arguments_executed: { ...parameters },
+          replayable
+        };
+      } else if (result.call.replayable === undefined) {
+        result.call.replayable = replayable;
       }
     }
 
@@ -1370,7 +1387,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         resultKeys: result ? Object.keys(result) : [],
         resultPreview: result ? JSON.stringify(result).substring(0, 1000) : 'null'
       });
-      
+
       const normalized = normalizeRagResult(result, config.global_settings?.rag_max_docs);
       log.info('RAG result normalized', {
         type: normalized.type,
@@ -1381,25 +1398,25 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       });
       return normalized;
     }
-    
+
     // Process result through file manager if session_id is available
     // All results are now saved to disk and return a file reference
     // Unless the tool is configured to bypass file handling
     if (context.session_id && !shouldBypassFileHandling(toolId)) {
       log.debug('Processing result for session', { session_id: context.session_id });
-      
+
       // Build context for file manager (includes workspace upload info)
       const fileManagerContext = {
         authToken: authToken,
         user_id: context.user_id,
         session_id: context.session_id
       };
-      
+
       // Pass batch count as estimated pages for streaming responses
-      const estimatedPages = isStreamingResponse && responseData._batchCount 
-        ? responseData._batchCount 
+      const estimatedPages = isStreamingResponse && responseData._batchCount
+        ? responseData._batchCount
         : null;
-      
+
       const processedResult = await fileManager.processToolResult(
         context.session_id,
         toolId,
@@ -1407,10 +1424,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         fileManagerContext,
         estimatedPages
       );
-      
+
       // All results are now saved to file (no inline results)
       if (processedResult.type === 'file_reference') {
-        log.info('Result saved to file', { 
+        log.info('Result saved to file', {
           fileName: processedResult.fileName,
           recordCount: processedResult.summary?.recordCount,
           size: processedResult.summary?.sizeFormatted,
@@ -1423,27 +1440,27 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         return processedResult;
       }
     } else if (shouldBypassFileHandling(toolId)) {
-      log.debug('Bypassing file handling for tool', { 
-        toolId, 
+      log.debug('Bypassing file handling for tool', {
+        toolId,
         session_id: context.session_id,
         source: result?.source
       });
     } else {
       log.debug('No session_id in context, returning result directly (not saved to file)');
     }
-    
+
     return result;
   } catch (error) {
     if (error && error.isCancelled) {
       throw error;
     }
 
-    log.error('Error executing tool', { 
-      toolId, 
-      error: error.message, 
-      stack: error.stack 
+    log.error('Error executing tool', {
+      toolId,
+      error: error.message,
+      stack: error.stack
     });
-    
+
     // If session error, clear it and retry once
     if (error.message.includes('session') || error.message.includes('Session')) {
       log.warn('Session error detected, clearing session', { toolId });
@@ -1452,7 +1469,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         sessionManager.clearSession(toolDef.server);
       }
     }
-    
+
     throw error;
   }
 }
@@ -1463,23 +1480,23 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
 function validateToolParameters(toolDef, parameters) {
   const schema = toolDef.inputSchema;
   if (!schema) return true;
-  
+
   const required = schema.required || [];
   const properties = schema.properties || {};
-  
+
   // Check required fields
   for (const field of required) {
     if (!(field in parameters)) {
       throw new Error(`Missing required parameter: ${field}`);
     }
   }
-  
+
   // Basic type checking
   for (const [key, value] of Object.entries(parameters)) {
     if (properties[key]) {
       const expectedType = properties[key].type;
       const actualType = Array.isArray(value) ? 'array' : typeof value;
-      
+
       if (expectedType === 'integer' || expectedType === 'number') {
         if (typeof value !== 'number') {
           throw new Error(`Parameter ${key} should be a number, got ${actualType}`);
@@ -1491,7 +1508,7 @@ function validateToolParameters(toolDef, parameters) {
       }
     }
   }
-  
+
   return true;
 }
 
