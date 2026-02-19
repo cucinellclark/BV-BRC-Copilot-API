@@ -68,14 +68,16 @@ class WorkspaceService {
       'jsonl': 'json',
       
       // Sequence data
-      'fasta': 'fasta',
-      'fa': 'fasta',
-      'fna': 'fasta',
-      'faa': 'fasta',
-      'ffn': 'fasta',
-      'frn': 'fasta',
-      'fastq': 'fastq',
-      'fq': 'fastq',
+      'fasta': 'contigs',
+      'fa': 'contigs',  // Changed from 'fasta' to 'contigs' for BV-BRC workspace compatibility
+      'fna': 'contigs',
+      'faa': 'contigs',
+      'ffn': 'contigs',
+      'frn': 'contigs',
+      'fastq': 'reads',
+      'fq': 'reads',
+      'fastq.gz': 'reads',
+      'fq.gz': 'reads',
       
       // Annotation data
       'gff': 'gff',
