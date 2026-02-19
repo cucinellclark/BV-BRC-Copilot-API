@@ -29,6 +29,40 @@ const { maybeQueueSummary } = require('./summaryQueueService');
 const { maybeQueueSessionFacts } = require('./sessionFactsQueueService');
 const { getSessionMemory, updateSessionMemory, formatSessionMemory } = require('./memory/sessionMemoryService');
 
+/**
+ * Get tool-specific prompt enhancements for executed tools
+ * @param {Array<string>} toolIds - Array of tool IDs that were executed
+ * @returns {string} Combined tool-specific prompt enhancements
+ */
+function getToolPromptEnhancements(toolIds) {
+  if (!Array.isArray(toolIds) || toolIds.length === 0) {
+    return '';
+  }
+
+  const enhancements = mcpConfig.global_settings?.tool_prompt_enhancements || {};
+  const enhancementTexts = [];
+
+  toolIds.forEach(toolId => {
+    // Check for exact match first
+    if (enhancements[toolId]) {
+      enhancementTexts.push(enhancements[toolId]);
+      return;
+    }
+
+    // Check for partial match (e.g., "helpdesk_service_usage" matches "internal_server.helpdesk_service_usage")
+    const toolName = toolId.includes('.') ? toolId.split('.').pop() : toolId;
+    if (enhancements[toolName]) {
+      enhancementTexts.push(enhancements[toolName]);
+    }
+  });
+
+  if (enhancementTexts.length === 0) {
+    return '';
+  }
+
+  return '\n\nTOOL-SPECIFIC INSTRUCTIONS:\n' + enhancementTexts.join('\n\n');
+}
+
 function prepareToolResult(toolId, result, ragMaxDocs = 5) {
   // Check if this is a RAG result (has documents and summary)
   const isRagResult = result && result.documents && result.summary;
@@ -1805,6 +1839,10 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
       const resultsStr = resultChunks.join('\n---\n');
 
+      // Get tool-specific prompt enhancements for executed tools
+      const executedToolIds = Object.keys(toolResults);
+      const toolEnhancements = getToolPromptEnhancements(executedToolIds);
+
       const finalSystemPrompt = (systemPrompt || 'No additional context') + sessionMemoryStr + workspaceStr + selectedJobsStr + selectedWorkflowsStr;
 
       // Log the final system prompt composition
@@ -1814,12 +1852,14 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         workspace_str_length: workspaceStr.length,
         selected_jobs_str_length: selectedJobsStr.length,
         selected_workflows_str_length: selectedWorkflowsStr.length,
+        tool_enhancements_length: toolEnhancements.length,
         final_system_prompt_length: finalSystemPrompt.length,
-        has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES')
+        has_workspace_in_prompt: finalSystemPrompt.includes('WORKSPACE FILES'),
+        executed_tools: executedToolIds
       });
 
-      // Build response prompt
-      promptToUse = promptManager.formatPrompt(
+      // Build response prompt with tool-specific enhancements appended
+      const basePrompt = promptManager.formatPrompt(
         promptManager.getAgentPrompt('finalResponse'),
         {
           query: query,
@@ -1828,6 +1868,9 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
           systemPrompt: finalSystemPrompt
         }
       );
+
+      // Append tool-specific enhancements to the prompt
+      promptToUse = basePrompt + toolEnhancements;
     }
 
     // Get model data

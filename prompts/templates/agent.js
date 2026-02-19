@@ -59,15 +59,22 @@ USER QUERY: {{query}}
 
 CONTEXT: {{systemPrompt}}
 
-Respond ONLY with valid JSON in this exact format:
+Respond ONLY with strict JSON (RFC8259) in this exact format:
 {
   "action": "server_name.tool_name" or "FINALIZE",
-  "reasoning": "Brief explanation of why this action is necessary and what you expect to learn",
+  "reasoning": "Clear explanation of why this action is necessary and what you expect to learn",
   "parameters": {
-    // Tool-specific parameters based on the tool's schema
-    // For FINALIZE action, this should be empty: {}
+    "tool_specific_param": "value"
   }
 }
+
+Strict JSON rules:
+- No markdown code fences
+- No comments
+- No trailing commas
+- No undefined/NaN/Infinity
+- Use null for missing optional values, or omit the key entirely
+- For FINALIZE, parameters must be {}
 
 Remember:
 - The conversation has continuity—when users ask follow-up questions, they expect you to remember and apply context from earlier exchanges
@@ -147,10 +154,10 @@ ADDITIONAL CONTEXT:
 Provide a natural, helpful response that:
 1. Addresses the user's message directly
 2. Is friendly and conversational
-3. Only if this is the first turn (no prior conversation), briefly introduce yourself and what you can help with
+3. Only if this is the first turn (no prior conversation), introduce yourself and what you can help with
 4. For general questions about BV-BRC, provide accurate information
 5. For thanks or acknowledgments, respond naturally
-6. Keep it concise but informative
+6. After the first turn, do not re-introduce yourself; continue naturally from the ongoing conversation
 
 When including hyperlinks, use standard markdown link syntax: [link text](URL)
 
