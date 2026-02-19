@@ -193,6 +193,22 @@ function findLatestToolParameters(executionTrace, toolId) {
   return {};
 }
 
+function extractResultTypeFromSafeResult(safeResult) {
+  if (!safeResult || typeof safeResult !== 'object') return null;
+  if (typeof safeResult.result_type === 'string' && safeResult.result_type) {
+    return safeResult.result_type;
+  }
+  if (
+    safeResult.result &&
+    typeof safeResult.result === 'object' &&
+    typeof safeResult.result.result_type === 'string' &&
+    safeResult.result.result_type
+  ) {
+    return safeResult.result.result_type;
+  }
+  return null;
+}
+
 function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
   const call = toolResult && typeof toolResult.call === 'object' ? toolResult.call : {};
   const args = (call.arguments_executed && typeof call.arguments_executed === 'object')
@@ -247,6 +263,9 @@ function buildAssistantToolDisplayMetadata(toolId, toolResult) {
     }
   }
 
+  // IMPORTANT: Return empty object for all other tools
+  // Do NOT spread or return fields from displayResult that could pollute the assistant message
+  // (e.g., chatSummary from MCP tools)
   return {};
 }
 
@@ -954,8 +973,19 @@ async function executeAgentLoop(opts) {
           summaryPreview: typeof safeResult?.summary === 'string' ? safeResult.summary.substring(0, 100) : null
         });
 
+        // Sanitize MCP UI fields that should be controlled by the API, not the MCP server
+        // Remove chatSummary, uiAction if they were provided by the MCP tool
+        if (safeResult && typeof safeResult === 'object') {
+          delete safeResult.chatSummary;
+          delete safeResult.uiAction;
+        }
+
         toolResults[nextAction.action] = safeResult;
-        traceEntry.result = safeResult;
+        const resultType = extractResultTypeFromSafeResult(safeResult);
+        traceEntry.result_meta = {
+          has_result: safeResult != null,
+          result_type: resultType
+        };
         traceEntry.status = isErrorResult ? 'error' : 'success';
 
         if (session_id) {
@@ -1207,16 +1237,21 @@ async function executeAgentLoop(opts) {
       assistantMessage.source_tool = finalResponseSourceTool;
       const finalToolResult = toolResults[finalResponseSourceTool];
       if (finalToolResult && typeof finalToolResult === 'object') {
+        // Remove MCP server UI fields that should not be persisted
+        // The API controls these fields, not the MCP server
+        const sanitizedToolResult = { ...finalToolResult };
+        delete sanitizedToolResult.chatSummary; // Remove if MCP server provided it
+        delete sanitizedToolResult.uiAction; // Remove if MCP server provided it
+        
         assistantMessage.tool_call = buildToolCallEnvelope(
           finalResponseSourceTool,
-          finalToolResult,
+          sanitizedToolResult,
           executionTrace
         );
         Object.assign(
           assistantMessage,
-          buildAssistantToolDisplayMetadata(finalResponseSourceTool, finalToolResult)
+          buildAssistantToolDisplayMetadata(finalResponseSourceTool, sanitizedToolResult)
         );
-
         // Persist canonical workflow_id on the assistant message so reloaded sessions
         // can hydrate review/submit dialogs even when workflowData is lightweight.
         if (isWorkflowTool(finalResponseSourceTool)) {
@@ -1750,7 +1785,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
             ? result.items
             : result;
           const resultStr = sanitizeToolNames(JSON.stringify(llmResult, null, 2));
-          chunk = `${sourceLabel}:\n${resultStr}\n\n Do not use the phrase 'Found X Jobs'`;
+          chunk = `${sourceLabel}:\n${resultStr}`;
         }
 
         if (chunk.length > remainingToolChars) {

@@ -55,10 +55,14 @@ function shouldExcludeByToolResult(traceEntry) {
       const resultTypes = conditions.result_types || [];
       if (resultTypes.length === 0) continue;
       
-      // Extract result_type from the result (might be nested)
-      if (traceEntry.result) {
-        let resultType = null;
-        
+      let resultType = null;
+
+      // New lightweight metadata path.
+      if (traceEntry.result_meta && typeof traceEntry.result_meta.result_type === 'string') {
+        resultType = traceEntry.result_meta.result_type;
+      }
+      // Backward compatibility for older traces that still include full result payloads.
+      else if (traceEntry.result) {
         // Direct result_type field
         if (traceEntry.result.result_type) {
           resultType = traceEntry.result.result_type;
@@ -67,11 +71,11 @@ function shouldExcludeByToolResult(traceEntry) {
         else if (traceEntry.result.result && traceEntry.result.result.result_type) {
           resultType = traceEntry.result.result.result_type;
         }
-        
-        // Exclude if result_type matches any of the configured types
-        if (resultType && resultTypes.includes(resultType)) {
-          return true;
-        }
+      }
+
+      // Exclude if result_type matches any of the configured types
+      if (resultType && resultTypes.includes(resultType)) {
+        return true;
       }
     }
   }
