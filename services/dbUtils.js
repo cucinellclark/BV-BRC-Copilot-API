@@ -116,13 +116,15 @@ async function getSessionMessages(sessionId) {
   try {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    return await chatCollection
-      .find({ session_id: sessionId })
+    const query = { session_id: sessionId };
+    const result = await chatCollection
+      .find(query)
       .project({
         'messages.embedding': 0
       })
       .sort({ timestamp: -1 })
       .toArray();
+    return result;
   } catch (error) {
     throw new LLMServiceError('Failed to get session messages', error);
   }
