@@ -614,6 +614,8 @@ class FileManager {
         return 'csv';
       case 'tsv':
         return 'tsv';
+      case 'fasta':
+        return 'fa';
       case 'text':
         return 'txt';
       default:
@@ -675,7 +677,7 @@ class FileManager {
     // Parse nested JSON strings in text fields before serialization
     const parsedData = this.parseNestedJsonStrings(data);
     
-    if (dataType === 'text' || dataType === 'csv' || dataType === 'tsv') {
+    if (dataType === 'text' || dataType === 'csv' || dataType === 'tsv' || dataType === 'fasta') {
       return typeof parsedData === 'string' ? parsedData : String(parsedData);
     }
     // Default to JSON for structured types

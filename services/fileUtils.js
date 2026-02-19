@@ -23,12 +23,24 @@ function normalizeToolResult(result) {
   
   if (typeof result === 'object' && result !== null && !Array.isArray(result)) {
     
-    // Handle bvbrc-mcp-data format: extract results array OR tsv string
+    // Handle bvbrc-mcp-data format: extract results array OR tsv string OR fasta string
     if (result.source === 'bvbrc-mcp-data') {
       console.log('[FileUtils] Processing bvbrc-mcp-data response');
       
-      // Check for TSV format first (new default from MCP server)
-      if ('tsv' in result && typeof result.tsv === 'string') {
+      // Check for FASTA format first (for sequence data)
+      if ('fasta' in result && typeof result.fasta === 'string') {
+        console.log('[FileUtils] Extracting FASTA string from BV-BRC response');
+        // Preserve ALL fields except the data string
+        metadata = { ...result };
+        delete metadata.fasta; // Remove the data string
+        // Ensure totalCount is set for consistency
+        if (result.count !== undefined || result.numFound !== undefined) {
+          metadata.totalCount = result.count || result.numFound;
+        }
+        data = result.fasta;
+      }
+      // Check for TSV format (new default from MCP server)
+      else if ('tsv' in result && typeof result.tsv === 'string') {
         console.log('[FileUtils] Extracting TSV string from BV-BRC response');
         // Preserve ALL fields except the data string
         metadata = { ...result };
@@ -137,6 +149,10 @@ function detectDataType(data) {
   }
   
   if (typeof data === 'string') {
+    // Check if it looks like FASTA (starts with > and contains newlines)
+    if (data.trim().startsWith('>') && data.includes('\n')) {
+      return 'fasta';
+    }
     // Check if it looks like CSV
     if (data.includes(',') && data.includes('\n')) {
       const lines = data.split('\n');
@@ -162,6 +178,14 @@ function countRecords(data, dataType) {
     case 'json_array':
     case 'array':
       return Array.isArray(data) ? data.length : 0;
+    
+    case 'fasta':
+      if (typeof data === 'string') {
+        // Count sequences by counting '>' characters at the start of lines
+        const lines = data.split('\n');
+        return lines.filter(line => line.trim().startsWith('>')).length;
+      }
+      return 0;
     
     case 'csv':
     case 'tsv':
@@ -197,6 +221,10 @@ function extractFields(data, dataType) {
         return Object.keys(data);
       }
       return [];
+    
+    case 'fasta':
+      // FASTA files have sequence IDs and sequences
+      return ['sequence_id', 'sequence'];
     
     case 'csv':
     case 'tsv':
@@ -235,6 +263,33 @@ function getSampleRecord(data, dataType, maxChars = SAMPLE_RECORD_MAX_CHARS) {
       sample = data;
       break;
     
+    case 'fasta':
+      if (typeof data === 'string') {
+        // Extract the first sequence entry (header + sequence)
+        const lines = data.split('\n');
+        const firstHeaderIdx = lines.findIndex(line => line.trim().startsWith('>'));
+        if (firstHeaderIdx !== -1) {
+          const header = lines[firstHeaderIdx].substring(1).trim(); // Remove '>'
+          // Find the next header or end of file
+          let sequenceLines = [];
+          for (let i = firstHeaderIdx + 1; i < lines.length; i++) {
+            if (lines[i].trim().startsWith('>')) {
+              break;
+            }
+            if (lines[i].trim().length > 0) {
+              sequenceLines.push(lines[i].trim());
+            }
+          }
+          const sequence = sequenceLines.join('');
+          sample = {
+            sequence_id: header,
+            sequence: sequence.length > 100 ? sequence.substring(0, 100) + '...' : sequence,
+            sequence_length: sequence.length
+          };
+        }
+      }
+      break;
+    
     case 'csv':
     case 'tsv':
       if (typeof data === 'string') {
@@ -269,7 +324,7 @@ function getSampleRecord(data, dataType, maxChars = SAMPLE_RECORD_MAX_CHARS) {
   
   // Truncate sample if it's too large (for JSON types)
   // Return as a formatted JSON string for better display
-  if (sample !== null && (dataType === 'json_array' || dataType === 'json_object' || dataType === 'csv' || dataType === 'tsv')) {
+  if (sample !== null && (dataType === 'json_array' || dataType === 'json_object' || dataType === 'csv' || dataType === 'tsv' || dataType === 'fasta')) {
     const sampleStr = JSON.stringify(sample, null, 2);
     if (sampleStr.length > maxChars) {
       // Create a truncated version by keeping only some fields
@@ -359,6 +414,9 @@ function createSummary(normalizedResult, originalSize) {
   } else if (dataType === 'csv' || dataType === 'tsv') {
     summary.isTabular = true;
     summary.delimiter = dataType === 'csv' ? ',' : '\t';
+  } else if (dataType === 'fasta') {
+    summary.isFasta = true;
+    summary.fileFormat = 'FASTA';
   }
   
   return summary;

@@ -59,13 +59,15 @@
       "bvbrc_plan_query_collection",
       "bvbrc_collection_fields_and_parameters",
       "get_file_metadata",
-      "list_jobs"
+      "list_jobs",
+      "get_job_details"
     ],
     "context_aware_tools": [
       "plan_workflow"
     ],
     "disabled_tools": [
-      "bvbrc_collection_fields_and_parameters"
+      "bvbrc_collection_fields_and_parameters",
+      "submit_workflow"
     ],
     "exclude_from_context": {
       "unconditional": [
