@@ -78,6 +78,9 @@
           "result_types": ["list_result", "search_result"]
         }
       }
+    },
+    "tool_prompt_enhancements": {
+      "helpdesk_service_usage": "When presenting information from helpdesk_service_usage results, be descriptive and detailed about the documents returned from the tool. Provide comprehensive explanations of the features, capabilities, and usage instructions mentioned in the documents. Include relevant context and examples when available in the tool results."
     }
   }
 }

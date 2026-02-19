@@ -24,6 +24,9 @@ function safeParseJson(text) {
   cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
   // Clean up any trailing commas before closing braces/brackets
   cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
+  // Normalize JS token 'undefined' to JSON null when it appears as a bare value.
+  // This is a pragmatic guard for planner responses that are almost-valid JSON.
+  cleaned = replaceBareUndefinedWithNull(cleaned);
 
   try {
     return JSON.parse(cleaned);
@@ -40,6 +43,55 @@ function safeParseJson(text) {
     }
   }
   return null;
+}
+
+function replaceBareUndefinedWithNull(input) {
+  if (!input || typeof input !== 'string') return input;
+  let out = '';
+  let i = 0;
+  let inString = false;
+  let escaped = false;
+
+  while (i < input.length) {
+    const ch = input[i];
+
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    if (input.startsWith('undefined', i)) {
+      const prev = i === 0 ? '' : input[i - 1];
+      const next = i + 9 >= input.length ? '' : input[i + 9];
+      const prevIsWord = /[A-Za-z0-9_$]/.test(prev);
+      const nextIsWord = /[A-Za-z0-9_$]/.test(next);
+      if (!prevIsWord && !nextIsWord) {
+        out += 'null';
+        i += 9;
+        continue;
+      }
+    }
+
+    out += ch;
+    i += 1;
+  }
+
+  return out;
 }
 
 module.exports = {
