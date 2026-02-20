@@ -26,6 +26,9 @@ function normalizeToolResult(result) {
     // Handle bvbrc-mcp-data format: extract results array OR tsv string OR fasta string
     if (result.source === 'bvbrc-mcp-data') {
       console.log('[FileUtils] Processing bvbrc-mcp-data response');
+      // Preserve metadata for all BV-BRC data responses, including count-only
+      // shapes that do not include results/tsv/fasta payload fields.
+      metadata = { ...result };
       
       // Check for FASTA format first (for sequence data)
       if ('fasta' in result && typeof result.fasta === 'string') {

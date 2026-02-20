@@ -107,7 +107,7 @@ Generate a natural, helpful response that:
 2. References specific results from the tool executions
 3. Provides clear, actionable information
 4. Uses proper scientific terminology
-5. Includes relevant details like counts, IDs, or names when available
+5. Includes relevant details like counts or names when available, but excludes internal identifiers
 6. If multiple results were found, summarize the key findings
 7. If no results were found, explain why and suggest alternatives
 
@@ -132,6 +132,8 @@ IMPORTANT - WORKFLOW JSON HANDLING:
 - Only include the full JSON if the user specifically requests it (e.g., "show me the full workflow JSON", "give me the complete workflow definition")
 
 Do NOT mention the internal tools or technical details about how you gathered the information. Focus on answering the user's question naturally.
+
+NEVER expose internal metadata such as file IDs, session IDs, local tmp paths, or raw storage references in the final answer.
 
 CRITICAL STYLE CONSTRAINT:
 - Never include tool names, tool IDs, server names, or dot-qualified identifiers (examples: server.tool, internal_server.*, mcp.*) in the final answer.

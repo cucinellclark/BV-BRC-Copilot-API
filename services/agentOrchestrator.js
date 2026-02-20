@@ -612,6 +612,35 @@ function sanitizeToolNames(text) {
 }
 
 /**
+ * Remove internal metadata keys from tool result payloads before prompting the final-response LLM.
+ */
+function stripInternalResponseMetadata(value) {
+  const blockedKeys = new Set([
+    'file_id',
+    'fileId',
+    'session_id',
+    'sessionId',
+    'local_tmp_path',
+    'filePath'
+  ]);
+
+  if (Array.isArray(value)) {
+    return value.map(item => stripInternalResponseMetadata(item));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const clean = {};
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (blockedKeys.has(key)) continue;
+    clean[key] = stripInternalResponseMetadata(nestedValue);
+  }
+  return clean;
+}
+
+/**
  * Main agent orchestrator - executes iterative task loop
  *
  * @param {object} opts - Options object
@@ -1830,7 +1859,6 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         if (result && result.type === 'file_reference') {
           if (result.isError === true || result.error === true) {
             chunk = `${sourceLabel}:\n[ERROR SAVED]\n` +
-                    `File ID: ${result.file_id}\n` +
                     `${result.errorType ? `Error Type: ${result.errorType}\n` : ''}` +
                     `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
                     `Error payload was captured for this step.\n`;
@@ -1840,7 +1868,6 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
                     `Data Type: ${result.summary.dataType}\n` +
                     `Fields: ${Array.isArray(result.summary.fields) ? result.summary.fields.join(', ') : ''}\n` +
                     `Sample Record: ${sampleRecordStr}\n` +
-                    `File ID: ${result.file_id}\n` +
                     `${result.queryParameters ? `Query Parameters: ${sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n` : ''}`;
           }
         } else {
@@ -1852,7 +1879,8 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
             Array.isArray(result.items))
             ? result.items
             : result;
-          const resultStr = sanitizeToolNames(JSON.stringify(llmResult, null, 2));
+          const safeLlmResult = stripInternalResponseMetadata(llmResult);
+          const resultStr = sanitizeToolNames(JSON.stringify(safeLlmResult, null, 2));
           chunk = `${sourceLabel}:\n${resultStr}`;
         }
 
