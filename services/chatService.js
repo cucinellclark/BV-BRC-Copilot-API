@@ -51,6 +51,45 @@ function createMessage(role, content, tokenCount) {
   };
 }
 
+function getRagApiName() {
+  const explicitName = process.env.RAG_API_NAME || config.rag_api_name;
+  if (explicitName && String(explicitName).trim()) {
+    return String(explicitName).trim();
+  }
+
+  const ragApiBaseUrl = process.env.RAG_API_URL || config.rag_api_url;
+  if (!ragApiBaseUrl) {
+    return 'rag-api';
+  }
+
+  try {
+    const parsed = new URL(ragApiBaseUrl);
+    return parsed.hostname || 'rag-api';
+  } catch (_error) {
+    return 'rag-api';
+  }
+}
+
+function attachRagChunkMetadata(documentResults, ragDb) {
+  const ragApiName = getRagApiName();
+  return (Array.isArray(documentResults) ? documentResults : []).map((doc) => {
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+      return doc;
+    }
+    const existingMetadata = (doc.metadata && typeof doc.metadata === 'object' && !Array.isArray(doc.metadata))
+      ? doc.metadata
+      : {};
+    return {
+      ...doc,
+      metadata: {
+        ...existingMetadata,
+        rag_api_name: existingMetadata.rag_api_name || ragApiName,
+        rag_db: existingMetadata.rag_db || ragDb || existingMetadata.config_name || null
+      }
+    };
+  });
+}
+
 function getOpenaiClient(modelData) {
   try {
     return setupOpenaiClient(modelData.apiKey, modelData.endpoint);
@@ -251,9 +290,7 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
 
 async function handleRagRequest({ query, rag_db, user_id, model, num_docs, session_id, save_chat = true, include_history = false }) {
   try {
-    const modelData = await getModelData(model);
     const chatSession = await getChatSession(session_id);
-    const chatSessionMessages = chatSession?.messages || [];
 
     const userMessage = createMessage('user', query, 1);
 
@@ -261,17 +298,22 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     const embedding_model = config['embedding_model'];
     const embedding_apiKey = config['embedding_apiKey'];
 
-    // embedding created in distllm
-    var { documents, embedding: user_embedding } = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    // Retrieve contextual documents from the selected RAG database.
+    const ragResult = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
+      ? ragResult.documents
+      : ['No documents found'];
+    const rawDocumentResults = attachRagChunkMetadata(
+      Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents,
+      rag_db
+    );
 
-    if (!documents || documents.length === 0) {
-      documents = ['No documents found'];
-    }
+    const prompt_query = promptManager.formatRagPrompt(query, documents);
+    const system_prompt = promptManager.getSystemPrompt('rag');
 
-    var prompt_query = promptManager.formatRagPrompt(query, documents);
-    var system_prompt = promptManager.getSystemPrompt('rag');
+    console.log('=== FINALIZED RAG PROMPT ===\n', prompt_query, '\n=== END PROMPT ===');
 
-    response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
+    let response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
 
     if (!response) {
       response = 'No response from model';
@@ -281,13 +323,13 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     let systemMessage = null;
     if (system_prompt) {
       systemMessage = createMessage('system', system_prompt);
-      if (documents && documents.length > 0) {
-        systemMessage.documents = documents;
+      if (rawDocumentResults && rawDocumentResults.length > 0) {
+        systemMessage.documents = rawDocumentResults;
       }
     }
 
     const assistantMessage = createMessage('assistant', response, 1);
-    const assistant_embedding = await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, response);
+    await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, response);
 
     if (!chatSession && save_chat) {
       await createChatSession(session_id, user_id);
@@ -313,6 +355,105 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
       throw error;
     }
     throw new LLMServiceError('Failed to handle RAG request', error);
+  }
+}
+
+async function handleRagStreamRequest({
+  query,
+  rag_db,
+  user_id,
+  model,
+  num_docs,
+  session_id,
+  save_chat = true,
+  include_history = false,
+  onChunk
+}) {
+  try {
+    if (typeof onChunk !== 'function') {
+      throw new LLMServiceError('handleRagStreamRequest requires an onChunk callback');
+    }
+
+    const modelData = await getModelData(model);
+    const chatSession = await getChatSession(session_id);
+    const userMessage = createMessage('user', query, 1);
+
+    const embedding_url = config['embedding_url'];
+    const embedding_model = config['embedding_model'];
+    const embedding_apiKey = config['embedding_apiKey'];
+
+    const ragResult = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
+      ? ragResult.documents
+      : ['No documents found'];
+    const rawDocumentResults = attachRagChunkMetadata(
+      Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents,
+      rag_db
+    );
+
+    const prompt_query = promptManager.formatRagPrompt(query, documents);
+    const system_prompt = promptManager.getSystemPrompt('rag') || '';
+
+    console.log('=== FINALIZED RAG PROMPT ===\n', prompt_query, '\n=== END PROMPT ===');
+
+    // Build the same style of context used for non-streaming RAG path.
+    const ctx = {
+      model,
+      prompt: prompt_query,
+      systemPrompt: system_prompt,
+      image: null
+    };
+
+    let assistantBuffer = '';
+    await runModelStream(ctx, modelData, (text) => {
+      if (!text) return;
+      assistantBuffer += text;
+      onChunk(text);
+    });
+
+    if (!assistantBuffer) {
+      assistantBuffer = 'No response from model';
+      onChunk(assistantBuffer);
+    }
+
+    let systemMessage = null;
+    if (system_prompt) {
+      systemMessage = createMessage('system', system_prompt);
+      if (rawDocumentResults && rawDocumentResults.length > 0) {
+        systemMessage.documents = rawDocumentResults;
+      }
+    }
+
+    const assistantMessage = createMessage('assistant', assistantBuffer, 1);
+    await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, assistantBuffer);
+
+    if (!chatSession && save_chat) {
+      await createChatSession(session_id, user_id);
+    }
+
+    const messagesToInsert = systemMessage
+      ? [userMessage, systemMessage, assistantMessage]
+      : [userMessage, assistantMessage];
+
+    if (save_chat) {
+      await addMessagesToSession(session_id, messagesToInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
+    }
+
+    return {
+      message: 'success',
+      userMessage,
+      assistantMessage,
+      ...(systemMessage && { systemMessage })
+    };
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to handle streaming RAG request', error);
   }
 }
 
@@ -687,6 +828,7 @@ module.exports = {
   handleCopilotStreamRequest,
   handleChatRequest,
   handleRagRequest,
+  handleRagStreamRequest,
   handleChatImageRequest,
   handleLambdaDemo,
 

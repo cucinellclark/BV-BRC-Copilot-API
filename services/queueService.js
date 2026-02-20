@@ -1,9 +1,11 @@
 // services/queueService.js
 
 const Queue = require('bull');
+const axios = require('axios');
 const config = require('../config.json');
 const { createLogger } = require('./logger');
 const AgentOrchestrator = require('./agentOrchestrator');
+const mcpConfig = require('./mcp/config.json');
 const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
 
 // Initialize logger
@@ -192,6 +194,7 @@ if (config.queue.enabled !== false) {
             query: job.data.query,
             model: job.data.model,
             session_id: job.data.session_id,
+            job_id: String(jobId),
             user_id: job.data.user_id,
             system_prompt: job.data.system_prompt,
             save_chat: job.data.save_chat,
@@ -572,6 +575,50 @@ async function abortJob(jobId) {
         } else if (state === 'active') {
             // Cooperative cancellation for active jobs; worker exits at safe checkpoints.
             cancellationRequests.add(String(jobId));
+            const cancelToken = `job:${jobId}`;
+
+            // Best-effort MCP-side cancellation signal so long-running server-side
+            // paginated downloads can stop between batches.
+            const bvbrcServerUrl = String(mcpConfig?.servers?.bvbrc_server?.url || "").replace(/\/+$/, "");
+            if (bvbrcServerUrl) {
+                const cancelUrl = `${bvbrcServerUrl}/mcp/cancel-data-download`;
+                const headers = { 'Content-Type': 'application/json' };
+                const authToken = job.data?.auth_token || null;
+                const serverAuth = mcpConfig?.servers?.bvbrc_server?.auth || null;
+
+                if (authToken) {
+                    headers['Authorization'] = authToken.startsWith('Bearer ')
+                        ? authToken
+                        : `Bearer ${authToken}`;
+                } else if (serverAuth) {
+                    headers['Authorization'] = serverAuth.startsWith('Bearer ')
+                        ? serverAuth
+                        : `Bearer ${serverAuth}`;
+                }
+
+                axios.post(
+                    cancelUrl,
+                    { cancel_token: cancelToken },
+                    {
+                        timeout: 5000,
+                        headers,
+                        withCredentials: true
+                    }
+                ).catch((err) => {
+                    logger.warn('Failed to call MCP cancel-data-download route', {
+                        jobId,
+                        cancelUrl,
+                        cancelToken,
+                        error: err.message
+                    });
+                });
+            } else {
+                logger.warn('Skipping MCP cancel route call: bvbrc_server URL missing in MCP config', {
+                    jobId,
+                    cancelToken
+                });
+            }
+
             const progress = jobProgress.get(jobId);
             if (progress) {
                 progress.status = 'cancelling';

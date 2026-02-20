@@ -165,6 +165,25 @@ function applySystemParameterOverrides(toolId, parameters = {}, context = {}, lo
     }
   }
 
+  // Internal cancellation token for long-running data downloads.
+  if (toolId && toolDef?.inputSchema?.properties) {
+    const acceptsCancelToken = !!(
+      Object.prototype.hasOwnProperty.call(toolDef.inputSchema.properties, 'cancel_token')
+    );
+    const internalCancelToken = context?.job_id ? `job:${context.job_id}` : null;
+
+    if (acceptsCancelToken && internalCancelToken) {
+      safeParams.cancel_token = internalCancelToken;
+      logger.debug('[MCP] Injected cancel_token into tool parameters', {
+        toolId,
+        cancelToken: internalCancelToken
+      });
+    } else if (!acceptsCancelToken && safeParams.cancel_token !== undefined) {
+      logger.warn('[MCP] Removing unsupported cancel_token parameter for tool', { toolId });
+      delete safeParams.cancel_token;
+    }
+  }
+
   // Override path parameter for workspace_browse_tool to ensure path is rooted to the
   // authenticated user's workspace. Invalid paths fall back to the user's home directory.
   if (toolId && toolId.includes('workspace_browse_tool')) {
@@ -1139,14 +1158,20 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       }
     }
 
-    // Build JSON-RPC request
+    // Build JSON-RPC request.
+    // NOTE: FastMCP progress notifications (notifications/progress) require a
+    // client-provided progress token in request params metadata.
+    const progressToken = parameters.stream === true
+      ? `progress-${toolId}-${Date.now()}`
+      : null;
     const jsonRpcRequest = {
       jsonrpc: '2.0',
       id: `tool-${toolId}-${Date.now()}`,
       method: 'tools/call',
       params: {
         name: toolDef.name,
-        arguments: parameters
+        arguments: parameters,
+        ...(progressToken ? { _meta: { progressToken } } : {})
       }
     };
 

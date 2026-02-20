@@ -25,7 +25,7 @@
     "tool_execution_timeout": 60000,
     "enable_tool_streaming": true,
     "token_server_allowlist": ["bvbrc_server", "internal_server"],
-    "rag_max_docs": 5,
+    "rag_max_docs": 10,
     "rag_tools": [
       "helpdesk_service_usage"
     ],
