@@ -355,6 +355,9 @@ class FileManager {
     if (normalized.metadata && normalized.metadata.queryParameters) {
       fileReference.queryParameters = normalized.metadata.queryParameters;
     }
+    if (normalized.metadata && normalized.metadata.call && typeof normalized.metadata.call === 'object') {
+      fileReference.call = normalized.metadata.call;
+    }
 
     // Add workspace info if uploaded
     if (workspaceInfo) {

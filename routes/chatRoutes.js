@@ -495,6 +495,7 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
         const toolCall = req.body && typeof req.body.tool_call === 'object' ? req.body.tool_call : {};
         const toolId = req.body.tool_id || toolCall.tool || toolCall.tool_id;
         const parameters = req.body.parameters || req.body.arguments_executed || toolCall.arguments_executed || toolCall.arguments || {};
+        const replayPageSize = req.body.page_size;
         const sessionId = req.body.session_id || null;
         const userId = req.user || req.body.user_id || null;
 
@@ -508,6 +509,14 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
                 message: 'parameters (or tool_call.arguments_executed) must be an object'
             });
         }
+        if (replayPageSize !== undefined) {
+            const parsedPageSize = Number.parseInt(replayPageSize, 10);
+            if (!Number.isFinite(parsedPageSize) || parsedPageSize <= 0) {
+                return res.status(400).json({
+                    message: 'page_size must be a positive integer'
+                });
+            }
+        }
 
         if (!isReplayableTool(toolId)) {
             return res.status(403).json({
@@ -520,7 +529,8 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
             session_id: sessionId,
             user_id: userId,
             auth_token: authHeader,
-            authToken: authHeader
+            authToken: authHeader,
+            replay_page_size: replayPageSize
         };
 
         logger.info('Replaying MCP tool call', {

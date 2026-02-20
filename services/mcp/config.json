@@ -2,7 +2,7 @@
   "servers": {
     "bvbrc_server": {
       "name": "BV-BRC MCP Server",
-      "url": "http://140.221.78.67:8051",
+      "url": "http://140.221.78.67:8053",
       "type": "mcp",
       "auth": null,
       "timeout": 30000,
@@ -41,10 +41,11 @@
       "workspace_get_file_metadata_tool",
       "list_jobs",
       "get_recent_jobs",
-      "bvbrc_query_collection",
+      "bvbrc_search_data",
       "plan_workflow",
       "submit_workflow"
     ],
+    "replay_data_page_size_default": 100,
     "bypass_file_handling_tools": [
       "workspace_browse_tool",
       "plan_workflow",

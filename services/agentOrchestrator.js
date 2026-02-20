@@ -258,6 +258,10 @@ function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
   if (typeof call.backend_method === 'string' && call.backend_method.length > 0) {
     envelope.backend_method = call.backend_method;
   }
+  if (call.rql_replay && typeof call.rql_replay === 'object') {
+    envelope.rql_replay = call.rql_replay;
+  }
+  // TODO(solr_replay): include envelope.solr_replay when we add Solr replay payloads.
   return envelope;
 }
 
@@ -510,8 +514,7 @@ function isDuplicateAction(plannedAction, executionTrace) {
 
   // Only track duplicates for actions where re-running is costly or redundant
   const duplicateTrackedActions = new Set([
-    'bvbrc_server.query_collection',
-    'bvbrc_server.bvbrc_global_data_search'
+    'bvbrc_server.bvbrc_search_data'
   ]);
 
   if (!duplicateTrackedActions.has(plannedAction.action)) {

@@ -39,11 +39,65 @@ function isReplayableTool(toolId) {
     'workspace_get_file_metadata_tool',
     'list_jobs',
     'get_recent_jobs',
-    'bvbrc_query_collection',
+    'bvbrc_search_data',
     'plan_workflow',
     'submit_workflow'
   ];
   return replayableList.some(fragment => toolId.includes(fragment));
+}
+
+function isBvbrcSearchDataTool(toolId) {
+  if (!toolId) return false;
+  return toolId === 'bvbrc_search_data' || toolId.endsWith('.bvbrc_search_data');
+}
+
+function toPositiveInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getReplayPageSize(context = {}) {
+  const contextPageSize = toPositiveInt(context?.replay_page_size);
+  if (contextPageSize) return contextPageSize;
+  const defaultSize = toPositiveInt(config.global_settings?.replay_data_page_size_default);
+  return defaultSize || 100;
+}
+
+function buildRqlReplayMetadata(toolId, parameters, result, pageSize) {
+  if (!result || typeof result !== 'object') return null;
+  if (!isBvbrcSearchDataTool(toolId)) return null;
+  if (result.mode !== 'global') {
+    // TODO(advanced_rql_replay): add RQL replay generation for advanced mode once
+    // planner outputs are normalized into RQL-compatible filter trees.
+    return null;
+  }
+  if (!result.collection || typeof result.collection !== 'string') return null;
+
+  const baseApiUrl = typeof result.data_api_base_url === 'string'
+    ? result.data_api_base_url
+    : 'https://www.bv-brc.org/api';
+  const normalizedBaseUrl = baseApiUrl.replace(/\/+$/, '');
+  const collection = result.collection;
+  const userQuery = (parameters && typeof parameters.user_query === 'string')
+    ? parameters.user_query.trim()
+    : '';
+  if (!userQuery) return null;
+
+  // TODO(solr_replay): add a solr_replay block with cursorMark-compatible payload.
+  return {
+    data_api_url: `${normalizedBaseUrl}/${collection}/`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/rqlquery+x-www-form-urlencoded',
+      'Accept': 'application/json'
+    },
+    rql_query: `keyword(${encodeURIComponent(userQuery)})&limit(${pageSize})`,
+    pagination: {
+      style: 'offset_limit',
+      page_size: pageSize,
+      page_size_param: 'limit'
+    }
+  };
 }
 
 function shouldBypassFileHandling(toolId) {
@@ -1420,6 +1474,8 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     // Attach normalized call metadata so clients can replay selected queries.
     if (result && typeof result === 'object' && !Array.isArray(result)) {
       const replayable = isReplayableTool(toolId);
+      const replayPageSize = getReplayPageSize(context);
+      const rqlReplay = buildRqlReplayMetadata(toolId, parameters, result, replayPageSize);
       if (!result.call || typeof result.call !== 'object') {
         result.call = {
           tool: toolId,
@@ -1428,6 +1484,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         };
       } else if (result.call.replayable === undefined) {
         result.call.replayable = replayable;
+      }
+
+      if (rqlReplay) {
+        result.call.rql_replay = rqlReplay;
       }
     }
 
