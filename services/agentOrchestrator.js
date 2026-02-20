@@ -1127,11 +1127,17 @@ async function executeAgentLoop(opts) {
 
         // Emit SSE event for tool execution result
         if (stream && responseStream) {
+          const emittedToolCall = buildToolCallEnvelope(
+            nextAction.action,
+            safeResult,
+            executionTrace
+          );
           emitSSE(responseStream, 'tool_executed', {
             iteration,
             tool: nextAction.action,
             status: traceEntry.status,
-            result: safeResult
+            result: safeResult,
+            call: emittedToolCall
           });
 
           // Emit a dedicated event for newly-created session files so clients
@@ -1304,7 +1310,7 @@ async function executeAgentLoop(opts) {
         const sanitizedToolResult = { ...finalToolResult };
         delete sanitizedToolResult.chatSummary; // Remove if MCP server provided it
         delete sanitizedToolResult.uiAction; // Remove if MCP server provided it
-        
+
         assistantMessage.tool_call = buildToolCallEnvelope(
           finalResponseSourceTool,
           sanitizedToolResult,
@@ -1689,7 +1695,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
     // Check if this is a direct response (no tools used)
     const isDirectResponse = Object.keys(toolResults).length === 0;
-    
+
     log.info('Generating final response', {
       isDirectResponse,
       toolResultsCount: Object.keys(toolResults).length,
