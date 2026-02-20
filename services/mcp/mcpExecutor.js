@@ -78,10 +78,27 @@ function buildRqlReplayMetadata(toolId, parameters, result, pageSize) {
     : 'https://www.bv-brc.org/api';
   const normalizedBaseUrl = baseApiUrl.replace(/\/+$/, '');
   const collection = result.collection;
+  const serverProvidedRqlQuery = typeof result.rql_query === 'string'
+    ? result.rql_query.trim()
+    : '';
+  const sanitizedKeywords = Array.isArray(result.keywords)
+    ? result.keywords.map(term => String(term || '').trim()).filter(Boolean)
+    : [];
   const userQuery = (parameters && typeof parameters.user_query === 'string')
     ? parameters.user_query.trim()
     : '';
-  if (!userQuery) return null;
+
+  let replayQuery = '';
+  if (serverProvidedRqlQuery) {
+    // Prefer MCP-provided query, which mirrors executed Solr keyword sanitization.
+    replayQuery = serverProvidedRqlQuery;
+  } else if (sanitizedKeywords.length > 0) {
+    replayQuery = `keyword(${encodeURIComponent(sanitizedKeywords.join(' '))})`;
+  } else if (userQuery) {
+    // Fallback only when newer MCP fields are unavailable.
+    replayQuery = `keyword(${encodeURIComponent(userQuery)})`;
+  }
+  if (!replayQuery) return null;
 
   // TODO(solr_replay): add a solr_replay block with cursorMark-compatible payload.
   return {
@@ -91,7 +108,7 @@ function buildRqlReplayMetadata(toolId, parameters, result, pageSize) {
       'Content-Type': 'application/rqlquery+x-www-form-urlencoded',
       'Accept': 'application/json'
     },
-    rql_query: `keyword(${encodeURIComponent(userQuery)})&limit(${pageSize})`,
+    rql_query: replayQuery,
     pagination: {
       style: 'offset_limit',
       page_size: pageSize,

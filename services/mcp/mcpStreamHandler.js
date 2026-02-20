@@ -171,11 +171,6 @@ class McpStreamHandler {
 
           chunkCount++;
           const chunkStr = chunk.toString();
-          if (chunkCount === 1) {
-            console.log(`[MCP Stream Chunk] #${chunkCount} | Full chunk:\n${chunkStr}`);
-          } else {
-            console.log(`[MCP Stream Chunk] #${chunkCount} | Preview: ${chunkStr.substring(0, 50)}`);
-          }
           buffer += chunkStr;
 
           // Split on newlines - each SSE event is separated
