@@ -131,6 +131,133 @@ async function getSessionMessages(sessionId) {
 }
 
 /**
+ * Search stored RAG chunk references from chat session system messages.
+ * @param {object} filters - Search filters
+ * @param {string} [filters.chunk_id] - Chunk identifier
+ * @param {string} [filters.rag_db] - RAG database/config name
+ * @param {string} [filters.rag_api_name] - RAG API name metadata
+ * @param {string} [filters.doc_id] - Source document identifier
+ * @param {string} [filters.source_id] - Source record/file identifier
+ * @param {string} [filters.session_id] - Session identifier
+ * @param {string} [filters.user_id] - User identifier
+ * @param {string} [filters.message_id] - Message identifier
+ * @param {number} [filters.limit=50] - Page size
+ * @param {number} [filters.offset=0] - Page offset
+ * @param {boolean} [filters.include_content=false] - Include chunk text content
+ * @returns {object} Paginated chunk references
+ */
+async function searchRagChunkReferences(filters = {}) {
+  try {
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+
+    const limit = Number.isFinite(filters.limit) ? Math.min(Math.max(filters.limit, 1), 200) : 50;
+    const offset = Number.isFinite(filters.offset) && filters.offset >= 0 ? filters.offset : 0;
+    const includeContent = filters.include_content === true;
+
+    const sessionMatch = {};
+    if (filters.session_id) sessionMatch.session_id = filters.session_id;
+    if (filters.user_id) sessionMatch.user_id = filters.user_id;
+
+    const pipeline = [];
+    if (Object.keys(sessionMatch).length > 0) {
+      pipeline.push({ $match: sessionMatch });
+    }
+
+    pipeline.push(
+      { $unwind: '$messages' },
+      { $match: { 'messages.role': 'system', 'messages.documents': { $type: 'array' } } },
+      { $unwind: '$messages.documents' },
+      { $match: { 'messages.documents': { $type: 'object' } } },
+      {
+        $project: {
+          _id: 0,
+          session_id: '$session_id',
+          user_id: '$user_id',
+          message_id: '$messages.message_id',
+          message_timestamp: '$messages.timestamp',
+          content: '$messages.documents.content',
+          score: '$messages.documents.score',
+          metadata: { $ifNull: ['$messages.documents.metadata', {}] },
+          chunk_id: {
+            $ifNull: [
+              '$messages.documents.metadata.chunk_id',
+              { $ifNull: ['$messages.documents.metadata.chunkId', '$messages.documents.chunk_id'] }
+            ]
+          },
+          doc_id: {
+            $ifNull: [
+              '$messages.documents.metadata.doc_id',
+              { $ifNull: ['$messages.documents.metadata.document_id', '$messages.documents.doc_id'] }
+            ]
+          },
+          source_id: {
+            $ifNull: [
+              '$messages.documents.metadata.source_id',
+              { $ifNull: ['$messages.documents.metadata.source', '$messages.documents.metadata.record_id'] }
+            ]
+          },
+          rag_db: {
+            $ifNull: [
+              '$messages.documents.metadata.rag_db',
+              '$messages.documents.metadata.config_name'
+            ]
+          },
+          rag_api_name: '$messages.documents.metadata.rag_api_name'
+        }
+      }
+    );
+
+    const resultMatch = {};
+    if (filters.chunk_id) resultMatch.chunk_id = filters.chunk_id;
+    if (filters.rag_db) resultMatch.rag_db = filters.rag_db;
+    if (filters.rag_api_name) resultMatch.rag_api_name = filters.rag_api_name;
+    if (filters.doc_id) resultMatch.doc_id = filters.doc_id;
+    if (filters.source_id) resultMatch.source_id = filters.source_id;
+    if (filters.message_id) resultMatch.message_id = filters.message_id;
+    if (Object.keys(resultMatch).length > 0) {
+      pipeline.push({ $match: resultMatch });
+    }
+
+    const countPipeline = [...pipeline, { $count: 'total' }];
+    const totalResult = await chatCollection.aggregate(countPipeline).toArray();
+    const total = totalResult[0]?.total || 0;
+
+    pipeline.push(
+      { $sort: { message_timestamp: -1 } },
+      { $skip: offset },
+      { $limit: limit }
+    );
+
+    const rows = await chatCollection.aggregate(pipeline).toArray();
+    const items = rows.map((row) => ({
+      session_id: row.session_id || null,
+      user_id: row.user_id || null,
+      message_id: row.message_id || null,
+      message_timestamp: row.message_timestamp || null,
+      chunk_id: row.chunk_id || null,
+      doc_id: row.doc_id || null,
+      source_id: row.source_id || null,
+      rag_db: row.rag_db || null,
+      rag_api_name: row.rag_api_name || null,
+      score: Number.isFinite(row.score) ? row.score : null,
+      ...(includeContent ? { content: row.content || '' } : {}),
+      metadata: row.metadata || {}
+    }));
+
+    return {
+      items,
+      total,
+      limit,
+      offset,
+      has_more: offset + items.length < total
+    };
+  } catch (error) {
+    throw new LLMServiceError('Failed to search RAG chunk references', error);
+  }
+}
+
+/**
  * Get session title
  * @param {string} sessionId - The session ID to look up
  * @returns {Array} Array containing the title
@@ -861,6 +988,7 @@ module.exports = {
   getRagData,
   getChatSession,
   getSessionMessages,
+  searchRagChunkReferences,
   getSessionTitle,
   getUserSessions,
   updateSessionTitle,

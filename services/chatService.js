@@ -51,6 +51,45 @@ function createMessage(role, content, tokenCount) {
   };
 }
 
+function getRagApiName() {
+  const explicitName = process.env.RAG_API_NAME || config.rag_api_name;
+  if (explicitName && String(explicitName).trim()) {
+    return String(explicitName).trim();
+  }
+
+  const ragApiBaseUrl = process.env.RAG_API_URL || config.rag_api_url;
+  if (!ragApiBaseUrl) {
+    return 'rag-api';
+  }
+
+  try {
+    const parsed = new URL(ragApiBaseUrl);
+    return parsed.hostname || 'rag-api';
+  } catch (_error) {
+    return 'rag-api';
+  }
+}
+
+function attachRagChunkMetadata(documentResults, ragDb) {
+  const ragApiName = getRagApiName();
+  return (Array.isArray(documentResults) ? documentResults : []).map((doc) => {
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+      return doc;
+    }
+    const existingMetadata = (doc.metadata && typeof doc.metadata === 'object' && !Array.isArray(doc.metadata))
+      ? doc.metadata
+      : {};
+    return {
+      ...doc,
+      metadata: {
+        ...existingMetadata,
+        rag_api_name: existingMetadata.rag_api_name || ragApiName,
+        rag_db: existingMetadata.rag_db || ragDb || existingMetadata.config_name || null
+      }
+    };
+  });
+}
+
 function getOpenaiClient(modelData) {
   try {
     return setupOpenaiClient(modelData.apiKey, modelData.endpoint);
@@ -264,10 +303,15 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
       ? ragResult.documents
       : ['No documents found'];
-    const rawDocumentResults = Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents;
+    const rawDocumentResults = attachRagChunkMetadata(
+      Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents,
+      rag_db
+    );
 
     const prompt_query = promptManager.formatRagPrompt(query, documents);
     const system_prompt = promptManager.getSystemPrompt('rag');
+
+    console.log('=== FINALIZED RAG PROMPT ===\n', prompt_query, '\n=== END PROMPT ===');
 
     let response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
 
@@ -342,10 +386,15 @@ async function handleRagStreamRequest({
     const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
       ? ragResult.documents
       : ['No documents found'];
-    const rawDocumentResults = Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents;
+    const rawDocumentResults = attachRagChunkMetadata(
+      Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents,
+      rag_db
+    );
 
     const prompt_query = promptManager.formatRagPrompt(query, documents);
     const system_prompt = promptManager.getSystemPrompt('rag') || '';
+
+    console.log('=== FINALIZED RAG PROMPT ===\n', prompt_query, '\n=== END PROMPT ===');
 
     // Build the same style of context used for non-streaming RAG path.
     const ctx = {

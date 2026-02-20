@@ -22,7 +22,8 @@ const {
   rateMessage,
   getSessionFilesPaginated,
   getSessionStorageSize,
-  getUserWorkflowIds
+  getUserWorkflowIds,
+  searchRagChunkReferences
 } = require('../services/dbUtils');
 const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
@@ -1297,6 +1298,68 @@ router.post('/add-workflow-to-session', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Error adding workflow to session:', error);
         return res.status(500).json({ message: 'Failed to add workflow to session', error: error.message });
+    }
+});
+
+router.get('/rag-chunk-search', authenticate, async (req, res) => {
+    try {
+        const chunk_id = typeof req.query.chunk_id === 'string' ? req.query.chunk_id.trim() : '';
+        const rag_db = typeof req.query.rag_db === 'string'
+            ? req.query.rag_db.trim()
+            : (typeof req.query.database_name === 'string' ? req.query.database_name.trim() : '');
+        const rag_api_name = typeof req.query.rag_api_name === 'string' ? req.query.rag_api_name.trim() : '';
+        const doc_id = typeof req.query.doc_id === 'string' ? req.query.doc_id.trim() : '';
+        const source_id = typeof req.query.source_id === 'string' ? req.query.source_id.trim() : '';
+        const session_id = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+        const user_id = typeof req.query.user_id === 'string' ? req.query.user_id.trim() : '';
+        const message_id = typeof req.query.message_id === 'string' ? req.query.message_id.trim() : '';
+        const limitParam = parseInt(req.query.limit, 10);
+        const offsetParam = parseInt(req.query.offset, 10);
+        const limit = (!isNaN(limitParam) && limitParam > 0) ? Math.min(limitParam, 200) : 50;
+        const offset = (!isNaN(offsetParam) && offsetParam >= 0) ? offsetParam : 0;
+        const include_content = parseBooleanFlag(req.query.include_content, false);
+
+        if (!chunk_id && !rag_db && !rag_api_name && !doc_id && !source_id && !session_id && !user_id && !message_id) {
+            return res.status(400).json({
+                message: 'At least one filter is required',
+                accepted_filters: ['chunk_id', 'rag_db', 'rag_api_name', 'doc_id', 'source_id', 'session_id', 'user_id', 'message_id']
+            });
+        }
+
+        const result = await searchRagChunkReferences({
+            chunk_id: chunk_id || undefined,
+            rag_db: rag_db || undefined,
+            rag_api_name: rag_api_name || undefined,
+            doc_id: doc_id || undefined,
+            source_id: source_id || undefined,
+            session_id: session_id || undefined,
+            user_id: user_id || undefined,
+            message_id: message_id || undefined,
+            limit,
+            offset,
+            include_content
+        });
+
+        return res.status(200).json({
+            filters: {
+                chunk_id: chunk_id || null,
+                rag_db: rag_db || null,
+                rag_api_name: rag_api_name || null,
+                doc_id: doc_id || null,
+                source_id: source_id || null,
+                session_id: session_id || null,
+                user_id: user_id || null,
+                message_id: message_id || null
+            },
+            total: result.total,
+            limit: result.limit,
+            offset: result.offset,
+            has_more: result.has_more,
+            items: result.items
+        });
+    } catch (error) {
+        console.error('Error searching RAG chunk references:', error);
+        return res.status(500).json({ message: 'Failed to search RAG chunk references', error: error.message });
     }
 });
 
