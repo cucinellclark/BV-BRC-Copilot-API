@@ -16,7 +16,7 @@
       "auth": null,
       "timeout": 30000,
       "description": "Provides access to internal services like code execution and rag databases",
-      "disabled": false
+      "disabled": true
     }
   },
   "global_settings": {

@@ -1395,6 +1395,14 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
 
         const messages = await getSessionMessages(session_id);
 
+        // Debug: Log messages with tool_call before sending to frontend
+        console.log('********** Messages being sent to frontend **********');
+        messages.forEach((msg, idx) => {
+            if (msg.tool_call) {
+                console.log(`Message ${idx} has tool_call:`, msg.tool_call);
+            }
+        });
+
         const workflowRows = mapWorkflowIdsToGridRows(workflowIds);
         const workflowGrid = buildGridEnvelope('workflow', {
             source: 'bvbrc-copilot-session',
@@ -1409,11 +1417,15 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
         });
 
         if (!includeFiles) {
-            return res.status(200).json({
+            const payload = {
                 messages,
                 workflow_ids: workflowIds,
                 workflow_grid: workflowGrid
-            });
+            };
+            console.log('********** ENTIRE PAYLOAD TO CLIENT (without files) **********');
+            console.log(JSON.stringify(payload, null, 2));
+            console.log('********** END PAYLOAD **********');
+            return res.status(200).json(payload);
         }
 
         const [sessionFiles, totalSize] = await Promise.all([
@@ -1421,7 +1433,7 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
             getSessionStorageSize(session_id)
         ]);
 
-        res.status(200).json({
+        const payload = {
             messages,
             workflow_ids: workflowIds,
             workflow_grid: workflowGrid,
@@ -1436,7 +1448,11 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
                 total_files: sessionFiles.total,
                 total_size_bytes: totalSize
             }
-        });
+        };
+        console.log('********** ENTIRE PAYLOAD TO CLIENT (with files) **********');
+        console.log(JSON.stringify(payload, null, 2));
+        console.log('********** END PAYLOAD **********');
+        res.status(200).json(payload);
     } catch (error) {
         console.error('Error retrieving session messages:', error);
         res.status(500).json({ message: 'Failed to retrieve session messages', error: error.message });
