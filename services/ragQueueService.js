@@ -81,14 +81,20 @@ if (config.queue.enabled !== false) {
             });
 
             await job.progress(20);
-            const response = await ChatService.handleRagRequest({
+            const response = await ChatService.handleRagStreamRequest({
                 query: job.data.query,
                 rag_db: job.data.rag_db,
                 user_id: job.data.user_id,
                 model: job.data.model,
                 num_docs: job.data.num_docs,
                 session_id: job.data.session_id,
-                save_chat: job.data.save_chat
+                save_chat: job.data.save_chat,
+                onChunk: (chunk) => {
+                    safeStreamEmit(jobId, 'final_response', {
+                        job_id: jobId,
+                        chunk
+                    });
+                }
             });
             await job.progress(100);
 
@@ -99,10 +105,6 @@ if (config.queue.enabled !== false) {
                 jobProgress.set(jobId, progress);
             }
 
-            safeStreamEmit(jobId, 'final_response', {
-                job_id: jobId,
-                response
-            });
             safeStreamEmit(jobId, 'done', {
                 job_id: jobId,
                 session_id: job.data.session_id,

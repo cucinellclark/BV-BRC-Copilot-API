@@ -314,6 +314,100 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
   }
 }
 
+async function handleRagStreamRequest({
+  query,
+  rag_db,
+  user_id,
+  model,
+  num_docs,
+  session_id,
+  save_chat = true,
+  include_history = false,
+  onChunk
+}) {
+  try {
+    if (typeof onChunk !== 'function') {
+      throw new LLMServiceError('handleRagStreamRequest requires an onChunk callback');
+    }
+
+    const modelData = await getModelData(model);
+    const chatSession = await getChatSession(session_id);
+    const userMessage = createMessage('user', query, 1);
+
+    const embedding_url = config['embedding_url'];
+    const embedding_model = config['embedding_model'];
+    const embedding_apiKey = config['embedding_apiKey'];
+
+    const ragResult = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
+      ? ragResult.documents
+      : ['No documents found'];
+    const rawDocumentResults = Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents;
+
+    const prompt_query = promptManager.formatRagPrompt(query, documents);
+    const system_prompt = promptManager.getSystemPrompt('rag') || '';
+
+    // Build the same style of context used for non-streaming RAG path.
+    const ctx = {
+      model,
+      prompt: prompt_query,
+      systemPrompt: system_prompt,
+      image: null
+    };
+
+    let assistantBuffer = '';
+    await runModelStream(ctx, modelData, (text) => {
+      if (!text) return;
+      assistantBuffer += text;
+      onChunk(text);
+    });
+
+    if (!assistantBuffer) {
+      assistantBuffer = 'No response from model';
+      onChunk(assistantBuffer);
+    }
+
+    let systemMessage = null;
+    if (system_prompt) {
+      systemMessage = createMessage('system', system_prompt);
+      if (rawDocumentResults && rawDocumentResults.length > 0) {
+        systemMessage.documents = rawDocumentResults;
+      }
+    }
+
+    const assistantMessage = createMessage('assistant', assistantBuffer, 1);
+    await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, assistantBuffer);
+
+    if (!chatSession && save_chat) {
+      await createChatSession(session_id, user_id);
+    }
+
+    const messagesToInsert = systemMessage
+      ? [userMessage, systemMessage, assistantMessage]
+      : [userMessage, assistantMessage];
+
+    if (save_chat) {
+      await addMessagesToSession(session_id, messagesToInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
+    }
+
+    return {
+      message: 'success',
+      userMessage,
+      assistantMessage,
+      ...(systemMessage && { systemMessage })
+    };
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to handle streaming RAG request', error);
+  }
+}
+
 async function handleChatImageRequest({ query, model, session_id, user_id, image, system_prompt, save_chat = true, include_history = false }) {
   try {
     const modelData = await getModelData(model);
@@ -685,6 +779,7 @@ module.exports = {
   handleCopilotStreamRequest,
   handleChatRequest,
   handleRagRequest,
+  handleRagStreamRequest,
   handleChatImageRequest,
   handleLambdaDemo,
 
