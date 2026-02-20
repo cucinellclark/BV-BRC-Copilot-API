@@ -251,9 +251,7 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
 
 async function handleRagRequest({ query, rag_db, user_id, model, num_docs, session_id, save_chat = true, include_history = false }) {
   try {
-    const modelData = await getModelData(model);
     const chatSession = await getChatSession(session_id);
-    const chatSessionMessages = chatSession?.messages || [];
 
     const userMessage = createMessage('user', query, 1);
 
@@ -261,17 +259,17 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     const embedding_model = config['embedding_model'];
     const embedding_apiKey = config['embedding_apiKey'];
 
-    // embedding created in distllm
-    var { documents, embedding: user_embedding } = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    // Retrieve contextual documents from the selected RAG database.
+    const ragResult = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
+      ? ragResult.documents
+      : ['No documents found'];
+    const rawDocumentResults = Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents;
 
-    if (!documents || documents.length === 0) {
-      documents = ['No documents found'];
-    }
+    const prompt_query = promptManager.formatRagPrompt(query, documents);
+    const system_prompt = promptManager.getSystemPrompt('rag');
 
-    var prompt_query = promptManager.formatRagPrompt(query, documents);
-    var system_prompt = promptManager.getSystemPrompt('rag');
-
-    response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
+    let response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
 
     if (!response) {
       response = 'No response from model';
@@ -281,13 +279,13 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     let systemMessage = null;
     if (system_prompt) {
       systemMessage = createMessage('system', system_prompt);
-      if (documents && documents.length > 0) {
-        systemMessage.documents = documents;
+      if (rawDocumentResults && rawDocumentResults.length > 0) {
+        systemMessage.documents = rawDocumentResults;
       }
     }
 
     const assistantMessage = createMessage('assistant', response, 1);
-    const assistant_embedding = await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, response);
+    await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, response);
 
     if (!chatSession && save_chat) {
       await createChatSession(session_id, user_id);

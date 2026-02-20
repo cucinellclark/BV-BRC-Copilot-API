@@ -2,6 +2,7 @@
 
 const { OpenAI } = require('openai');
 const fetch = require('node-fetch');
+const config = require('../config.json');
 
 // ========================================
 // Error Handling
@@ -317,29 +318,55 @@ async function queryRequestEmbeddingTfidf(query, vectorizer, endpoint) {
 
 async function queryRag(query, rag_db, user_id, model, num_docs, session_id) {
     try {
-        if (!query || !rag_db || !user_id || !model) {
+        if (!query || !rag_db) {
             const missingParams = [];
             if (!query) missingParams.push('query');
             if (!rag_db) missingParams.push('rag_db');
-            if (!user_id) missingParams.push('user_id');
-            if (!model) missingParams.push('model');
             throw new LLMServiceError(`Missing required parameters for queryRag: ${missingParams.join(', ')}`);
         }
 
-        const res = await postJson('http://0.0.0.0:5000/rag', {
+        const ragApiBaseUrl = (process.env.RAG_API_URL || config.rag_api_url || 'http://0.0.0.0:8001').replace(/\/+$/, '');
+        const encodedDatabase = encodeURIComponent(rag_db);
+        const ragQueryUrl = `${ragApiBaseUrl}/query/${encodedDatabase}`;
+        const parsedTopK = Number.parseInt(num_docs, 10);
+        const requestPayload = {
             query,
-            rag_db,
-            user_id,
-            model,
-            num_docs,
-            session_id
-        });
+            ...(Number.isInteger(parsedTopK) && parsedTopK > 0 ? { top_k: parsedTopK } : {})
+        };
+
+        const res = await postJson(ragQueryUrl, requestPayload);
 
         if (!res) {
             throw new LLMServiceError('Invalid response format from RAG API: No response received');
         }
+        if (!Array.isArray(res.documents)) {
+            throw new LLMServiceError('Invalid response format from RAG API: documents must be an array');
+        }
 
-        return res;
+        // Keep a string array for backwards compatibility with existing prompt formatting code.
+        const documents = res.documents
+            .map((doc) => {
+                if (typeof doc === 'string') {
+                    return doc;
+                }
+                if (doc && typeof doc === 'object') {
+                    if (typeof doc.content === 'string') {
+                        return doc.content;
+                    }
+                    if (typeof doc.text === 'string') {
+                        return doc.text;
+                    }
+                }
+                return '';
+            })
+            .filter(Boolean);
+
+        return {
+            documents: documents.length > 0 ? documents : ['No documents found'],
+            document_results: res.documents,
+            embedding: res.embedding || null,
+            database: res.database || rag_db
+        };
     } catch (error) {
         if (error instanceof LLMServiceError) {
             throw error;

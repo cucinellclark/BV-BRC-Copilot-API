@@ -4,6 +4,7 @@ const axios = require('axios');
 const FormData = require('form-data');
 const fs = require('fs');
 const path = require('path');
+const config = require('../config.json');
 
 /**
  * WorkspaceService - Direct client for BV-BRC Workspace API
@@ -12,6 +13,24 @@ const path = require('path');
 class WorkspaceService {
   constructor(workspaceUrl = 'https://p3.theseed.org/services/Workspace') {
     this.workspaceUrl = workspaceUrl.replace(/\/$/, ''); // Remove trailing slash
+    this.workspaceRpcTimeoutMs = this.resolveTimeoutMs(
+      config?.workspace_timeout_seconds ??
+      config?.fileManager?.workspace_timeout_seconds,
+      120
+    );
+    this.workspaceUploadTimeoutMs = this.resolveTimeoutMs(
+      config?.workspace_upload_timeout_seconds ??
+      config?.fileManager?.workspace_upload_timeout_seconds,
+      120
+    );
+  }
+
+  resolveTimeoutMs(value, fallbackSeconds) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed * 1000);
+    }
+    return fallbackSeconds * 1000;
   }
 
   /**
@@ -222,7 +241,7 @@ class WorkspaceService {
       const startTime = Date.now();
       const response = await axios.post(this.workspaceUrl, payload, {
         headers,
-        timeout: 30000
+        timeout: this.workspaceRpcTimeoutMs
       });
       const duration = Date.now() - startTime;
 
@@ -404,7 +423,7 @@ class WorkspaceService {
       const startTime = Date.now();
       const response = await axios.put(uploadUrl, form, {
         headers,
-        timeout: 60000, // 60 second timeout for large files
+        timeout: this.workspaceUploadTimeoutMs,
         maxContentLength: Infinity,
         maxBodyLength: Infinity
       });

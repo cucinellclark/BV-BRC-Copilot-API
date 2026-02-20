@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const { createLogger } = require('../logger');
+const { emitSSE } = require('../sseUtils');
 
 function createCancellationError(checkpoint = 'unknown') {
   const error = new Error(`Job cancelled by user (${checkpoint})`);
@@ -14,6 +15,30 @@ function throwIfCancelled(context = {}, checkpoint = 'unknown') {
   if (typeof context?.shouldCancel === 'function' && context.shouldCancel()) {
     throw createCancellationError(checkpoint);
   }
+}
+
+function isAxiosCancelledError(error) {
+  return (
+    error?.name === 'CanceledError' ||
+    error?.code === 'ERR_CANCELED' ||
+    error?.message === 'canceled'
+  );
+}
+
+function startCancellationWatcher(context, abortController) {
+  if (typeof context?.shouldCancel !== 'function') {
+    return () => {};
+  }
+  const interval = setInterval(() => {
+    try {
+      if (context.shouldCancel() && !abortController.signal.aborted) {
+        abortController.abort();
+      }
+    } catch (_) {
+      // Ignore cancellation watcher errors.
+    }
+  }, 200);
+  return () => clearInterval(interval);
 }
 
 /**
@@ -60,46 +85,70 @@ class McpStreamHandler {
    * Execute non-streaming request (original behavior)
    */
   async executeNonStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, context, log) {
+    const abortController = new AbortController();
+    const stopCancellationWatcher = startCancellationWatcher(context, abortController);
     throwIfCancelled(context, 'before_non_streaming_request');
-    const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
-      timeout,
-      headers,
-      withCredentials: true
-    });
-    throwIfCancelled(context, 'after_non_streaming_request');
+    try {
+      const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
+        timeout,
+        headers,
+        withCredentials: true,
+        signal: abortController.signal
+      });
+      throwIfCancelled(context, 'after_non_streaming_request');
 
-    log.debug('Non-streaming response received');
-    return {
-      streaming: false,
-      data: response.data
-    };
+      log.debug('Non-streaming response received');
+      return {
+        streaming: false,
+        data: response.data
+      };
+    } catch (error) {
+      if (isAxiosCancelledError(error) || (typeof context?.shouldCancel === 'function' && context.shouldCancel())) {
+        throw createCancellationError('during_non_streaming_request');
+      }
+      throw error;
+    } finally {
+      stopCancellationWatcher();
+    }
   }
 
   /**
    * Execute streaming request and accumulate batches
    */
   async executeStreaming(mcpEndpoint, jsonRpcRequest, headers, timeout, context, toolId, log) {
+    const abortController = new AbortController();
+    const stopCancellationWatcher = startCancellationWatcher(context, abortController);
     log.info('Starting streaming request');
     throwIfCancelled(context, 'before_streaming_request');
 
-    // Use streaming response type
-    const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
-      timeout: timeout * 10, // Increase timeout for streaming (10x)
-      headers,
-      withCredentials: true,
-      responseType: 'stream'
-    });
-    throwIfCancelled(context, 'after_streaming_request');
+    try {
+      // Use streaming response type
+      const response = await axios.post(mcpEndpoint, jsonRpcRequest, {
+        timeout: timeout * 10, // Increase timeout for streaming (10x)
+        headers,
+        withCredentials: true,
+        responseType: 'stream',
+        signal: abortController.signal
+      });
+      throwIfCancelled(context, 'after_streaming_request');
 
-    log.debug('Streaming response received, accumulating batches');
+      log.debug('Streaming response received, accumulating batches');
 
-    // Accumulate batches from stream
-    const result = await this.accumulateBatches(response.data, context, toolId, log);
+      // Accumulate batches from stream
+      const result = await this.accumulateBatches(response.data, context, toolId, log);
 
-    return {
-      streaming: true,
-      data: result
-    };
+      return {
+        streaming: true,
+        data: result
+      };
+    } catch (error) {
+      if (isAxiosCancelledError(error) || (typeof context?.shouldCancel === 'function' && context.shouldCancel())) {
+        throw createCancellationError('during_streaming_request');
+      }
+      throw error;
+    } finally {
+      stopCancellationWatcher();
+    }
   }
 
   /**
@@ -112,6 +161,7 @@ class McpStreamHandler {
       let batchCount = 0;
       let totalSize = 0;
       let lastBatch = null;
+      let finalToolResult = null;
       let error = null;
       let chunkCount = 0;
 
@@ -169,6 +219,28 @@ class McpStreamHandler {
                 continue;
               }
 
+              // Forward MCP progress notifications to client SSE stream.
+              if (parsed && parsed.method === 'notifications/progress' && parsed.params) {
+                const progress = Number(parsed.params.progress) || 0;
+                const total = Number.isFinite(Number(parsed.params.total))
+                  ? Number(parsed.params.total)
+                  : null;
+                const percentage = total && total > 0
+                  ? Math.floor((progress / total) * 100)
+                  : null;
+                if (context?.responseStream) {
+                  emitSSE(context.responseStream, 'query_progress', {
+                    tool: toolId,
+                    current: progress,
+                    total: total,
+                    percentage: percentage,
+                    message: parsed.params.message || null,
+                    timestamp: new Date().toISOString()
+                  });
+                }
+                continue;
+              }
+
               // FastMCP wraps generator yields in JSON-RPC format
               // Structure: { jsonrpc: "2.0", id: "...", result: "..." }
               // Where result is a JSON string that needs parsing
@@ -190,6 +262,16 @@ class McpStreamHandler {
                 } else {
                   // Result is already an object
                   batch = parsed.result;
+                }
+                if (
+                  batch &&
+                  typeof batch === 'object' &&
+                  (batch.content || batch.structuredContent || batch.isError !== undefined)
+                ) {
+                  // Final FastMCP tool result wrapper. Keep it as-is so executor can
+                  // run normal unwrapMcpContent processing downstream.
+                  finalToolResult = batch;
+                  continue;
                 }
               } else if (parsed && (parsed.results !== undefined || parsed.batchNumber !== undefined || parsed.count !== undefined)) {
                 // Direct batch object (not wrapped in JSON-RPC)
@@ -302,6 +384,13 @@ class McpStreamHandler {
             }
           }
         } catch (err) {
+          if (err?.isCancelled) {
+            try {
+              stream.destroy(err);
+            } catch (_) {
+              // Ignore stream destroy errors on cancellation.
+            }
+          }
           log.error('Error processing chunk', { error: err.message });
           reject(err);
         }
@@ -325,6 +414,10 @@ class McpStreamHandler {
           console.log(`[MCP Stream] Stream ended with error:`, errorResult);
           resolve(errorResult);
         } else if (batches.length === 0) {
+          if (finalToolResult) {
+            resolve(finalToolResult);
+            return;
+          }
           // No batches received
           console.log(`[MCP Stream] Stream ended with no batches`);
           resolve({

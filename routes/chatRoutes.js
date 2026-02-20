@@ -28,6 +28,7 @@ const authenticate = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
 const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback, abortJob } = require('../services/queueService');
+const { addRagJob, getRagJobStatus, getRagQueueStats, registerRagStreamCallback, abortRagJob } = require('../services/ragQueueService');
 const { writeSseEvent } = require('../services/sseUtils');
 const { executeMcpTool, isReplayableTool } = require('../services/mcp/mcpExecutor');
 const config = require('../config.json');
@@ -42,6 +43,27 @@ function parseBooleanFlag(value, defaultValue = false) {
         if (['false', '0', 'no'].includes(normalized)) return false;
     }
     return defaultValue;
+}
+
+function parseRagRequestPayload(body = {}) {
+    const query = typeof body.query === 'string' ? body.query.trim() : '';
+    const model = typeof body.model === 'string' ? body.model.trim() : '';
+    const user_id = typeof body.user_id === 'string' ? body.user_id.trim() : body.user_id;
+    const session_id = typeof body.session_id === 'string' ? body.session_id.trim() : body.session_id;
+    const rag_db = body.rag_db || body.database_name || body.db_name;
+    const parsedNumDocs = Number.parseInt(body.num_docs, 10);
+    const num_docs = Number.isInteger(parsedNumDocs) && parsedNumDocs > 0 ? parsedNumDocs : null;
+    const save_chat = parseBooleanFlag(body.save_chat, true);
+
+    return {
+        query,
+        model,
+        user_id,
+        session_id,
+        rag_db,
+        num_docs,
+        save_chat
+    };
 }
 
 function buildGridEnvelope(entityType, opts = {}) {
@@ -797,6 +819,189 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
     }
 });
 
+// ========== RAG QUEUE ROUTES ==========
+router.get('/rag/job/:jobId/status', authenticate, async (req, res) => {
+    const logger = createLogger('RagJobStatus');
+    try {
+        const { jobId } = req.params;
+        const jobStatus = await getRagJobStatus(jobId);
+
+        if (!jobStatus.found) {
+            return res.status(404).json({
+                message: 'RAG job not found',
+                job_id: jobId
+            });
+        }
+
+        return res.status(200).json(jobStatus);
+    } catch (error) {
+        logger.error('Failed to get RAG job status', {
+            error: error.message,
+            jobId: req.params.jobId
+        });
+        return res.status(500).json({
+            message: 'Failed to retrieve RAG job status',
+            error: error.message
+        });
+    }
+});
+
+router.get('/rag/queue/stats', authenticate, async (req, res) => {
+    const logger = createLogger('RagQueueStats');
+    try {
+        const stats = await getRagQueueStats();
+        return res.status(200).json({
+            message: 'RAG queue statistics',
+            timestamp: new Date().toISOString(),
+            stats
+        });
+    } catch (error) {
+        logger.error('Failed to get RAG queue stats', { error: error.message });
+        return res.status(500).json({
+            message: 'Failed to retrieve RAG queue statistics',
+            error: error.message
+        });
+    }
+});
+
+router.post('/rag/job/:jobId/abort', authenticate, async (req, res) => {
+    const logger = createLogger('RagJobAbort');
+    try {
+        const { jobId } = req.params;
+        const result = await abortRagJob(jobId);
+
+        if (!result.found) {
+            return res.status(404).json({
+                message: 'RAG job not found',
+                job_id: jobId
+            });
+        }
+        if (!result.success) {
+            return res.status(409).json({
+                message: result.message,
+                job_id: jobId,
+                previous_state: result.previousState
+            });
+        }
+        return res.status(200).json({
+            message: result.message,
+            job_id: jobId,
+            previous_state: result.previousState
+        });
+    } catch (error) {
+        logger.error('Failed to abort RAG job', {
+            error: error.message,
+            jobId: req.params.jobId
+        });
+        return res.status(500).json({
+            message: 'Failed to abort RAG job',
+            error: error.message
+        });
+    }
+});
+
+router.get('/rag/job/:jobId/stream', authenticate, async (req, res) => {
+    const logger = createLogger('RagJobStream');
+    const { jobId } = req.params;
+
+    try {
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        res.flushHeaders();
+        res.write(': connected\n\n');
+        if (typeof res.flush === 'function') {
+            res.flush();
+        }
+
+        const jobStatus = await getRagJobStatus(jobId);
+        if (!jobStatus.found) {
+            writeSseEvent(res, 'error', { message: 'RAG job not found' });
+            res.end();
+            return;
+        }
+
+        const state = jobStatus.status;
+        if (state === 'completed') {
+            writeSseEvent(res, 'final_response', {
+                job_id: jobId,
+                response: jobStatus.result?.response || null
+            });
+            writeSseEvent(res, 'done', {
+                job_id: jobId,
+                session_id: jobStatus.data?.session_id || null
+            });
+            res.end();
+            return;
+        }
+        if (state === 'failed' || state === 'cancelled') {
+            writeSseEvent(res, 'error', {
+                job_id: jobId,
+                error: jobStatus.error?.message || `RAG job ${state}`
+            });
+            res.end();
+            return;
+        }
+
+        const streamCallback = (eventType, data) => {
+            if (res.writableEnded || res.destroyed) return;
+            try {
+                writeSseEvent(res, eventType, data);
+                if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
+                    res.end();
+                }
+            } catch (streamError) {
+                logger.error('RAG stream write failed', { error: streamError.message });
+            }
+        };
+
+        registerRagStreamCallback(jobId, streamCallback);
+        writeSseEvent(res, state === 'active' ? 'started' : 'queued', {
+            job_id: jobId,
+            status: state,
+            progress: jobStatus.progress,
+            message: state === 'active' ? 'Processing' : 'Waiting in queue',
+            session_id: jobStatus.data?.session_id || null
+        });
+
+        let heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            try {
+                res.write(': heartbeat\n\n');
+                if (typeof res.flush === 'function') {
+                    res.flush();
+                }
+            } catch (_error) {
+                clearInterval(heartbeatInterval);
+            }
+        }, 15000);
+
+        req.on('close', () => {
+            clearInterval(heartbeatInterval);
+        });
+    } catch (error) {
+        logger.error('RAG stream reconnection failed', {
+            jobId,
+            error: error.message
+        });
+        try {
+            writeSseEvent(res, 'error', {
+                message: 'RAG stream reconnection failed',
+                error: error.message
+            });
+            res.end();
+        } catch (_e) {
+            // Connection already closed
+        }
+    }
+});
+
 router.post('/chat', authenticate, async (req, res) => {
     const logger = createLogger('ChatRoute', req.body.session_id);
 
@@ -828,13 +1033,176 @@ router.post('/chat', authenticate, async (req, res) => {
 });
 
 router.post('/rag', authenticate, async (req, res) => {
+    const logger = createLogger('RagRoute', req.body.session_id);
+
     try {
-        const { query, rag_db, user_id, model, num_docs, session_id } = req.body;
-        const response = await ChatService.handleRagRequest({ query, rag_db, num_docs, user_id, model, session_id });
-        res.status(200).json(response);
+        const {
+            query,
+            model,
+            user_id,
+            session_id,
+            rag_db,
+            num_docs,
+            save_chat
+        } = parseRagRequestPayload(req.body);
+
+        if (!query || !model || !user_id || !rag_db) {
+            return res.status(400).json({
+                message: 'Missing required fields',
+                required: ['query', 'model', 'user_id', 'rag_db'],
+                accepted_rag_db_fields: ['rag_db', 'database_name', 'db_name']
+            });
+        }
+
+        logger.info('RAG request received', {
+            user_id,
+            model,
+            session_id,
+            rag_db,
+            num_docs
+        });
+
+        const job = await addRagJob({
+            query,
+            rag_db,
+            num_docs,
+            user_id,
+            model,
+            session_id,
+            save_chat
+        });
+
+        logger.info('RAG job queued successfully', {
+            job_id: job.id,
+            session_id,
+            rag_db
+        });
+
+        return res.status(202).json({
+            message: 'RAG job queued successfully',
+            job_id: job.id,
+            session_id,
+            status_endpoint: `/copilot-api/chatbrc/rag/job/${job.id}/status`,
+            stream_endpoint: `/copilot-api/chatbrc/rag/job/${job.id}/stream`,
+            poll_interval_ms: config.agent?.job_poll_interval || 1000
+        });
     } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
+        logger.error('RAG request failed', {
+            error: error.message,
+            stack: error.stack
+        });
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+
+router.post('/rag/stream', authenticate, async (req, res) => {
+    const logger = createLogger('RagStreamRoute', req.body.session_id);
+
+    try {
+        const {
+            query,
+            model,
+            user_id,
+            session_id,
+            rag_db,
+            num_docs,
+            save_chat
+        } = parseRagRequestPayload(req.body);
+
+        if (!query || !model || !user_id || !rag_db) {
+            return res.status(400).json({
+                message: 'Missing required fields',
+                required: ['query', 'model', 'user_id', 'rag_db'],
+                accepted_rag_db_fields: ['rag_db', 'database_name', 'db_name']
+            });
+        }
+
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        const streamCallback = (eventType, data) => {
+            if (res.writableEnded || res.destroyed) return;
+            try {
+                writeSseEvent(res, eventType, data);
+                if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
+                    res.end();
+                }
+            } catch (_error) {
+                // Connection already closed
+            }
+        };
+
+        res.write(': connected\n\n');
+        if (typeof res.flush === 'function') {
+            res.flush();
+        }
+
+        const job = await addRagJob({
+            query,
+            rag_db,
+            num_docs,
+            user_id,
+            model,
+            session_id,
+            save_chat
+        }, {
+            streamCallback
+        });
+
+        logger.info('Streaming RAG job queued', {
+            jobId: job.id,
+            session_id,
+            user_id
+        });
+
+        let heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            try {
+                res.write(': heartbeat\n\n');
+                if (typeof res.flush === 'function') {
+                    res.flush();
+                }
+            } catch (_error) {
+                clearInterval(heartbeatInterval);
+            }
+        }, 15000);
+
+        req.on('close', () => {
+            clearInterval(heartbeatInterval);
+        });
+    } catch (error) {
+        logger.error('Failed to queue streaming RAG job', {
+            error: error.message,
+            stack: error.stack
+        });
+
+        if (res.headersSent) {
+            try {
+                writeSseEvent(res, 'error', {
+                    message: 'Failed to queue streaming RAG job',
+                    error: error.message
+                });
+                res.end();
+            } catch (_e) {
+                // Connection already closed
+            }
+        } else {
+            res.status(500).json({
+                message: 'Failed to queue streaming RAG job',
+                error: error.message
+            });
+        }
     }
 });
 
