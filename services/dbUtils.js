@@ -124,7 +124,12 @@ async function getSessionMessages(sessionId) {
       })
       .sort({ timestamp: -1 })
       .toArray();
-    return result;
+    
+    // Extract messages array from the first session document
+    if (result && result.length > 0 && result[0].messages) {
+      return result[0].messages;
+    }
+    return [];
   } catch (error) {
     throw new LLMServiceError('Failed to get session messages', error);
   }
