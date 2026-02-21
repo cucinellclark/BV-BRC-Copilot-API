@@ -78,27 +78,35 @@ function buildRqlReplayMetadata(toolId, parameters, result, pageSize) {
     : 'https://www.bv-brc.org/api';
   const normalizedBaseUrl = baseApiUrl.replace(/\/+$/, '');
   const collection = result.collection;
-  const serverProvidedRqlQuery = typeof result.rql_query === 'string'
+  const serverReplayQuery = (typeof result.rql_replay_query === 'string')
+    ? result.rql_replay_query.trim()
+    : '';
+  const serverRqlQuery = (typeof result.rql_query === 'string')
     ? result.rql_query.trim()
     : '';
   const sanitizedKeywords = Array.isArray(result.keywords)
     ? result.keywords.map(term => String(term || '').trim()).filter(Boolean)
     : [];
-  const userQuery = (parameters && typeof parameters.user_query === 'string')
-    ? parameters.user_query.trim()
-    : '';
 
-  let replayQuery = '';
-  if (serverProvidedRqlQuery) {
-    // Prefer MCP-provided query, which mirrors executed Solr keyword sanitization.
-    replayQuery = serverProvidedRqlQuery;
+  let normalizedRql = '';
+  if (serverReplayQuery) {
+    normalizedRql = serverReplayQuery.replace(/^\?/, '');
+  } else if (serverRqlQuery) {
+    normalizedRql = serverRqlQuery;
   } else if (sanitizedKeywords.length > 0) {
-    replayQuery = `keyword(${encodeURIComponent(sanitizedKeywords.join(' '))})`;
-  } else if (userQuery) {
-    // Fallback only when newer MCP fields are unavailable.
-    replayQuery = `keyword(${encodeURIComponent(userQuery)})`;
+    const keywordText = sanitizedKeywords.join(' ').replace(/\)/g, '\\)');
+    normalizedRql = `keyword(${keywordText})`;
+  } else {
+    return null;
   }
-  if (!replayQuery) return null;
+
+  if (Number.isInteger(pageSize) && pageSize > 0) {
+    if (/limit\(\d+\)/i.test(normalizedRql)) {
+      normalizedRql = normalizedRql.replace(/limit\(\d+\)/ig, `limit(${pageSize})`);
+    } else {
+      normalizedRql = `${normalizedRql}&limit(${pageSize})`;
+    }
+  }
 
   // TODO(solr_replay): add a solr_replay block with cursorMark-compatible payload.
   return {
@@ -108,7 +116,7 @@ function buildRqlReplayMetadata(toolId, parameters, result, pageSize) {
       'Content-Type': 'application/rqlquery+x-www-form-urlencoded',
       'Accept': 'application/json'
     },
-    rql_query: replayQuery,
+    rql_query: normalizedRql,
     pagination: {
       style: 'offset_limit',
       page_size: pageSize,
@@ -121,6 +129,22 @@ function shouldBypassFileHandling(toolId) {
   if (!toolId) return false;
   const bypassList = config.global_settings?.bypass_file_handling_tools || [];
   return bypassList.some(fragment => toolId.includes(fragment));
+}
+
+function getToolPolicy(toolId) {
+  if (!toolId) return null;
+  const policyMap = config.global_settings?.tool_policies;
+  if (!policyMap || typeof policyMap !== 'object') return null;
+
+  for (const [fragment, policy] of Object.entries(policyMap)) {
+    if (!policy || typeof policy !== 'object') continue;
+    const matches = toolId === fragment || toolId.endsWith(`.${fragment}`) || toolId.includes(fragment);
+    if (matches) {
+      return { ...policy, _matched_fragment: fragment };
+    }
+  }
+
+  return null;
 }
 
 function isRunPythonCodeTool(toolId) {
@@ -1153,6 +1177,8 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       throw new Error(`Tool not found: ${toolId}`);
     }
 
+    const toolPolicy = getToolPolicy(toolId);
+
     // Never trust the LLM with certain IDs (e.g., internal_server session_id)
     // Apply overrides AFTER resolving tool definition so we can honor the schema.
     // Include authToken in context for parameter overrides
@@ -1205,8 +1231,10 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       }
     }
 
-    // Force TSV format for tools that require it
-    if (shouldForceTsvFormat(toolId)) {
+    // Force TSV format only for tools that explicitly support format selection.
+    if (shouldForceTsvFormat(toolId) &&
+        toolDef?.inputSchema?.properties &&
+        Object.prototype.hasOwnProperty.call(toolDef.inputSchema.properties, 'format')) {
       if (parameters.format !== 'tsv') {
         log.info('Overriding format parameter - forcing TSV format', {
           toolId,
@@ -1540,14 +1568,16 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     // Process result through file manager if session_id is available
     // All results are now saved to disk and return a file reference
     // Unless the tool is configured to bypass file handling
-    if (context.session_id && !shouldBypassFileHandling(toolId)) {
+    const bypassFileHandling = shouldBypassFileHandling(toolId);
+    if (context.session_id && !bypassFileHandling) {
       log.debug('Processing result for session', { session_id: context.session_id });
 
       // Build context for file manager (includes workspace upload info)
       const fileManagerContext = {
         authToken: authToken,
         user_id: context.user_id,
-        session_id: context.session_id
+        session_id: context.session_id,
+        toolPolicy
       };
 
       // Pass batch count as estimated pages for streaming responses
@@ -1577,11 +1607,12 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         log.warn('Unexpected result type from fileManager', { type: processedResult.type });
         return processedResult;
       }
-    } else if (shouldBypassFileHandling(toolId)) {
+    } else if (bypassFileHandling) {
       log.debug('Bypassing file handling for tool', {
         toolId,
         session_id: context.session_id,
-        source: result?.source
+        source: result?.source,
+        policyFragment: toolPolicy?._matched_fragment
       });
     } else {
       log.debug('No session_id in context, returning result directly (not saved to file)');

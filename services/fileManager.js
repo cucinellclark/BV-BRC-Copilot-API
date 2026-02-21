@@ -65,6 +65,28 @@ class FileManager {
   }
 
   /**
+   * Determine whether a saved file should be uploaded to workspace.
+   * Tool policy can restrict upload to specific extensions.
+   */
+  shouldUploadToWorkspace(extension, context = {}) {
+    const toolPolicy = context?.toolPolicy;
+    if (!toolPolicy || !Array.isArray(toolPolicy.upload_only_extensions)) {
+      return true;
+    }
+
+    const normalizedExt = String(extension || '').toLowerCase().replace(/^\./, '');
+    const allowed = toolPolicy.upload_only_extensions
+      .map(ext => String(ext || '').toLowerCase().replace(/^\./, ''))
+      .filter(Boolean);
+
+    if (allowed.length === 0) {
+      return true;
+    }
+
+    return allowed.includes(normalizedExt);
+  }
+
+  /**
    * Initialize the file manager (create base directory)
    */
   async init() {
@@ -129,6 +151,21 @@ class FileManager {
         // This maintains current behavior while preparing for streaming
       } else {
         console.log(`[FileManager] Result size (${formatSize(size)}), saving to file`);
+      }
+
+      // Policy-level API control: if tool policy restricts to certain extensions and this
+      // result does not match, skip persistence entirely and return inline result.
+      // This prevents creating local file-reference nodes for disallowed formats.
+      const normalizedPreview = normalizeToolResult(result);
+      const predictedExtension = this.getFileExtension(normalizedPreview.dataType);
+      if (!this.shouldUploadToWorkspace(predictedExtension, context)) {
+        console.log('[FileManager] File persistence skipped by tool policy', {
+          toolId,
+          sessionId,
+          predictedExtension,
+          allowedExtensions: context?.toolPolicy?.upload_only_extensions
+        });
+        return result;
       }
 
       return await this.saveToolResult(sessionId, toolId, result, resultStr, size, context);
@@ -226,7 +263,15 @@ class FileManager {
     // This ensures all files saved to /tmp are automatically uploaded to workspace
     let workspaceInfo = null;
     if (this.uploadToWorkspace && !isErrorPayload) {
-      if (context.authToken && context.user_id) {
+      if (!this.shouldUploadToWorkspace(extension, context)) {
+        metadata.workspaceUploadSkipped = `Policy restricted uploads to extensions: ${context?.toolPolicy?.upload_only_extensions?.join(', ')}`;
+        console.log('[FileManager] Workspace upload skipped by tool policy', {
+          toolId,
+          fileName,
+          extension,
+          allowedExtensions: context?.toolPolicy?.upload_only_extensions
+        });
+      } else if (context.authToken && context.user_id) {
         try {
           // Extract userId from token (may include domain like user@domain.com)
           // Use token-extracted userId as it's the authoritative source

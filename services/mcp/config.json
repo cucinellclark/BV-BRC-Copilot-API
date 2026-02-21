@@ -61,8 +61,14 @@
       "bvbrc_collection_fields_and_parameters",
       "get_file_metadata",
       "list_jobs",
-      "get_job_details"
+      "get_job_details",
+      "read_file_bytes_tool"
     ],
+    "tool_policies": {
+      "bvbrc_search_data": {
+        "upload_only_extensions": ["tsv"]
+      }
+    },
     "context_aware_tools": [
       "plan_workflow"
     ],
