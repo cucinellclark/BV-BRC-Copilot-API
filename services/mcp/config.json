@@ -59,7 +59,6 @@
       "workspace_preview_file_tool",
       "bvbrc_plan_query_collection",
       "bvbrc_collection_fields_and_parameters",
-      "get_file_metadata",
       "list_jobs",
       "get_job_details",
       "read_file_bytes_tool"
