@@ -1,0 +1,32 @@
+{
+  "mongoDBUrlHolly": "mongodb://140.221.78.15:27017/copilot",
+  "mongoDBUrl": "mongodb://140.221.78.16:27018/copilot",
+  "database": "copilot",
+  "traceDatabase": "copilot_traces",
+  "collections": {
+    "chatSessions": "chat_sessions",
+    "prompts": "prompts",
+    "messageEmbeddings": "message_embeddings",
+    "chatSummaries": "chatSummaries",
+    "modelList": "modelList",
+    "ragList": "ragList"
+  },
+  "traceCollections": {
+    "agentRuns": "agent_runs",
+    "agentRunSteps": "agent_run_steps"
+  },
+  "connectionOptions": {
+    "maxPoolSize": 50,
+    "minPoolSize": 10,
+    "maxIdleTimeMS": 30000,
+    "serverSelectionTimeoutMS": 5000,
+    "connectTimeoutMS": 10000,
+    "socketTimeoutMS": 45000,
+    "retryWrites": true,
+    "retryReads": true,
+    "compressors": ["zlib"]
+  },
+  "use_bvbrc_model": "RedHatAI/Llama-4-Scout-17B-16E-Instruct-quantized.w4a16",
+  "llm_model": "gpt-4",
+  "openai_api_key": null
+} 

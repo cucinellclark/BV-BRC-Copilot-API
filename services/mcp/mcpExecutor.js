@@ -26,12 +26,6 @@ function isRagTool(toolId) {
   return ragList.some(fragment => toolId.includes(fragment));
 }
 
-function isFinalizeTool(toolId) {
-  if (!toolId) return false;
-  const finalizeList = config.global_settings?.finalize_tools || [];
-  return finalizeList.some(fragment => toolId.includes(fragment));
-}
-
 function isReplayableTool(toolId) {
   if (!toolId) return false;
   const replayableList = config.global_settings?.replayable_tools || [
@@ -1686,7 +1680,6 @@ module.exports = {
   validateToolParameters,
   sessionManager,
   isRagTool,
-  isFinalizeTool,
   isReplayableTool
 };
 

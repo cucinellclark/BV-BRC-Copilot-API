@@ -1,6 +1,9 @@
-const { connectToDatabase } = require('../database');
+const { connectToDatabase, connectToTraceDatabase } = require('../database');
 const { LLMServiceError } = require('./llmServices');
 const { formatSize } = require('./fileUtils');
+const mongoConfig = require('../utilities/mongodb_config.json');
+
+let traceIndexesEnsured = false;
 
 /**
  * Get model data from the database
@@ -735,6 +738,111 @@ async function getChatCollections() {
 }
 
 /**
+ * Get trace collections for agent run/step persistence.
+ * Uses dedicated trace DB when configured.
+ * @returns {Object} Trace DB collection references
+ */
+async function getTraceCollections() {
+  try {
+    const traceDb = await connectToTraceDatabase();
+    const traceCollections = mongoConfig.traceCollections || {};
+    const runsName = traceCollections.agentRuns || 'agent_runs';
+    const stepsName = traceCollections.agentRunSteps || 'agent_run_steps';
+
+    return {
+      db: traceDb,
+      runsCollection: traceDb.collection(runsName),
+      stepsCollection: traceDb.collection(stepsName)
+    };
+  } catch (error) {
+    throw new LLMServiceError('Failed to get trace collections', error);
+  }
+}
+
+/**
+ * Ensure indexes for trace collections.
+ * This is safe to call repeatedly; guarded per process.
+ */
+async function ensureTraceIndexes() {
+  try {
+    if (traceIndexesEnsured) return;
+    const { runsCollection, stepsCollection } = await getTraceCollections();
+
+    await Promise.all([
+      runsCollection.createIndex({ run_id: 1 }, { unique: true, name: 'run_id_unique' }),
+      runsCollection.createIndex({ session_id: 1, started_at: -1 }, { name: 'session_started_at_idx' }),
+      runsCollection.createIndex({ assistant_message_id: 1 }, { name: 'assistant_message_id_idx' }),
+      stepsCollection.createIndex({ run_id: 1, step_index: 1 }, { unique: true, name: 'run_step_unique' }),
+      stepsCollection.createIndex({ action: 1, started_at: -1 }, { name: 'action_started_at_idx' })
+    ]);
+
+    traceIndexesEnsured = true;
+  } catch (error) {
+    throw new LLMServiceError('Failed to ensure trace indexes', error);
+  }
+}
+
+/**
+ * Create one trace run record.
+ * @param {object} runDoc - Run metadata document
+ * @returns {Object} Insert result
+ */
+async function createAgentRun(runDoc = {}) {
+  try {
+    await ensureTraceIndexes();
+    const { runsCollection } = await getTraceCollections();
+    return await runsCollection.insertOne({
+      ...runDoc,
+      created_at: new Date()
+    });
+  } catch (error) {
+    throw new LLMServiceError('Failed to create agent run trace', error);
+  }
+}
+
+/**
+ * Append one step record for an agent run.
+ * @param {object} stepDoc - Step metadata document
+ * @returns {Object} Insert result
+ */
+async function appendAgentRunStep(stepDoc = {}) {
+  try {
+    await ensureTraceIndexes();
+    const { stepsCollection } = await getTraceCollections();
+    return await stepsCollection.insertOne({
+      ...stepDoc,
+      created_at: new Date()
+    });
+  } catch (error) {
+    throw new LLMServiceError('Failed to append agent run step', error);
+  }
+}
+
+/**
+ * Finalize one run with summary patch fields.
+ * @param {string} runId - Run ID
+ * @param {object} summaryPatch - Fields to set
+ * @returns {Object} Update result
+ */
+async function finalizeAgentRun(runId, summaryPatch = {}) {
+  try {
+    if (!runId) return null;
+    const { runsCollection } = await getTraceCollections();
+    return await runsCollection.updateOne(
+      { run_id: runId },
+      {
+        $set: {
+          ...summaryPatch,
+          updated_at: new Date()
+        }
+      }
+    );
+  } catch (error) {
+    throw new LLMServiceError('Failed to finalize agent run trace', error);
+  }
+}
+
+/**
  * Save file metadata to database
  * @param {string} sessionId - The session ID
  * @param {object} fileMetadata - File metadata object
@@ -972,6 +1080,11 @@ module.exports = {
   getEmbeddingsBySessionId,
   getEmbeddingByMessageId,
   getChatCollections,
+  getTraceCollections,
+  ensureTraceIndexes,
+  createAgentRun,
+  appendAgentRunStep,
+  finalizeAgentRun,
   saveFileMetadata,
   getFileMetadata,
   getSessionFiles,

@@ -74,6 +74,31 @@ async function connectToDatabase() {
 }
 
 /**
+ * Connect to a specific MongoDB database name using shared pooled client.
+ * @param {string} dbName - Target database name
+ * @returns {Object} MongoDB database instance
+ */
+async function connectToNamedDatabase(dbName) {
+    const normalizedName = (typeof dbName === 'string' && dbName.trim())
+        ? dbName.trim()
+        : config.database;
+
+    // Ensure the shared client is connected.
+    await connectToDatabase();
+    return mongoClient.db(normalizedName);
+}
+
+/**
+ * Connect to trace database (separate DB for run/step traces).
+ * Falls back to main DB if traceDatabase is not configured.
+ * @returns {Object} MongoDB database instance
+ */
+async function connectToTraceDatabase() {
+    const traceDbName = config.traceDatabase || config.database;
+    return connectToNamedDatabase(traceDbName);
+}
+
+/**
  * Check MongoDB connection health
  * @returns {Object} Health status and connection info
  */
@@ -182,6 +207,8 @@ process.on('SIGTERM', async () => {
 
 module.exports = { 
     connectToDatabase, 
+    connectToNamedDatabase,
+    connectToTraceDatabase,
     removeBySession,
     checkConnectionHealth,
     getPoolStats,

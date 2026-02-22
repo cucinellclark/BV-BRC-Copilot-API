@@ -1,14 +1,17 @@
 // services/agentOrchestrator.js
 
 const { v4: uuidv4 } = require('uuid');
-const { executeMcpTool, isFinalizeTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
+const { executeMcpTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
 const { loadToolsForPrompt } = require('./mcp/toolDiscovery');
 const {
   getModelData,
   getChatSession,
   createChatSession,
   addMessagesToSession,
-  addWorkflowIdToSession
+  addWorkflowIdToSession,
+  createAgentRun,
+  appendAgentRunStep,
+  finalizeAgentRun
 } = require('./dbUtils');
 const {
   queryChatOnly,
@@ -241,6 +244,53 @@ function extractResultTypeFromSafeResult(safeResult) {
     return safeResult.result.result_type;
   }
   return null;
+}
+
+function extractStepResultMeta(result, status = 'success') {
+  const resultType = extractResultTypeFromSafeResult(result);
+  const meta = {
+    status,
+    has_result: result != null,
+    result_type: resultType
+  };
+
+  if (!result || typeof result !== 'object') {
+    return meta;
+  }
+
+  if (result.type === 'file_reference') {
+    meta.file_reference = {
+      file_id: result.file_id || null,
+      file_name: result.fileName || null,
+      is_error: result.isError === true
+    };
+    if (result.summary && typeof result.summary === 'object') {
+      meta.summary = {
+        record_count: Number.isFinite(result.summary.recordCount) ? result.summary.recordCount : null,
+        data_type: result.summary.dataType || null
+      };
+    }
+    return meta;
+  }
+
+  if (Array.isArray(result.items)) {
+    meta.items_count = result.items.length;
+  } else if (Array.isArray(result.results)) {
+    meta.items_count = result.results.length;
+  }
+
+  if (result.count !== undefined) {
+    meta.count = result.count;
+  }
+
+  if (result.errorType || result.error) {
+    meta.error = {
+      errorType: result.errorType || null,
+      message: typeof result.error === 'string' ? result.error : null
+    };
+  }
+
+  return meta;
 }
 
 function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
@@ -801,14 +851,88 @@ async function executeAgentLoop(opts) {
   const collectedRagDocs = [];
   let iteration = 0;
   let finalResponseSourceTool = null; // Track which tool generated the final response
-  let finalizeAfterTerminalTool = null; // Terminal tool executed; synthesize final response next
   let finalResponse = null;
   let sessionMemory = null;
   let queryForAgent = query;
   let imageContextNotice = null;
+  const uiPreferredTools = [];
+  const runId = uuidv4();
+  const runStartedAt = new Date();
+  const runTraceEnabled = config.agent?.trace_logging?.enabled !== false;
 
   // Get auth token (from opts or config)
   const authToken = auth_token || config.auth_token;
+
+  const persistRunStep = async ({
+    traceEntry = {},
+    stepIndex = 0,
+    status = 'success',
+    parametersExecuted = null,
+    result = null,
+    errorMessage = null,
+    startedAt = null,
+    endedAt = null
+  }) => {
+    if (!runTraceEnabled) return;
+    try {
+      await appendAgentRunStep({
+        run_id: runId,
+        step_index: stepIndex,
+        iteration: traceEntry.iteration || null,
+        action: traceEntry.action || null,
+        reasoning: traceEntry.reasoning || '',
+        status,
+        parameters_planned: traceEntry.parameters || {},
+        parameters_executed: parametersExecuted || traceEntry.parameters || {},
+        started_at: startedAt || (traceEntry.timestamp ? new Date(traceEntry.timestamp) : null),
+        ended_at: endedAt || new Date(),
+        duration_ms: (startedAt && endedAt) ? Math.max(0, endedAt.getTime() - startedAt.getTime()) : null,
+        result_meta: extractStepResultMeta(result, status),
+        ...(errorMessage ? { error: errorMessage } : {})
+      });
+    } catch (traceStepError) {
+      logger.warn('Failed to persist agent run step trace', {
+        run_id: runId,
+        action: traceEntry.action || null,
+        step_index: stepIndex,
+        error: traceStepError.message
+      });
+    }
+  };
+
+  const finalizeRunRecord = async ({
+    status = 'success',
+    assistantMessageId = null,
+    errorMessage = null
+  } = {}) => {
+    if (!runTraceEnabled) return;
+    const endedAt = new Date();
+    try {
+      await finalizeAgentRun(runId, {
+        session_id: session_id || null,
+        user_id: user_id || null,
+        job_id: job_id || null,
+        query_id: queryId || null,
+        model: model || null,
+        status,
+        ended_at: endedAt,
+        duration_ms: Math.max(0, endedAt.getTime() - runStartedAt.getTime()),
+        iterations: iteration,
+        tools_used: Object.keys(toolResults),
+        final_response_source_tool: finalResponseSourceTool || null,
+        ui_preferred_tools: [...uiPreferredTools],
+        ui_source_tool: uiPreferredTools.length > 0 ? uiPreferredTools[uiPreferredTools.length - 1] : null,
+        assistant_message_id: assistantMessageId || null,
+        ...(errorMessage ? { error: errorMessage } : {})
+      });
+    } catch (finalizeTraceError) {
+      logger.warn('Failed to finalize agent run trace', {
+        run_id: runId,
+        status,
+        error: finalizeTraceError.message
+      });
+    }
+  };
 
   // Get or create chat session early so tool-side metadata writes (e.g. workflow_ids)
   // always have an existing chat_sessions document to update.
@@ -929,6 +1053,28 @@ async function executeAgentLoop(opts) {
   };
 
   try {
+    if (runTraceEnabled) {
+      try {
+        await createAgentRun({
+          run_id: runId,
+          trace_version: 1,
+          session_id: session_id || null,
+          user_id: user_id || null,
+          job_id: job_id || null,
+          query_id: queryId || null,
+          query_text: query || '',
+          model: model || null,
+          status: 'running',
+          started_at: runStartedAt
+        });
+      } catch (traceRunError) {
+        logger.warn('Failed to create agent run trace', {
+          run_id: runId,
+          error: traceRunError.message
+        });
+      }
+    }
+
     // Persist the user message immediately so aborted/cancelled jobs still keep user intent.
     if (save_chat && session_id) {
       try {
@@ -1037,12 +1183,13 @@ async function executeAgentLoop(opts) {
       }
 
       // Add to trace
+      const stepStartedAt = new Date();
       const traceEntry = {
         iteration,
         action: nextAction.action,
         reasoning: nextAction.reasoning,
         parameters: nextAction.parameters,
-        timestamp: new Date().toISOString()
+        timestamp: stepStartedAt.toISOString()
       };
       executionTrace.push(traceEntry);
 
@@ -1076,11 +1223,22 @@ async function executeAgentLoop(opts) {
           selected_jobs,
           selected_workflows
         );
+        traceEntry.status = 'success';
+        await persistRunStep({
+          traceEntry,
+          stepIndex: executionTrace.length - 1,
+          status: 'success',
+          parametersExecuted: {},
+          result: { result_type: 'finalize' },
+          startedAt: stepStartedAt,
+          endedAt: new Date()
+        });
         break;
       }
 
       // Execute the tool
       try {
+        const toolExecutionStartedAt = new Date();
         if (typeof progressCallback === 'function') {
           progressCallback(iteration, nextAction.action, 'active');
         }
@@ -1148,6 +1306,11 @@ async function executeAgentLoop(opts) {
           result_type: resultType
         };
         traceEntry.status = isErrorResult ? 'error' : 'success';
+
+        const uiDecision = evaluatePreferredUiToolAction(nextAction.action, safeResult);
+        if (uiDecision.preferred) {
+          uiPreferredTools.push(nextAction.action);
+        }
 
         if (session_id) {
           try {
@@ -1230,6 +1393,16 @@ async function executeAgentLoop(opts) {
           traceEntry.status
         );
 
+        await persistRunStep({
+          traceEntry,
+          stepIndex: executionTrace.length - 1,
+          status: traceEntry.status,
+          parametersExecuted: nextAction.parameters,
+          result: safeResult,
+          startedAt: toolExecutionStartedAt,
+          endedAt: new Date()
+        });
+
         // Emit SSE event for tool execution result
         if (stream && responseStream) {
           const emittedToolCall = buildToolCallEnvelope(
@@ -1264,16 +1437,6 @@ async function executeAgentLoop(opts) {
           }
         }
 
-        // Terminal tools end planning, but still go through final response synthesis.
-        const shouldFinalizeNow = isFinalizeTool(nextAction.action);
-        if (shouldFinalizeNow) {
-          throwIfCancelled('before_finalize_tool_emit');
-          logger.info('Terminal tool executed, ending planning loop and generating final response', {
-            tool: nextAction.action
-          });
-          finalizeAfterTerminalTool = nextAction.action;
-          break;
-        }
       } catch (error) {
         if (error && error.isCancelled) {
           throw error;
@@ -1305,6 +1468,17 @@ async function executeAgentLoop(opts) {
         traceEntry.error = error.message;
         traceEntry.status = 'failed';
         toolResults[nextAction.action] = { error: error.message };
+
+        await persistRunStep({
+          traceEntry,
+          stepIndex: executionTrace.length - 1,
+          status: 'failed',
+          parametersExecuted: nextAction.parameters,
+          result: { error: error.message },
+          errorMessage: error.message,
+          startedAt: stepStartedAt,
+          endedAt: new Date()
+        });
 
         // Emit SSE event for tool execution failure
         if (stream && responseStream) {
@@ -1346,27 +1520,6 @@ async function executeAgentLoop(opts) {
           break;
         }
       }
-    }
-
-    if (!finalResponse && finalizeAfterTerminalTool) {
-      throwIfCancelled('before_terminal_tool_finalize_generation');
-      finalResponse = await generateFinalResponse(
-        queryForAgent,
-        system_prompt,
-        executionTrace,
-        toolResults,
-        model,
-        historyContext,
-        stream,
-        responseStream,
-        logger,
-        finalizeAfterTerminalTool,
-        sessionMemory,
-        workspace_items,
-        selected_jobs,
-        selected_workflows
-      );
-      finalResponseSourceTool = finalizeAfterTerminalTool;
     }
 
     // Safety net: hit max iterations
@@ -1412,12 +1565,17 @@ async function executeAgentLoop(opts) {
     }
     
     const preferredUiToolFromTrace = findPreferredUiToolAction(executionTrace, toolResults, logger);
-    const preferredUiSourceTool = preferredUiToolFromTrace || finalResponseSourceTool;
-    console.log('********** preferredUiSourceTool **********', preferredUiSourceTool);
+    const lastUiPreferredTool = uiPreferredTools.length > 0
+      ? uiPreferredTools[uiPreferredTools.length - 1]
+      : null;
+    const preferredUiSourceTool = lastUiPreferredTool || preferredUiToolFromTrace || finalResponseSourceTool;
+    assistantMessage.ui_preferred_tools = [...uiPreferredTools];
     logger.info('[PREFERRED_UI] Resolution complete', {
       source_tool: finalResponseSourceTool || null,
+      ui_preferred_tools_count: uiPreferredTools.length,
+      ui_preferred_tools: uiPreferredTools,
       preferred_ui_tool: preferredUiSourceTool || null,
-      used_fallback_source_tool: !preferredUiToolFromTrace && !!finalResponseSourceTool
+      used_fallback_source_tool: !lastUiPreferredTool && !preferredUiToolFromTrace && !!finalResponseSourceTool
     });
     if (preferredUiSourceTool) {
       assistantMessage.ui_source_tool = preferredUiSourceTool;
@@ -1548,6 +1706,10 @@ async function executeAgentLoop(opts) {
 
     // If streaming, emit completion event and end the stream
     if (stream && responseStream) {
+      await finalizeRunRecord({
+        status: 'success',
+        assistantMessageId: assistantMessage.message_id
+      });
       emitSSE(responseStream, 'done', {
         iterations: iteration,
         tools_used: Object.keys(toolResults).length,
@@ -1561,6 +1723,11 @@ async function executeAgentLoop(opts) {
         message_id: assistantMessage.message_id
       };
     }
+
+    await finalizeRunRecord({
+      status: 'success',
+      assistantMessageId: assistantMessage.message_id
+    });
 
     return {
       message: 'success',
@@ -1577,10 +1744,18 @@ async function executeAgentLoop(opts) {
   } catch (error) {
     if (error && error.isCancelled) {
       logger.info('Agent loop cancelled', { error: error.message });
+      await finalizeRunRecord({
+        status: 'cancelled',
+        errorMessage: error.message
+      });
       throw error;
     }
 
     logger.error('Agent loop failed', { error: error.message, stack: error.stack });
+    await finalizeRunRecord({
+      status: 'failed',
+      errorMessage: error.message
+    });
     throw new LLMServiceError('Agent loop failed', error);
   }
 }
