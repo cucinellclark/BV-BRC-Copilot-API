@@ -5,6 +5,38 @@ const mongoConfig = require('../utilities/mongodb_config.json');
 
 let traceIndexesEnsured = false;
 
+function normalizeCanonicalToolTrackingMessage(message) {
+  if (!message || typeof message !== 'object') {
+    return message;
+  }
+
+  const normalized = { ...message };
+  const toolCalls = Array.isArray(normalized.tool_calls) ? normalized.tool_calls : [];
+  const dedupedCalls = [];
+  const seenIds = new Set();
+  for (const call of toolCalls) {
+    if (!call || typeof call !== 'object' || typeof call.id !== 'string' || call.id.length === 0) {
+      continue;
+    }
+    if (seenIds.has(call.id)) {
+      continue;
+    }
+    seenIds.add(call.id);
+    dedupedCalls.push(call);
+  }
+  normalized.tool_calls = dedupedCalls;
+  normalized.active_tool_call_id = typeof normalized.active_tool_call_id === 'string'
+    ? normalized.active_tool_call_id
+    : (dedupedCalls.length > 0 ? dedupedCalls[dedupedCalls.length - 1].id : null);
+
+  delete normalized.ui_tool_calls;
+  delete normalized.ui_active_tool_call;
+  delete normalized.ui_preferred_tools;
+  delete normalized.ui_source_tool;
+
+  return normalized;
+}
+
 /**
  * Get model data from the database
  * @param {string} model - The model name to look up
@@ -123,7 +155,7 @@ async function getSessionMessages(sessionId) {
     // Extract messages array from the first session document
     if (result && result.length > 0 && result[0].messages) {
       const messages = result[0].messages;
-      return messages;
+      return messages.map(normalizeCanonicalToolTrackingMessage);
     }
     return [];
   } catch (error) {
@@ -1092,4 +1124,6 @@ module.exports = {
   deleteFileMetadata,
   getSessionStorageSize,
   getUserWorkflowIds
+  ,
+  normalizeCanonicalToolTrackingMessage
 };

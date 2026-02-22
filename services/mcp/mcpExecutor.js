@@ -3,6 +3,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const { getToolDefinition, loadToolsManifest } = require('./toolDiscovery');
 const { sessionManager } = require('./mcpSessionManager');
 const { McpStreamHandler } = require('./mcpStreamHandler');
@@ -19,6 +20,10 @@ const config = require('./config.json');
 const DEFAULT_RAG_FRAGMENTS = ['helpdesk_service_usage'];
 const LOCAL_SESSION_BASE_PATH = '/tmp/copilot/sessions';
 const WORKSPACE_PATH_IN_CODE_REGEX = /\/[^/\s"'`]+\/home\/(?:CopilotDownloads|CopilotCodeDev)\/[^\s"'`]+/g;
+
+function createRpcRequestId(toolId, stage = 'call') {
+  return `tool-${toolId}-${stage}-${uuidv4()}`;
+}
 
 function isRagTool(toolId) {
   if (!toolId) return false;
@@ -731,6 +736,16 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
   let batchNumber = 1;
   let cursor = (requestedLimit !== null && currentCount >= requestedLimit) ? null : nextCursorId;
   const errors = [];
+  const seenCursors = new Set();
+  const dedupResultKeys = new Set();
+  if (isJsonFormat) {
+    for (const row of allResults) {
+      const key = (row && typeof row === 'object' && row.genome_id)
+        ? `genome_id:${row.genome_id}`
+        : JSON.stringify(row);
+      dedupResultKeys.add(key);
+    }
+  }
   const responseStream = context.responseStream;
   const MAX_PAGINATION_BATCHES = 200; // Safety limit to prevent runaway pagination
 
@@ -748,6 +763,14 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
 
   // Pagination loop
   while (cursor && cursor !== null && batchNumber < MAX_PAGINATION_BATCHES) {
+    if (seenCursors.has(cursor)) {
+      log.warn('Duplicate cursor detected during pagination; stopping to avoid duplicate pages', {
+        cursor: cursor.substring(0, 20) + '...',
+        batchNumber
+      });
+      break;
+    }
+    seenCursors.add(cursor);
     batchNumber++;
 
     try {
@@ -806,7 +829,7 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
       // Build JSON-RPC request for pagination
       const jsonRpcRequest = {
         jsonrpc: '2.0',
-        id: `tool-${toolId}-pagination-${batchNumber}-${Date.now()}`,
+        id: createRpcRequestId(toolId, `pagination-${batchNumber}`),
         method: 'tools/call',
         params: {
           name: toolDef.name,
@@ -915,7 +938,16 @@ async function paginateQueryCollection(toolId, originalParameters, firstResponse
         // JSON format: extract results array
         const batchResults = Array.isArray(batchResult.results) ? batchResult.results : [];
         batchCount = batchResult.count || batchResults.length;
-        allResults.push(...batchResults);
+        for (const row of batchResults) {
+          const key = (row && typeof row === 'object' && row.genome_id)
+            ? `genome_id:${row.genome_id}`
+            : JSON.stringify(row);
+          if (dedupResultKeys.has(key)) {
+            continue;
+          }
+          dedupResultKeys.add(key);
+          allResults.push(row);
+        }
       } else {
         // Fallback: try to get count
         batchCount = batchResult.count || 0;
@@ -1255,11 +1287,11 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     // NOTE: FastMCP progress notifications (notifications/progress) require a
     // client-provided progress token in request params metadata.
     const progressToken = parameters.stream === true
-      ? `progress-${toolId}-${Date.now()}`
+      ? `progress-${toolId}-${uuidv4()}`
       : null;
     const jsonRpcRequest = {
       jsonrpc: '2.0',
-      id: `tool-${toolId}-${Date.now()}`,
+      id: createRpcRequestId(toolId, 'initial'),
       method: 'tools/call',
       params: {
         name: toolDef.name,
@@ -1510,24 +1542,15 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       }
     }
 
-    // Attach normalized call metadata so clients can replay selected queries.
+    // Attach canonical replay metadata used by orchestrator tool-call records.
     if (result && typeof result === 'object' && !Array.isArray(result)) {
       const replayable = isReplayableTool(toolId);
       const replayPageSize = getReplayPageSize(context);
       const rqlReplay = buildRqlReplayMetadata(toolId, parameters, result, replayPageSize);
-      if (!result.call || typeof result.call !== 'object') {
-        result.call = {
-          tool: toolId,
-          arguments_executed: { ...parameters },
-          replayable
-        };
-      } else if (result.call.replayable === undefined) {
-        result.call.replayable = replayable;
-      }
-
-      if (rqlReplay) {
-        result.call.rql_replay = rqlReplay;
-      }
+      result.replay = {
+        replayable,
+        ...(rqlReplay ? { rql_replay: rqlReplay } : {})
+      };
     }
 
     // Special-case RAG tools: normalize and limit documents

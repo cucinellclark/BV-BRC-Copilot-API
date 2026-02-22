@@ -1,7 +1,7 @@
 // services/agentOrchestrator.js
 
 const { v4: uuidv4 } = require('uuid');
-const { executeMcpTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
+const { executeMcpTool, isRagTool } = require('./mcp/mcpExecutor');
 const { loadToolsForPrompt } = require('./mcp/toolDiscovery');
 const {
   getModelData,
@@ -90,12 +90,76 @@ function prepareToolResult(toolId, result, ragMaxDocs = 5) {
         count,
         summary: result.summary,
         documents_included: false,
-        documents_count: docs.length
+        documents_count: docs.length,
+        replay: result && result.replay && typeof result.replay === 'object' ? result.replay : undefined
       }
     };
   }
 
   return { storage: null, safeResult: result };
+}
+
+function buildResultRef(result) {
+  if (!result || typeof result !== 'object') {
+    return { type: 'none' };
+  }
+  if (result.type === 'file_reference') {
+    return {
+      type: 'file_reference',
+      file_id: result.file_id || null,
+      file_name: result.fileName || null,
+      is_error: result.isError === true
+    };
+  }
+  const itemsCount = Array.isArray(result.results)
+    ? result.results.length
+    : (Array.isArray(result.items) ? result.items.length : null);
+  return {
+    type: 'inline_result',
+    result_type: extractResultTypeFromSafeResult(result),
+    count: Number.isFinite(result.count) ? result.count : null,
+    items_count: itemsCount
+  };
+}
+
+function createCanonicalToolCall({
+  runId,
+  iteration,
+  action,
+  sequence,
+  parameters,
+  result,
+  status
+}) {
+  const replayMeta = (result && typeof result.replay === 'object') ? result.replay : null;
+  const replay = replayMeta
+    ? {
+      replayable: replayMeta.replayable === true,
+      ...(replayMeta.rql_replay && typeof replayMeta.rql_replay === 'object'
+        ? { rql_replay: replayMeta.rql_replay }
+        : {})
+    }
+    : null;
+
+  const canonical = {
+    id: `${runId}:${iteration}:${action}:${sequence}`,
+    run_id: runId,
+    iteration,
+    action,
+    sequence,
+    arguments: (parameters && typeof parameters === 'object') ? { ...parameters } : {},
+    replay,
+    status,
+    result_ref: buildResultRef(result)
+  };
+
+  const requiredFields = ['id', 'run_id', 'iteration', 'action', 'sequence', 'arguments', 'status', 'result_ref'];
+  for (const field of requiredFields) {
+    if (canonical[field] === undefined) {
+      throw new Error(`Canonical tool call missing required field: ${field}`);
+    }
+  }
+  return canonical;
 }
 
 /**
@@ -178,10 +242,6 @@ function createMessage(role, content) {
   };
 }
 
-function isWorkspaceBrowseTool(toolId) {
-  return typeof toolId === 'string' && toolId.includes('workspace_browse_tool');
-}
-
 function isJobsBrowseTool(toolId) {
   if (typeof toolId !== 'string') return false;
   return toolId.includes('list_jobs') || toolId.includes('get_recent_jobs');
@@ -190,14 +250,6 @@ function isJobsBrowseTool(toolId) {
 function isWorkflowTool(toolId) {
   if (typeof toolId !== 'string') return false;
   return toolId.includes('plan_workflow') || toolId.includes('submit_workflow');
-}
-
-function unwrapDisplayResult(result) {
-  if (!result || typeof result !== 'object') return result;
-  if (result.result && typeof result.result === 'object' && !Array.isArray(result.result)) {
-    return result.result;
-  }
-  return result;
 }
 
 function flattenWorkspaceItems(items) {
@@ -219,16 +271,6 @@ function flattenWorkspaceItems(items) {
   return flattened;
 }
 
-function findLatestToolParameters(executionTrace, toolId) {
-  if (!Array.isArray(executionTrace) || !toolId) return {};
-  for (let i = executionTrace.length - 1; i >= 0; i -= 1) {
-    const trace = executionTrace[i];
-    if (trace && trace.action === toolId && trace.parameters && typeof trace.parameters === 'object') {
-      return trace.parameters;
-    }
-  }
-  return {};
-}
 
 function extractResultTypeFromSafeResult(safeResult) {
   if (!safeResult || typeof safeResult !== 'object') return null;
@@ -293,27 +335,6 @@ function extractStepResultMeta(result, status = 'success') {
   return meta;
 }
 
-function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
-  const call = toolResult && typeof toolResult.call === 'object' ? toolResult.call : {};
-  const args = (call.arguments_executed && typeof call.arguments_executed === 'object')
-    ? call.arguments_executed
-    : findLatestToolParameters(executionTrace, toolId);
-
-  const envelope = {
-    tool: call.tool || toolId,
-    arguments_executed: args || {},
-    replayable: call.replayable === true
-  };
-
-  if (typeof call.backend_method === 'string' && call.backend_method.length > 0) {
-    envelope.backend_method = call.backend_method;
-  }
-  if (call.rql_replay && typeof call.rql_replay === 'object') {
-    envelope.rql_replay = call.rql_replay;
-  }
-  // TODO(solr_replay): include envelope.solr_replay when we add Solr replay payloads.
-  return envelope;
-}
 
 function findLastSuccessfulToolAction(executionTrace, toolResults = {}) {
   if (!Array.isArray(executionTrace) || executionTrace.length === 0) return null;
@@ -332,141 +353,7 @@ function findLastSuccessfulToolAction(executionTrace, toolResults = {}) {
   return null;
 }
 
-function evaluatePreferredUiToolAction(toolId, toolResult) {
-  if (!toolId || !toolResult || typeof toolResult !== 'object') {
-    return { preferred: false, reason: 'missing_tool_or_result_object' };
-  }
-  if (toolId.includes('read_file_bytes_tool')) {
-    return { preferred: false, reason: 'excluded_read_file_bytes_tool' };
-  }
-  if (toolId.includes('read_file_lines')) {
-    return { preferred: false, reason: 'excluded_read_file_lines' };
-  }
-  if (toolId === 'bvbrc_search_data' || toolId.endsWith('.bvbrc_search_data')) {
-    return { preferred: true, reason: 'forced_bvbrc_search_data_priority' };
-  }
-  const call = toolResult.call && typeof toolResult.call === 'object' ? toolResult.call : null;
 
-  if (call && call.replayable === true) {
-    return { preferred: true, reason: 'call_replayable_true' };
-  }
-  if (call && call.rql_replay && typeof call.rql_replay === 'object') {
-    return { preferred: true, reason: 'call_rql_replay_present' };
-  }
-
-  const replayableByConfig = isReplayableTool(toolId);
-  return {
-    preferred: replayableByConfig,
-    reason: replayableByConfig ? 'replayable_by_config' : 'not_replayable'
-  };
-}
-
-function findPreferredUiToolAction(executionTrace, toolResults = {}, logger = null) {
-  if (!Array.isArray(executionTrace) || executionTrace.length === 0) return null;
-  const knownTools = toolResults && typeof toolResults === 'object'
-    ? new Set(Object.keys(toolResults))
-    : new Set();
-  if (logger) {
-    logger.info('[PREFERRED_UI] Starting preferred UI tool scan', {
-      execution_trace_count: executionTrace.length,
-      known_tool_results_count: knownTools.size
-    });
-  }
-
-  for (let i = executionTrace.length - 1; i >= 0; i -= 1) {
-    const entry = executionTrace[i];
-    if (!entry || entry.status !== 'success') continue;
-    if (entry.action === 'FINALIZE') continue;
-    if (!entry.action || typeof entry.action !== 'string') continue;
-    if (knownTools.size > 0 && !knownTools.has(entry.action)) continue;
-
-    const toolResult = toolResults[entry.action];
-    const decision = evaluatePreferredUiToolAction(entry.action, toolResult);
-    if (logger) {
-      logger.debug('[PREFERRED_UI] Candidate evaluated', {
-        candidate_tool: entry.action,
-        preferred: decision.preferred,
-        reason: decision.reason,
-        iteration: entry.iteration
-      });
-    }
-    if (decision.preferred) {
-      if (logger) {
-        logger.info('[PREFERRED_UI] Selected preferred UI tool', {
-          selected_tool: entry.action,
-          reason: decision.reason,
-          iteration: entry.iteration
-        });
-      }
-      return entry.action;
-    }
-  }
-
-  if (logger) {
-    logger.info('[PREFERRED_UI] No preferred tool found in execution trace');
-  }
-  return null;
-}
-
-function buildAssistantToolDisplayMetadata(toolId, toolResult) {
-  if (!toolId || !toolResult || typeof toolResult !== 'object') {
-    return {};
-  }
-
-  const displayResult = unwrapDisplayResult(toolResult);
-
-  if (isWorkspaceBrowseTool(toolId)) {
-    return {
-      isWorkspaceBrowse: true,
-      chatSummary: 'Workspace results are available. Open Workspace Tab to load.',
-      uiAction: 'open_workspace_tab'
-    };
-  }
-
-  if (isJobsBrowseTool(toolId)) {
-    return {
-      isJobsBrowse: true,
-      chatSummary: 'Job results are available. Open Jobs Tab to load.',
-      uiAction: 'open_jobs_tab'
-    };
-  }
-
-  if (isWorkflowTool(toolId)) {
-    if (displayResult.workflow_id || displayResult.workflow_name || displayResult.status || displayResult.partial_workflow) {
-      const resolvedWorkflowId = extractWorkflowId(displayResult);
-      return {
-        isWorkflow: true,
-        workflow_id: resolvedWorkflowId || null,
-        workflow_name: displayResult.workflow_name || null,
-        workflow_status: displayResult.status || null,
-        uiAction: 'open_workflow_viewer'
-      };
-    }
-  }
-
-  // IMPORTANT: Return empty object for all other tools
-  // Do NOT spread or return fields from displayResult that could pollute the assistant message
-  // (e.g., chatSummary from MCP tools)
-  return {};
-}
-
-function buildUiToolCallEntry(toolId, toolResult, executionTrace) {
-  if (!toolId || typeof toolId !== 'string') {
-    return null;
-  }
-  const normalizedResult = (toolResult && typeof toolResult === 'object') ? { ...toolResult } : {};
-  delete normalizedResult.chatSummary;
-  delete normalizedResult.uiAction;
-
-  const toolCall = buildToolCallEnvelope(toolId, normalizedResult, executionTrace);
-  const displayMetadata = buildAssistantToolDisplayMetadata(toolId, normalizedResult);
-
-  return {
-    source_tool: toolId,
-    tool_call: toolCall,
-    ...displayMetadata
-  };
-}
 
 function toBooleanFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
@@ -873,7 +760,8 @@ async function executeAgentLoop(opts) {
   let sessionMemory = null;
   let queryForAgent = query;
   let imageContextNotice = null;
-  const uiPreferredTools = [];
+  const canonicalToolCalls = [];
+  let toolCallSequence = 0;
   const runId = uuidv4();
   const runStartedAt = new Date();
   const runTraceEnabled = config.agent?.trace_logging?.enabled !== false;
@@ -938,8 +826,10 @@ async function executeAgentLoop(opts) {
         iterations: iteration,
         tools_used: Object.keys(toolResults),
         final_response_source_tool: finalResponseSourceTool || null,
-        ui_preferred_tools: [...uiPreferredTools],
-        ui_source_tool: uiPreferredTools.length > 0 ? uiPreferredTools[uiPreferredTools.length - 1] : null,
+        tool_call_ids: canonicalToolCalls.map((call) => call.id),
+        active_tool_call_id: canonicalToolCalls.length > 0
+          ? canonicalToolCalls[canonicalToolCalls.length - 1].id
+          : null,
         assistant_message_id: assistantMessageId || null,
         ...(errorMessage ? { error: errorMessage } : {})
       });
@@ -1324,11 +1214,18 @@ async function executeAgentLoop(opts) {
           result_type: resultType
         };
         traceEntry.status = isErrorResult ? 'error' : 'success';
-
-        const uiDecision = evaluatePreferredUiToolAction(nextAction.action, safeResult);
-        if (uiDecision.preferred) {
-          uiPreferredTools.push(nextAction.action);
-        }
+        toolCallSequence += 1;
+        const canonicalToolCall = createCanonicalToolCall({
+          runId,
+          iteration,
+          action: nextAction.action,
+          sequence: toolCallSequence,
+          parameters: nextAction.parameters,
+          result: safeResult,
+          status: traceEntry.status
+        });
+        canonicalToolCalls.push(canonicalToolCall);
+        traceEntry.tool_call_id = canonicalToolCall.id;
 
         if (session_id) {
           try {
@@ -1423,17 +1320,8 @@ async function executeAgentLoop(opts) {
 
         // Emit SSE event for tool execution result
         if (stream && responseStream) {
-          const emittedToolCall = buildToolCallEnvelope(
-            nextAction.action,
-            safeResult,
-            executionTrace
-          );
           emitSSE(responseStream, 'tool_executed', {
-            iteration,
-            tool: nextAction.action,
-            status: traceEntry.status,
-            result: safeResult,
-            call: emittedToolCall
+            tool_call: canonicalToolCall
           });
 
           // Emit a dedicated event for newly-created session files so clients
@@ -1486,6 +1374,18 @@ async function executeAgentLoop(opts) {
         traceEntry.error = error.message;
         traceEntry.status = 'failed';
         toolResults[nextAction.action] = { error: error.message };
+        toolCallSequence += 1;
+        const failedToolCall = createCanonicalToolCall({
+          runId,
+          iteration,
+          action: nextAction.action,
+          sequence: toolCallSequence,
+          parameters: nextAction.parameters,
+          result: { error: error.message },
+          status: 'failed'
+        });
+        canonicalToolCalls.push(failedToolCall);
+        traceEntry.tool_call_id = failedToolCall.id;
 
         await persistRunStep({
           traceEntry,
@@ -1501,10 +1401,7 @@ async function executeAgentLoop(opts) {
         // Emit SSE event for tool execution failure
         if (stream && responseStream) {
           emitSSE(responseStream, 'tool_executed', {
-            iteration,
-            tool: nextAction.action,
-            status: 'failed',
-            error: error.message
+            tool_call: failedToolCall
           });
         }
 
@@ -1582,54 +1479,9 @@ async function executeAgentLoop(opts) {
       assistantMessage.source_tool = finalResponseSourceTool;
     }
     
-    const preferredUiToolFromTrace = findPreferredUiToolAction(executionTrace, toolResults, logger);
-    const lastUiPreferredTool = uiPreferredTools.length > 0
-      ? uiPreferredTools[uiPreferredTools.length - 1]
-      : null;
-    const preferredUiSourceTool = lastUiPreferredTool || preferredUiToolFromTrace || finalResponseSourceTool;
-    assistantMessage.ui_preferred_tools = [...uiPreferredTools];
-    logger.info('[PREFERRED_UI] Resolution complete', {
-      source_tool: finalResponseSourceTool || null,
-      ui_preferred_tools_count: uiPreferredTools.length,
-      ui_preferred_tools: uiPreferredTools,
-      preferred_ui_tool: preferredUiSourceTool || null,
-      used_fallback_source_tool: !lastUiPreferredTool && !preferredUiToolFromTrace && !!finalResponseSourceTool
-    });
-
-    const uiToolCalls = [];
-    for (let i = 0; i < uiPreferredTools.length; i += 1) {
-      const toolId = uiPreferredTools[i];
-      const entry = buildUiToolCallEntry(toolId, toolResults[toolId], executionTrace);
-      if (entry) {
-        uiToolCalls.push(entry);
-      }
-    }
-    if (uiToolCalls.length === 0 && preferredUiSourceTool) {
-      const fallbackEntry = buildUiToolCallEntry(
-        preferredUiSourceTool,
-        toolResults[preferredUiSourceTool],
-        executionTrace
-      );
-      if (fallbackEntry) {
-        uiToolCalls.push(fallbackEntry);
-      }
-    }
-
-    if (uiToolCalls.length > 0) {
-      assistantMessage.ui_tool_calls = uiToolCalls;
-      const activeUiTool = uiToolCalls[uiToolCalls.length - 1];
-      assistantMessage.ui_source_tool = activeUiTool.source_tool || preferredUiSourceTool || null;
-      assistantMessage.ui_active_tool_call = activeUiTool.tool_call || null;
-      Object.assign(assistantMessage, {
-        isWorkflow: activeUiTool.isWorkflow,
-        workflow_id: activeUiTool.workflow_id,
-        workflow_name: activeUiTool.workflow_name,
-        workflow_status: activeUiTool.workflow_status,
-        isWorkspaceBrowse: activeUiTool.isWorkspaceBrowse,
-        isJobsBrowse: activeUiTool.isJobsBrowse,
-        chatSummary: activeUiTool.chatSummary,
-        uiAction: activeUiTool.uiAction
-      });
+    if (canonicalToolCalls.length > 0) {
+      assistantMessage.tool_calls = canonicalToolCalls;
+      assistantMessage.active_tool_call_id = canonicalToolCalls[canonicalToolCalls.length - 1].id;
     }
 
     if (finalResponseSourceTool) {

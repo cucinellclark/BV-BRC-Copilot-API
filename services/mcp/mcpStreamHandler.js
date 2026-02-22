@@ -1,6 +1,7 @@
 // services/mcp/mcpStreamHandler.js
 
 const axios = require('axios');
+const crypto = require('crypto');
 const { createLogger } = require('../logger');
 const { emitSSE } = require('../sseUtils');
 
@@ -157,8 +158,10 @@ class McpStreamHandler {
   async accumulateBatches(stream, context, toolId, log) {
     return new Promise((resolve, reject) => {
       const batches = [];
+      const seenBatchFingerprints = new Set();
       let buffer = '';
       let batchCount = 0;
+      let duplicateBatchCount = 0;
       let totalSize = 0;
       let lastBatch = null;
       let finalToolResult = null;
@@ -240,8 +243,10 @@ class McpStreamHandler {
               // Structure: { jsonrpc: "2.0", id: "...", result: "..." }
               // Where result is a JSON string that needs parsing
               let batch = null;
+              let requestId = 'unknown';
               
               if (parsed && parsed.jsonrpc === '2.0' && parsed.result !== undefined) {
+                requestId = parsed.id !== undefined ? String(parsed.id) : 'unknown';
                 // It's a JSON-RPC response
                 if (typeof parsed.result === 'string') {
                   // Result is a JSON string, parse it
@@ -290,6 +295,25 @@ class McpStreamHandler {
                 });
                 continue;
               }
+
+              const batchNumber = Number.isFinite(Number(batch.batchNumber))
+                ? Number(batch.batchNumber)
+                : batchCount + 1;
+              const payloadHash = crypto
+                .createHash('sha1')
+                .update(JSON.stringify(batch))
+                .digest('hex');
+              const fingerprint = `${requestId}:${batchNumber}:${payloadHash}`;
+              if (seenBatchFingerprints.has(fingerprint)) {
+                duplicateBatchCount += 1;
+                log.warn('Dropping duplicate stream batch', {
+                  tool: toolId,
+                  request_id: requestId,
+                  batch_number: batchNumber
+                });
+                continue;
+              }
+              seenBatchFingerprints.add(fingerprint);
 
             // Check for FastMCP error format: { "content": [...], "isError": true }
             if (batch.isError === true && batch.content) {
@@ -345,7 +369,8 @@ class McpStreamHandler {
               log.debug(`Received batch ${batchCount}`, {
                 batchNumber: batch.batchNumber,
                 count: batch.count,
-                cumulativeCount: batch.cumulativeCount
+                cumulativeCount: batch.cumulativeCount,
+                duplicateBatchCount
               });
 
               // Update size estimate
@@ -425,6 +450,7 @@ class McpStreamHandler {
         } else {
           // Merge all batches into single result
           const mergedResult = this.mergeBatches(batches, batchCount, totalSize, log);
+          mergedResult._duplicateBatchCount = duplicateBatchCount;
           resolve(mergedResult);
         }
       });
@@ -440,6 +466,7 @@ class McpStreamHandler {
         // Return partial results if we got any
         if (batches.length > 0) {
           const mergedResult = this.mergeBatches(batches, batchCount, totalSize, log);
+          mergedResult._duplicateBatchCount = duplicateBatchCount;
           mergedResult.partial = true;
           mergedResult.error = `Stream error: ${err.message}`;
           resolve(mergedResult);
@@ -467,25 +494,46 @@ class McpStreamHandler {
 
     // Extract all results from batches - merge all results arrays
     const allResults = [];
+    const seenRecordKeys = new Set();
+    let duplicateResultsDropped = 0;
     for (const batch of batches) {
-      const batchText = batch.content[0].text;
-      const textJson = JSON.parse(batchText);
-      for (const br of textJson) {
-        const batchRecord = JSON.parse(br);
-        if (batchRecord.results && Array.isArray(batchRecord.results)) {
-          allResults.push(...batchRecord.results);
+      let batchRows = [];
+      if (Array.isArray(batch.results)) {
+        batchRows = batch.results;
+      } else if (batch.content && Array.isArray(batch.content) && batch.content[0] && batch.content[0].text) {
+        const batchText = batch.content[0].text;
+        const textJson = JSON.parse(batchText);
+        for (const br of textJson) {
+          const batchRecord = JSON.parse(br);
+          if (batchRecord.results && Array.isArray(batchRecord.results)) {
+            batchRows.push(...batchRecord.results);
+          }
         }
       }
+      for (const row of batchRows) {
+        let key = null;
+        if (row && typeof row === 'object') {
+          key = row.genome_id || row.patric_id || row.id || row.workflow_id || row.job_id || null;
+        }
+        if (!key) {
+          key = JSON.stringify(row);
+        }
+        if (seenRecordKeys.has(key)) {
+          duplicateResultsDropped += 1;
+          continue;
+        }
+        seenRecordKeys.add(key);
+        allResults.push(row);
+      }
     }
-    console.log(`allResults.length: ${allResults.length}`);
-
     const lastBatch = batches[batches.length - 1];
 
     log.info('Merged batches', {
       totalBatches: batchCount,
       totalResults: allResults.length,
       estimatedSize: totalSize,
-      numFound: lastBatch.numFound
+      numFound: lastBatch.numFound,
+      duplicate_results_dropped: duplicateResultsDropped
     });
 
     // Return only the essential fields - no batch metadata
@@ -499,6 +547,7 @@ class McpStreamHandler {
     
     // Add batchCount as internal metadata (won't be saved to file)
     merged._batchCount = batchCount;
+    merged._duplicateResultsDropped = duplicateResultsDropped;
     
     return merged;
   }

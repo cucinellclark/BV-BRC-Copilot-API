@@ -400,8 +400,8 @@ class FileManager {
     if (normalized.metadata && normalized.metadata.queryParameters) {
       fileReference.queryParameters = normalized.metadata.queryParameters;
     }
-    if (normalized.metadata && normalized.metadata.call && typeof normalized.metadata.call === 'object') {
-      fileReference.call = normalized.metadata.call;
+    if (normalized.metadata && normalized.metadata.replay && typeof normalized.metadata.replay === 'object') {
+      fileReference.replay = normalized.metadata.replay;
     }
 
     // Add workspace info if uploaded

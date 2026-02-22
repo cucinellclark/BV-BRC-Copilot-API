@@ -493,20 +493,20 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
         }
 
         const toolCall = req.body && typeof req.body.tool_call === 'object' ? req.body.tool_call : {};
-        const toolId = req.body.tool_id || toolCall.tool || toolCall.tool_id;
-        const parameters = req.body.parameters || req.body.arguments_executed || toolCall.arguments_executed || toolCall.arguments || {};
+        const toolId = req.body.tool_id || toolCall.action;
+        const parameters = req.body.parameters || toolCall.arguments || {};
         const replayPageSize = req.body.page_size;
         const sessionId = req.body.session_id || null;
         const userId = req.user || req.body.user_id || null;
 
         if (!toolId || typeof toolId !== 'string') {
             return res.status(400).json({
-                message: 'tool_id (or tool_call.tool) is required'
+                message: 'tool_id (or tool_call.action) is required'
             });
         }
         if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
             return res.status(400).json({
-                message: 'parameters (or tool_call.arguments_executed) must be an object'
+                message: 'parameters (or tool_call.arguments) must be an object'
             });
         }
         if (replayPageSize !== undefined) {
@@ -548,18 +548,24 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
             logger
         );
 
-        const normalizedCall = (result && result.call && typeof result.call === 'object')
-            ? result.call
-            : {
-                tool: toolId,
-                arguments_executed: parameters,
-                replayable: isReplayableTool(toolId)
-            };
+        const normalizedCall = {
+            id: uuidv4(),
+            run_id: null,
+            iteration: null,
+            action: toolId,
+            sequence: 1,
+            arguments: parameters,
+            replay: (result && typeof result.replay === 'object') ? result.replay : null,
+            status: (result && result.error) ? 'error' : 'success',
+            result_ref: {
+                type: result && result.type === 'file_reference' ? 'file_reference' : 'inline_result'
+            }
+        };
 
         return res.status(200).json({
             message: 'Tool replay executed successfully',
             tool_id: toolId,
-            call: normalizedCall,
+            tool_call: normalizedCall,
             result
         });
     } catch (error) {
@@ -1395,14 +1401,6 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
 
         const messages = await getSessionMessages(session_id);
 
-        // Debug: Log messages with ui_tool_calls before sending to frontend
-        console.log('********** Messages being sent to frontend **********');
-        messages.forEach((msg, idx) => {
-            if (Array.isArray(msg.ui_tool_calls) && msg.ui_tool_calls.length > 0) {
-                console.log(`Message ${idx} has ui_tool_calls:`, msg.ui_tool_calls);
-            }
-        });
-
         const workflowRows = mapWorkflowIdsToGridRows(workflowIds);
         const workflowGrid = buildGridEnvelope('workflow', {
             source: 'bvbrc-copilot-session',
@@ -1422,9 +1420,6 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
                 workflow_ids: workflowIds,
                 workflow_grid: workflowGrid
             };
-            console.log('********** ENTIRE PAYLOAD TO CLIENT (without files) **********');
-            console.log(JSON.stringify(payload, null, 2));
-            console.log('********** END PAYLOAD **********');
             return res.status(200).json(payload);
         }
 
@@ -1449,9 +1444,6 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
                 total_size_bytes: totalSize
             }
         };
-        console.log('********** ENTIRE PAYLOAD TO CLIENT (with files) **********');
-        console.log(JSON.stringify(payload, null, 2));
-        console.log('********** END PAYLOAD **********');
         res.status(200).json(payload);
     } catch (error) {
         console.error('Error retrieving session messages:', error);
