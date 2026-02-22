@@ -1395,11 +1395,11 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
 
         const messages = await getSessionMessages(session_id);
 
-        // Debug: Log messages with tool_call before sending to frontend
+        // Debug: Log messages with ui_tool_calls before sending to frontend
         console.log('********** Messages being sent to frontend **********');
         messages.forEach((msg, idx) => {
-            if (msg.tool_call) {
-                console.log(`Message ${idx} has tool_call:`, msg.tool_call);
+            if (Array.isArray(msg.ui_tool_calls) && msg.ui_tool_calls.length > 0) {
+                console.log(`Message ${idx} has ui_tool_calls:`, msg.ui_tool_calls);
             }
         });
 

@@ -450,6 +450,24 @@ function buildAssistantToolDisplayMetadata(toolId, toolResult) {
   return {};
 }
 
+function buildUiToolCallEntry(toolId, toolResult, executionTrace) {
+  if (!toolId || typeof toolId !== 'string') {
+    return null;
+  }
+  const normalizedResult = (toolResult && typeof toolResult === 'object') ? { ...toolResult } : {};
+  delete normalizedResult.chatSummary;
+  delete normalizedResult.uiAction;
+
+  const toolCall = buildToolCallEnvelope(toolId, normalizedResult, executionTrace);
+  const displayMetadata = buildAssistantToolDisplayMetadata(toolId, normalizedResult);
+
+  return {
+    source_tool: toolId,
+    tool_call: toolCall,
+    ...displayMetadata
+  };
+}
+
 function toBooleanFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
@@ -1577,35 +1595,41 @@ async function executeAgentLoop(opts) {
       preferred_ui_tool: preferredUiSourceTool || null,
       used_fallback_source_tool: !lastUiPreferredTool && !preferredUiToolFromTrace && !!finalResponseSourceTool
     });
-    if (preferredUiSourceTool) {
-      assistantMessage.ui_source_tool = preferredUiSourceTool;
-      const uiToolResult = toolResults[preferredUiSourceTool];
-      if (uiToolResult && typeof uiToolResult === 'object') {
-        const sanitizedUiToolResult = { ...uiToolResult };
-        delete sanitizedUiToolResult.chatSummary; // Remove if MCP server provided it
-        delete sanitizedUiToolResult.uiAction; // Remove if MCP server provided it
 
-        const uiToolCallEnvelope = buildToolCallEnvelope(
-          preferredUiSourceTool,
-          sanitizedUiToolResult,
-          executionTrace
-        );
-        assistantMessage.ui_tool_call = uiToolCallEnvelope;
-        // Backward compatibility: existing clients read assistantMessage.tool_call.
-        assistantMessage.tool_call = uiToolCallEnvelope;
-        Object.assign(
-          assistantMessage,
-          buildAssistantToolDisplayMetadata(preferredUiSourceTool, sanitizedUiToolResult)
-        );
-      } else {
-        const uiFallbackToolCall = {
-          tool: preferredUiSourceTool,
-          arguments_executed: findLatestToolParameters(executionTrace, preferredUiSourceTool),
-          replayable: false
-        };
-        assistantMessage.ui_tool_call = uiFallbackToolCall;
-        assistantMessage.tool_call = uiFallbackToolCall;
+    const uiToolCalls = [];
+    for (let i = 0; i < uiPreferredTools.length; i += 1) {
+      const toolId = uiPreferredTools[i];
+      const entry = buildUiToolCallEntry(toolId, toolResults[toolId], executionTrace);
+      if (entry) {
+        uiToolCalls.push(entry);
       }
+    }
+    if (uiToolCalls.length === 0 && preferredUiSourceTool) {
+      const fallbackEntry = buildUiToolCallEntry(
+        preferredUiSourceTool,
+        toolResults[preferredUiSourceTool],
+        executionTrace
+      );
+      if (fallbackEntry) {
+        uiToolCalls.push(fallbackEntry);
+      }
+    }
+
+    if (uiToolCalls.length > 0) {
+      assistantMessage.ui_tool_calls = uiToolCalls;
+      const activeUiTool = uiToolCalls[uiToolCalls.length - 1];
+      assistantMessage.ui_source_tool = activeUiTool.source_tool || preferredUiSourceTool || null;
+      assistantMessage.ui_active_tool_call = activeUiTool.tool_call || null;
+      Object.assign(assistantMessage, {
+        isWorkflow: activeUiTool.isWorkflow,
+        workflow_id: activeUiTool.workflow_id,
+        workflow_name: activeUiTool.workflow_name,
+        workflow_status: activeUiTool.workflow_status,
+        isWorkspaceBrowse: activeUiTool.isWorkspaceBrowse,
+        isJobsBrowse: activeUiTool.isJobsBrowse,
+        chatSummary: activeUiTool.chatSummary,
+        uiAction: activeUiTool.uiAction
+      });
     }
 
     if (finalResponseSourceTool) {
