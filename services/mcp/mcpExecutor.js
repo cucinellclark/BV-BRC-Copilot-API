@@ -1517,6 +1517,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
     }
 
     // Attach normalized call metadata so clients can replay selected queries.
+    /*
     if (result && typeof result === 'object' && !Array.isArray(result)) {
       const replayable = isReplayableTool(toolId);
       const replayPageSize = getReplayPageSize(context);
@@ -1535,6 +1536,7 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
         result.call.rql_replay = rqlReplay;
       }
     }
+    */
 
     // Special-case RAG tools: normalize and limit documents
     if (isRagTool(toolId)) {

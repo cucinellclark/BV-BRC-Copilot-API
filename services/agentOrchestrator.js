@@ -249,19 +249,15 @@ function buildToolCallEnvelope(toolId, toolResult, executionTrace) {
     ? call.arguments_executed
     : findLatestToolParameters(executionTrace, toolId);
 
+  console.log('********** Building Envelope ***********', call);
+  console.log('****************************************');
+
   const envelope = {
     tool: call.tool || toolId,
     arguments_executed: args || {},
-    replayable: call.replayable === true
+    replayable: call.replayable === true,
+    replay: call.replay || null
   };
-
-  if (typeof call.backend_method === 'string' && call.backend_method.length > 0) {
-    envelope.backend_method = call.backend_method;
-  }
-  if (call.rql_replay && typeof call.rql_replay === 'object') {
-    envelope.rql_replay = call.rql_replay;
-  }
-  // TODO(solr_replay): include envelope.solr_replay when we add Solr replay payloads.
   return envelope;
 }
 
@@ -1423,13 +1419,10 @@ async function executeAgentLoop(opts) {
       assistantMessage.ui_source_tool = preferredUiSourceTool;
       const uiToolResult = toolResults[preferredUiSourceTool];
       if (uiToolResult && typeof uiToolResult === 'object') {
-        const sanitizedUiToolResult = { ...uiToolResult };
-        delete sanitizedUiToolResult.chatSummary; // Remove if MCP server provided it
-        delete sanitizedUiToolResult.uiAction; // Remove if MCP server provided it
 
         const uiToolCallEnvelope = buildToolCallEnvelope(
           preferredUiSourceTool,
-          sanitizedUiToolResult,
+          uiToolResult,
           executionTrace
         );
         assistantMessage.ui_tool_call = uiToolCallEnvelope;
@@ -1437,7 +1430,7 @@ async function executeAgentLoop(opts) {
         assistantMessage.tool_call = uiToolCallEnvelope;
         Object.assign(
           assistantMessage,
-          buildAssistantToolDisplayMetadata(preferredUiSourceTool, sanitizedUiToolResult)
+          buildAssistantToolDisplayMetadata(preferredUiSourceTool, uiToolResult)
         );
       } else {
         const uiFallbackToolCall = {
