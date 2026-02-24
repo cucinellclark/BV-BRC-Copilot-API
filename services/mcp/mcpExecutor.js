@@ -442,12 +442,24 @@ function unwrapMcpContent(result) {
   // Try structuredContent.result first (preferred)
   if (result.structuredContent?.result) {
     try {
+      let inner;
       // If it's a JSON string, parse it
       if (typeof result.structuredContent.result === 'string') {
-        return JSON.parse(result.structuredContent.result);
+        inner = JSON.parse(result.structuredContent.result);
+      } else {
+        // If it's already an object, return it
+        inner = result.structuredContent.result;
       }
-      // If it's already an object, return it
-      return result.structuredContent.result;
+      // Preserve sibling keys from structuredContent (e.g., "call")
+      const siblingKeys = Object.keys(result.structuredContent).filter(k => k !== 'result');
+      if (siblingKeys.length > 0 && inner && typeof inner === 'object' && !Array.isArray(inner)) {
+        for (const key of siblingKeys) {
+          if (!(key in inner)) {
+            inner[key] = result.structuredContent[key];
+          }
+        }
+      }
+      return inner;
     } catch (parseError) {
       // If parsing fails, return the string as-is
       return result.structuredContent.result;
@@ -497,25 +509,34 @@ function unwrapMcpContent(result) {
 
   // Check if result.result exists and is a JSON string (some MCP servers wrap this way)
   if (result.result !== undefined) {
+    // Check for sibling keys (e.g., "call") that should be preserved
+    const siblingKeys = Object.keys(result).filter(k => k !== 'result');
+    let inner;
     if (typeof result.result === 'string') {
       try {
         const trimmed = result.result.trim();
         if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-          return JSON.parse(result.result);
+          inner = JSON.parse(result.result);
+        } else {
+          inner = result.result;
         }
-        // Not JSON-like, return as string
-        return result.result;
       } catch (parseError) {
-        // If parsing fails, return the string as-is
-        return result.result;
+        inner = result.result;
       }
     } else if (typeof result.result === 'object' && result.result !== null) {
-      // If result.result is already an object, return it directly
-      return result.result;
+      inner = result.result;
     } else {
-      // For other types (boolean, number, etc), return as-is
-      return result.result;
+      inner = result.result;
     }
+    // If there are sibling keys and inner is an object, merge them in
+    if (siblingKeys.length > 0 && inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      for (const key of siblingKeys) {
+        if (!(key in inner)) {
+          inner[key] = result[key];
+        }
+      }
+    }
+    return inner;
   }
 
   // No wrapper detected, return as-is

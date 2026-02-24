@@ -495,7 +495,7 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
         const toolCall = req.body && typeof req.body.tool_call === 'object' ? req.body.tool_call : {};
         const toolId = req.body.tool_id || toolCall.tool || toolCall.tool_id;
         const parameters = req.body.parameters || req.body.arguments_executed || toolCall.arguments_executed || toolCall.arguments || {};
-        const replayPageSize = req.body.page_size;
+        const replayPageSize = req.body.page_size || config.global_settings?.replay_data_page_size_default;
         const sessionId = req.body.session_id || null;
         const userId = req.user || req.body.user_id || null;
 

@@ -17,15 +17,18 @@ EXECUTION GUIDELINES:
      → Use helpdesk_service_usage (from copilot_mcp_server/internal_server)
      → Examples: "What can I do in BV-BRC?", "What features does BV-BRC have?", "How do I use BV-BRC?"
    - For specific data queries requesting actual records/data:
-     → Use bvbrc_plan_query_collection or bvbrc_query_collection (from bvbrc_server)
+     → Use bvbrc_search_data
      → Examples: "find E. coli genomes", "show resistant strains", "list all Salmonella genomes"
-   - If the query asks about BV-BRC itself (capabilities, features, how-to), it's a helpdesk question
-   - If the query asks for specific data/records from collections, it's a data query
-4. For data queries, use solr_collection_parameters first to understand available fields and collections
-5. Use countOnly:true when you only need to know how many results exist
-6. Always include the token parameter (it will be auto-provided)
-7. For internal_server.* file tools: NEVER choose or invent a session_id (e.g. "default"). The system will inject/bind the correct Copilot session_id automatically.
-8. When you have sufficient information to answer the user's question, choose FINALIZE
+    - For finding, listing, or searching files in the user's personal workspace:
+      → Use workspace_browse_tool (from bvbrc_server)
+      → Signals: "my files", "my workspace", "find my [X] files", references to user-uploaded data
+      → Use name_contains for filename search terms
+    - If the query asks about BV-BRC itself (capabilities, features, how-to), it's a helpdesk question
+    - If the query asks for specific data/records from BV-BRC database collections, it's a data query
+    - If the query refers to the user's own files or workspace, it's a workspace query
+4. Use countOnly:true when you only need to know how many results exist
+5. Always include the token parameter (it will be auto-provided)
+6. When you have sufficient information to answer the user's question, choose FINALIZE
 
 CRITICAL - UNDERSTANDING FILE REFERENCES:
 When a tool returns a file_reference (type: 'file_reference'), the tool has either successfully retrieved the data and saved it to a file, or it has failed to retrieve the data and returned a file_reference with an error message.
@@ -36,8 +39,6 @@ File references include a file identifier "file_id". When calling internal_serve
 
 CRITICAL - AVOID INFINITE LOOPS:
 Before choosing your next action, check the execution trace carefully:
-  - NEVER repeat the exact same action with the exact same parameters
-  - If you've already successfully retrieved data (file_reference or inline), DO NOT query it again
   - If you're about to do something you already did, either:
     * Choose a different action to get new information
     * Use a file tool to analyze existing data differently
