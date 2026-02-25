@@ -6,6 +6,7 @@ const {
   setupOpenaiClient,
   queryClient,
   queryRequestChat,
+  queryRequestChatArgo,
   queryRequestEmbedding,
   queryRequestEmbeddingTfidf,
   queryLambdaModel,
@@ -13,6 +14,7 @@ const {
   queryChatImage,
   queryRag,
   postJson,
+  postJsonStream,
   LLMServiceError
 } = require('./llmServices');
 const {
@@ -27,6 +29,14 @@ const {
 const { ChromaClient } = require('chromadb');
 const fs = require('fs');
 
+// === New helper modules (refactor) ===
+const { safeParseJson } = require('./jsonUtils');
+const { prepareCopilotContext } = require('./contextBuilder');
+const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
+const promptManager = require('../prompts');
+const { buildConversationContext } = require('./memory/conversationContextService');
+const { maybeQueueSummary } = require('./summaryQueueService');
+
 const MAX_TOKEN_HEADROOM = 500;
 
 const config = require('../config.json');
@@ -39,6 +49,45 @@ function createMessage(role, content, tokenCount) {
     content,
     timestamp: new Date()
   };
+}
+
+function getRagApiName() {
+  const explicitName = process.env.RAG_API_NAME || config.rag_api_name;
+  if (explicitName && String(explicitName).trim()) {
+    return String(explicitName).trim();
+  }
+
+  const ragApiBaseUrl = process.env.RAG_API_URL || config.rag_api_url;
+  if (!ragApiBaseUrl) {
+    return 'rag-api';
+  }
+
+  try {
+    const parsed = new URL(ragApiBaseUrl);
+    return parsed.hostname || 'rag-api';
+  } catch (_error) {
+    return 'rag-api';
+  }
+}
+
+function attachRagChunkMetadata(documentResults, ragDb) {
+  const ragApiName = getRagApiName();
+  return (Array.isArray(documentResults) ? documentResults : []).map((doc) => {
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+      return doc;
+    }
+    const existingMetadata = (doc.metadata && typeof doc.metadata === 'object' && !Array.isArray(doc.metadata))
+      ? doc.metadata
+      : {};
+    return {
+      ...doc,
+      metadata: {
+        ...existingMetadata,
+        rag_api_name: existingMetadata.rag_api_name || ragApiName,
+        rag_db: existingMetadata.rag_db || ragDb || existingMetadata.config_name || null
+      }
+    };
+  });
 }
 
 function getOpenaiClient(modelData) {
@@ -99,225 +148,48 @@ async function runModel(ctx, modelData) {
       ctx.prompt
     );
   }
+  if (modelData.queryType === 'argo') {
+    return await queryRequestChatArgo(
+      modelData.endpoint,
+      ctx.model,
+      ctx.systemPrompt,
+      ctx.prompt
+    );
+  }
   throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
 }
 
 async function handleCopilotRequest(opts) {
   try {
-    // Destructure and set defaults from incoming options
     const {
-      query = '',
-      model,
-      session_id,
-      user_id,
-      system_prompt = '',
       save_chat = true,
-      include_history = true,
-      rag_db = null,
-      num_docs,
-      image = null,
-      enhanced_prompt = null,
-      ...rest // capture any additional, future fields without breaking
+      session_id,
+      user_id
     } = opts;
 
-    // ------------------------------------------------------------------
-    // (1) Determine whether to enhance the query / route to help-desk RAG
-    // ------------------------------------------------------------------
+    // Build context (deduplicated logic)
+    const {
+      ctx,
+      modelData,
+      userMessage,
+      systemMessage,
+      chatSession
+    } = await prepareCopilotContext(opts);
 
-    // Retrieve model configuration (API key, endpoint, etc.)
-    const modelData = await getModelData(model);
+    // Obtain assistant response in a single shot
+    const assistantText = await runModel(ctx, modelData);
+    const assistantMessage = createMessage('assistant', assistantText);
 
-    // Get conversation history first so it can be used in screenshot assessment
-    const chatSession = await getChatSession(session_id);
-    const history = chatSession?.messages || [];
-
-    // System prompt instructing the model to return structured JSON
-    const defaultInstructionPrompt = 
-    'You are an assistant that only outputs JSON. Do not write any explanatory text or natural language.\n' +
-    'Your tasks are:\n' +
-    '1. Store the original user query in the "query" field.\n' +
-    '2. Rewrite the query as "enhancedQuery" by intelligently incorporating any *relevant* context provided, while preserving the original intent.\n' +
-    '   - If the original query is vague (e.g., "describe this page") and appears to reference a page, tool, feature, or system, rewrite it to make the help-related intent clear.\n' +
-    '   - If there is no relevant context or no need to enhance, copy the original query into "enhancedQuery".\n' +
-    '3. Set "rag_helpdesk" to true if the query relates to helpdesk-style topics such as:\n' +
-    '   - website functionality\n' +
-    '   - troubleshooting\n' +
-    '   - how-to questions\n' +
-    '   - user issues or technical support needs\n' +
-    '   - vague references to a page, tool, or feature that may require explanation or support\n' +
-    '   - **any question mentioning the BV-BRC (Bacterial and Viral Bioinformatics Resource Center) or its functionality**\n\n';
-
-    const contextAndFormatInstructions = 
-    '\n\nAdditional context for the page the user is on, as well as relevant data, is provided below. Use it only if it helps clarify or improve the query:\n' +
-    `${system_prompt}\n\n` +
-    'Return ONLY a JSON object in the following format:\n' +
-    '{\n' +
-    '  "query": "<original user query>",\n' +
-    '  "enhancedQuery": "<rewritten or same query>",\n' +
-    '  "rag_helpdesk": <true or false>\n' +
-    '}';
-
-    console.log('***** enhanced_prompt *****\n', enhanced_prompt);
-
-    const instructionSystemPrompt = (enhanced_prompt || defaultInstructionPrompt) + contextAndFormatInstructions;
-  
-
-    // Call the LLM (image-aware if image is present)
-    let instructionResponse;
-    if (image) {
-      instructionResponse = await queryChatImage({
-        url: modelData.endpoint,
-        model,
-        query,
-        image,
-        system_prompt: instructionSystemPrompt
-      });
-    } else {
-      instructionResponse = await queryChatOnly({
-        query,
-        model,
-        system_prompt: instructionSystemPrompt,
-        modelData
-      });
-    }
-
-    // Utility for safely parsing possibly-wrapped JSON
-    const safeParseJson = (text) => {
-      if (!text || typeof text !== 'string') return null;
-      // Remove markdown fences if the model wrapped the JSON
-      const cleaned = text
-        .replace(/```json[\s\S]*?```/gi, (m) => m.replace(/```json|```/gi, ''))
-        .replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ''))
-        .trim();
-
-      try {
-        return JSON.parse(cleaned);
-      } catch (_) {
-        // Fallback: extract first {...} block
-        const first = cleaned.indexOf('{');
-        const last  = cleaned.lastIndexOf('}');
-        if (first !== -1 && last !== -1) {
-          try { return JSON.parse(cleaned.slice(first, last + 1)); } catch (_) { return null; }
-        }
-      }
-      return null;
-    };
-
-    const parsed = safeParseJson(instructionResponse) || {
-      query,
-      enhancedQuery: query,
-      rag_helpdesk: false
-    };
-    console.log('***** parsed *****\n', parsed);
-
-    const finalQuery      = parsed.enhancedQuery || query;
-    const useHelpdeskRag  = !!parsed.rag_helpdesk;
-    const activeRagDb     = useHelpdeskRag ? 'bvbrc_helpdesk' : null;
-
-    // ------------------------------------------------------------------
-    // (2) Build context: history, RAG retrieval, embeddings, etc.
-    // ------------------------------------------------------------------
-
-    // chatSession and history are already retrieved above for screenshot assessment
-
-    // Retrieve documents (if RAG)
-    let ragDocs = null;
-    if (activeRagDb) {
-      var { documents = ['No documents found'] } = await queryRag(
-        finalQuery,
-        activeRagDb,
-        user_id,
-        model,
-        num_docs,
-        session_id
-      );
-      ragDocs = documents;
-    }
-
-    if (rag_db && rag_db !== 'bvbrc_helpdesk') {
-      var { documents = ['No documents found'] } = await queryRag(
-        finalQuery,
-        rag_db,
-        user_id,
-        model,
-        num_docs,
-        session_id
-      );
-
-      if (ragDocs && ragDocs.length > 0) {
-        ragDocs = ragDocs.concat(documents);
-      } else {
-        ragDocs = documents;
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // (3) Construct the prompt (history + RAG documents)
-    // ------------------------------------------------------------------
-
-    const max_tokens = 40000;
-    let promptWithHistory = finalQuery;
-    if (include_history && history.length > 0) {
-      promptWithHistory = await createQueryFromMessages(
-        finalQuery,
-        history,
-        system_prompt,
-        max_tokens
-      );
-    }
-
-    if (ragDocs) {
-      if (include_history && history.length > 0) {
-        promptWithHistory = `${promptWithHistory}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
-      } else {
-        promptWithHistory = `Current User Query: ${finalQuery}\n\nRAG retrieval results:\n${ragDocs.join('\n\n')}`;
-      }
-    }
-
-    // Update context object for runModel convenience
-    const ctx = {
-      prompt: promptWithHistory,
-      systemPrompt: system_prompt,
-      model,
-      image,
-      ragDocs
-    };
-
-    // ------------------------------------------------------------------
-    // (4) Obtain model response
-    // ------------------------------------------------------------------
-
-    const response = await runModel(ctx, modelData);
-
-    // ------------------------------------------------------------------
-    // (5) Persist conversation + embeddings
-    // ------------------------------------------------------------------
-
-    // Create message objects
-    const userContentForHistory = `Enhanced User Query: ${finalQuery}\n\nInstruction System Prompt: ${instructionSystemPrompt}`;
-
-    const userMessage       = createMessage('user', query);
-    const assistantMessage  = createMessage('assistant', response);
-
-    let systemMessage = null;
-    if (system_prompt && system_prompt.trim() !== '') {
-      systemMessage = createMessage('system', system_prompt);
-      if (ragDocs) systemMessage.documents = ragDocs;
-      if (userContentForHistory) systemMessage.copilotDetails = userContentForHistory;
-    }
-
-    // Ensure chat session exists if we intend to save
-    if (!chatSession && save_chat) {
-      await createChatSession(session_id, user_id);
-    }
-
-    // Store messages
+    // Persist conversation
     if (save_chat) {
-      const toInsert = systemMessage
-        ? [userMessage, systemMessage, assistantMessage]
-        : [userMessage, assistantMessage];
-
+      if (!chatSession) await createChatSession(session_id, user_id);
+      const toInsert = systemMessage ? [userMessage, systemMessage, assistantMessage]
+                                     : [userMessage, assistantMessage];
       await addMessagesToSession(session_id, toInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + toInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
     }
 
     return {
@@ -327,9 +199,7 @@ async function handleCopilotRequest(opts) {
       ...(systemMessage && { systemMessage })
     };
   } catch (error) {
-    if (error instanceof LLMServiceError) {
-      throw error;
-    }
+    if (error instanceof LLMServiceError) throw error;
     throw new LLMServiceError('Failed to handle copilot request', error);
   }
 }
@@ -337,10 +207,8 @@ async function handleCopilotRequest(opts) {
 async function handleChatRequest({ query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true }) {
   try {
     const modelData = await getModelData(model);
-    const max_tokens = 40000;
     const chatSession = await getChatSession(session_id);
 
-    const llmMessages = []; // used for queryClient
     const userMessage = createMessage('user', query);
     //(url, model, apiKey, query)
     const embedding_url = config['embedding_url'];
@@ -351,33 +219,31 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
     // Creates a system message recorded in the conversation history if system_prompt is provided
     let systemMessage = null;
     if (system_prompt && system_prompt.trim() !== '') {
-      llmMessages.push({ role: 'system', content: system_prompt });
       systemMessage = createMessage('system', system_prompt);
     }
 
-    // Get the conversation history from the database
-    const chatSessionMessages = chatSession?.messages || [];
-    
-    llmMessages.push({ role: 'user', content: query });
+    const modelSystemPrompt = (system_prompt && system_prompt.trim() !== '')
+      ? system_prompt
+      : promptManager.getSystemPrompt('default');
 
-    let prompt_query;
-    if (include_history) {
-      prompt_query = await createQueryFromMessages(query, chatSessionMessages, system_prompt || '', max_tokens);
-    } else {
-      prompt_query = query;
-    }
-
-    if (!system_prompt || system_prompt.trim() === '') {
-      system_prompt = 'You are a helpful assistant that can answer questions.';
-    }
+    const context = await buildConversationContext({
+      session_id,
+      user_id,
+      query,
+      system_prompt: modelSystemPrompt,
+      include_history,
+      chatSession
+    });
 
     let response;
     try {
       if (modelData.queryType === 'client') {
         const openai_client = setupOpenaiClient(modelData.apiKey, modelData.endpoint);
-        response = await queryClient(openai_client, model, llmMessages);
+        response = await queryClient(openai_client, model, context.messages);
       } else if (modelData.queryType === 'request') {
-        response = await queryRequestChat(modelData.endpoint, model, system_prompt || '', prompt_query);
+        response = await queryRequestChat(modelData.endpoint, model, modelSystemPrompt, context.prompt);
+      } else if (modelData.queryType === 'argo') {
+        response = await queryRequestChatArgo(modelData.endpoint, model, modelSystemPrompt, context.prompt);
       } else {
         throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
       }
@@ -402,10 +268,14 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
 
     if (save_chat) {
       await addMessagesToSession(session_id, messagesToInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
     }
 
-    return { 
-      message: 'success', 
+    return {
+      message: 'success',
       userMessage,
       assistantMessage,
       ...(systemMessage && { systemMessage })
@@ -420,9 +290,7 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
 
 async function handleRagRequest({ query, rag_db, user_id, model, num_docs, session_id, save_chat = true, include_history = false }) {
   try {
-    const modelData = await getModelData(model);
     const chatSession = await getChatSession(session_id);
-    const chatSessionMessages = chatSession?.messages || [];
 
     const userMessage = createMessage('user', query, 1);
 
@@ -430,21 +298,22 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     const embedding_model = config['embedding_model'];
     const embedding_apiKey = config['embedding_apiKey'];
 
-    // embedding created in distllm
-    var { documents, embedding: user_embedding } = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    // Retrieve contextual documents from the selected RAG database.
+    const ragResult = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
+      ? ragResult.documents
+      : ['No documents found'];
+    const rawDocumentResults = attachRagChunkMetadata(
+      Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents,
+      rag_db
+    );
 
-    if (!documents || documents.length === 0) {
-      documents = ['No documents found'];
-    }
+    const prompt_query = promptManager.formatRagPrompt(query, documents);
+    const system_prompt = promptManager.getSystemPrompt('rag');
 
-    var prompt_query = 'RAG retrieval results:\n' + documents.join('\n\n');
-    prompt_query = "Current User Query: " + query + "\n\n" + prompt_query;
-    var system_prompt = "You are a helpful AI assistant that can answer questions." + 
-     "You are given a list of documents and a user query. " +
-     "You need to answer the user query based on the documents if those documents are relevant to the user query. " +
-     "If they are not relevant, you need to answer the user query based on your knowledge. ";
+    console.log('=== FINALIZED RAG PROMPT ===\n', prompt_query, '\n=== END PROMPT ===');
 
-    response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
+    let response = await handleChatQuery({ query: prompt_query, model, system_prompt: system_prompt || '' });
 
     if (!response) {
       response = 'No response from model';
@@ -454,13 +323,13 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
     let systemMessage = null;
     if (system_prompt) {
       systemMessage = createMessage('system', system_prompt);
-      if (documents && documents.length > 0) {
-        systemMessage.documents = documents;
+      if (rawDocumentResults && rawDocumentResults.length > 0) {
+        systemMessage.documents = rawDocumentResults;
       }
     }
 
     const assistantMessage = createMessage('assistant', response, 1);
-    const assistant_embedding = await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, response);
+    await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, response);
 
     if (!chatSession && save_chat) {
       await createChatSession(session_id, user_id);
@@ -475,8 +344,8 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
       await addMessagesToSession(session_id, messagesToInsert);
     }
 
-    return { 
-      message: 'success', 
+    return {
+      message: 'success',
       userMessage,
       assistantMessage,
       ...(systemMessage && { systemMessage })
@@ -486,6 +355,105 @@ async function handleRagRequest({ query, rag_db, user_id, model, num_docs, sessi
       throw error;
     }
     throw new LLMServiceError('Failed to handle RAG request', error);
+  }
+}
+
+async function handleRagStreamRequest({
+  query,
+  rag_db,
+  user_id,
+  model,
+  num_docs,
+  session_id,
+  save_chat = true,
+  include_history = false,
+  onChunk
+}) {
+  try {
+    if (typeof onChunk !== 'function') {
+      throw new LLMServiceError('handleRagStreamRequest requires an onChunk callback');
+    }
+
+    const modelData = await getModelData(model);
+    const chatSession = await getChatSession(session_id);
+    const userMessage = createMessage('user', query, 1);
+
+    const embedding_url = config['embedding_url'];
+    const embedding_model = config['embedding_model'];
+    const embedding_apiKey = config['embedding_apiKey'];
+
+    const ragResult = await queryRag(query, rag_db, user_id, model, num_docs, session_id);
+    const documents = Array.isArray(ragResult?.documents) && ragResult.documents.length > 0
+      ? ragResult.documents
+      : ['No documents found'];
+    const rawDocumentResults = attachRagChunkMetadata(
+      Array.isArray(ragResult?.document_results) ? ragResult.document_results : documents,
+      rag_db
+    );
+
+    const prompt_query = promptManager.formatRagPrompt(query, documents);
+    const system_prompt = promptManager.getSystemPrompt('rag') || '';
+
+    console.log('=== FINALIZED RAG PROMPT ===\n', prompt_query, '\n=== END PROMPT ===');
+
+    // Build the same style of context used for non-streaming RAG path.
+    const ctx = {
+      model,
+      prompt: prompt_query,
+      systemPrompt: system_prompt,
+      image: null
+    };
+
+    let assistantBuffer = '';
+    await runModelStream(ctx, modelData, (text) => {
+      if (!text) return;
+      assistantBuffer += text;
+      onChunk(text);
+    });
+
+    if (!assistantBuffer) {
+      assistantBuffer = 'No response from model';
+      onChunk(assistantBuffer);
+    }
+
+    let systemMessage = null;
+    if (system_prompt) {
+      systemMessage = createMessage('system', system_prompt);
+      if (rawDocumentResults && rawDocumentResults.length > 0) {
+        systemMessage.documents = rawDocumentResults;
+      }
+    }
+
+    const assistantMessage = createMessage('assistant', assistantBuffer, 1);
+    await queryRequestEmbedding(embedding_url, embedding_model, embedding_apiKey, assistantBuffer);
+
+    if (!chatSession && save_chat) {
+      await createChatSession(session_id, user_id);
+    }
+
+    const messagesToInsert = systemMessage
+      ? [userMessage, systemMessage, assistantMessage]
+      : [userMessage, assistantMessage];
+
+    if (save_chat) {
+      await addMessagesToSession(session_id, messagesToInsert);
+      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
+    }
+
+    return {
+      message: 'success',
+      userMessage,
+      assistantMessage,
+      ...(systemMessage && { systemMessage })
+    };
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to handle streaming RAG request', error);
   }
 }
 
@@ -545,8 +513,8 @@ async function handleChatImageRequest({ query, model, session_id, user_id, image
       await addMessagesToSession(session_id, messagesToInsert);
     }
 
-    return { 
-      message: 'success', 
+    return {
+      message: 'success',
       userMessage,
       assistantMessage,
       ...(systemMessage && { systemMessage })
@@ -599,15 +567,15 @@ function createQueryFromMessages(query, messages, system_prompt, max_tokens) {
       resolve(data.prompt_query);
     } catch (error) {
       console.error('Error in createQueryFromMessages:', error);
-      
+
       // Fallback: format messages according to their roles
       let formattedMessages = [];
-      
+
       // Add system prompt if provided
       if (system_prompt && system_prompt.trim() !== '') {
         formattedMessages.push(`System: ${system_prompt}`);
       }
-      
+
       // Format existing messages according to their roles
       if (messages && messages.length > 0) {
         messages.forEach(msg => {
@@ -617,12 +585,12 @@ function createQueryFromMessages(query, messages, system_prompt, max_tokens) {
           }
         });
       }
-      
+
       // Add the current query as the final message
       if (query && query.trim() !== '') {
         formattedMessages.push(`Current User Query: ${query}`);
       }
-      
+
       const fallbackResponse = formattedMessages.join('\n\n');
       resolve(fallbackResponse);
     }
@@ -677,11 +645,7 @@ async function enhanceQuery(originalQuery, systemPrompt = '', image = null, mode
     }
 
     // Instruction telling the model exactly how to behave.
-    const enhancementInstruction =
-      'You are an assistant that rewrites the user\'s query by augmenting it with any RELEVANT context provided.' +
-      ' The rewritten query must preserve the original intent while adding helpful detail.' +
-      ' If the additional context is not relevant, keep the query unchanged.' +
-      ' Respond ONLY with the rewritten query and nothing else.';
+    const enhancementInstruction = promptManager.getSimpleRewriteInstruction();
 
     // Build the user content that will be passed to the enhancement model.
     const userContent = image
@@ -697,7 +661,7 @@ async function enhanceQuery(originalQuery, systemPrompt = '', image = null, mode
         model,
         query: userContent,
         image,
-        system_prompt: enhancementInstruction + (systemPrompt ? `\n\nTextual context you may use if relevant:\n${systemPrompt}` : '')
+        system_prompt: enhancementInstruction + promptManager.getImageContextInstruction(systemPrompt)
       });
     } else {
       // Text-only path.
@@ -717,18 +681,169 @@ async function enhanceQuery(originalQuery, systemPrompt = '', image = null, mode
   }
 }
 
+// ========================================
+// Streaming Helpers
+// ========================================
+
+/**
+ * Stream responses from the underlying model. This mirrors `runModel` but
+ * delivers chunks through the provided `onChunk` callback rather than returning
+ * the full string.
+ *
+ * @param {object} ctx        – Same context object used by runModel
+ * @param {object} modelData  – Metadata from getModelData()
+ * @param {function(string)} onChunk – Callback for each text chunk
+ */
+async function runModelStream(ctx, modelData, onChunk) {
+  if (ctx.image) {
+    // Current image endpoints do not support streaming; fall back to a single shot
+    const full = await runModel(ctx, modelData);
+    onChunk(full);
+    return;
+  }
+
+  // ---------------------- client-based models ----------------------
+  if (modelData.queryType === 'client') {
+    const client = setupOpenaiClient(modelData.apiKey, modelData.endpoint);
+    const stream = await client.chat.completions.create({
+      model: ctx.model,
+      messages: [
+        { role: 'system', content: ctx.systemPrompt },
+        { role: 'user', content: ctx.prompt }
+      ],
+      stream: true
+    });
+
+    for await (const part of stream) {
+      const text = part.choices?.[0]?.delta?.content;
+      if (text) onChunk(text);
+    }
+    return;
+  }
+
+  // ---------------------- request-based models ----------------------
+  if (modelData.queryType === 'request') {
+    // Build the same payload used in runModel
+    const payload = {
+      model: ctx.model,
+      temperature: 1.0,
+      messages: [
+        { role: 'system', content: ctx.systemPrompt },
+        { role: 'user', content: ctx.prompt }
+      ],
+      stream: true
+    };
+
+    // Utilize streaming POST helper
+    await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+    return;
+  }
+
+  // ---------------------- argo-based models ----------------------
+  if (modelData.queryType === 'argo') {
+    // Argo uses a different payload format
+    const payload = {
+      model: ctx.model,
+      prompt: [ctx.prompt],
+      system: ctx.systemPrompt,
+      user: "cucinell",
+      temperature: 1.0,
+      stream: true
+    };
+
+    // Use streaming with custom response parsing for Argo
+    await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+    return;
+  }
+
+  throw new LLMServiceError(`Invalid queryType for streaming: ${modelData.queryType}`);
+}
+
+/**
+ * SSE-enabled version of handleCopilotRequest. Writes chunks directly to `res`.
+ */
+async function handleCopilotStreamRequest(opts, res) {
+  try {
+    const {
+      save_chat = true,
+      session_id,
+      user_id
+    } = opts;
+
+    // Build context (shared logic)
+    const {
+      ctx,
+      modelData,
+      userMessage,
+      systemMessage,
+      chatSession
+    } = await prepareCopilotContext(opts);
+
+    // Persist initial messages before starting the stream
+    if (save_chat) {
+      if (!chatSession) await createChatSession(session_id, user_id);
+      const initialMsgs = systemMessage ? [userMessage, systemMessage] : [userMessage];
+      await addMessagesToSession(session_id, initialMsgs);
+    }
+
+    // Keep-alive
+    const keepAliveId = startKeepAlive(res);
+
+    let assistantBuffer = '';
+    const onChunk = (text) => {
+      assistantBuffer += text;
+      const safeText = text.replace(/\n/g, '\\n');
+      res.write(`data: ${safeText}\n\n`);
+      if (typeof res.flush === 'function') res.flush();
+    };
+
+    await runModelStream(ctx, modelData, onChunk);
+
+    // Stream completed
+    res.write('data: [DONE]\n\n');
+    if (typeof res.flush === 'function') res.flush();
+    res.end();
+
+    stopKeepAlive(keepAliveId);
+
+    // Persist assistant message
+    if (save_chat) {
+      const assistantMessage = createMessage('assistant', assistantBuffer);
+      await addMessagesToSession(session_id, [assistantMessage]);
+      const messageCount = (chatSession?.messages?.length || 0) + (systemMessage ? 2 : 1) + 1;
+      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
+        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
+      });
+    }
+  } catch (error) {
+    console.error('Streaming copilot error:', error);
+    sendSseError(res, 'Internal server error');
+  }
+}
 
 
 module.exports = {
+  // Core chat flows
+  handleCopilotRequest,
+  handleCopilotStreamRequest,
   handleChatRequest,
   handleRagRequest,
+  handleRagStreamRequest,
+  handleChatImageRequest,
   handleLambdaDemo,
+
+  // Additional chat utilities
+  handleChatQuery,
+  createQueryFromMessages,
+  enhanceQuery,
+
+  // Infrastructure helpers
   getOpenaiClient,
   queryModel,
   queryRequest,
-  handleChatQuery,
-  handleChatImageRequest,
-  getPathState,
-  handleCopilotRequest
+  queryRequestArgo: queryRequestChatArgo,
+  runModel,
+  runModelStream,
+  getPathState
 };
 

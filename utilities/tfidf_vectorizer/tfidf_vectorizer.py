@@ -6,6 +6,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import pyarrow.dataset as ds
 from .faiss_helper import faiss_search_dataset
 
+# Import preloader
+try:
+    from vector_preloader import get_preloader
+    PRELOADER_AVAILABLE = True
+except ImportError:
+    PRELOADER_AVAILABLE = False
+
 # Regex patterns to identify files
 VECTORIZER_FILE_PATTERN = re.compile(r"vectorizer_components\.arrow$")
 EMBEDDING_FILE_PATTERN = re.compile(r"tfidf_embeddings_batch_\d+\.arrow$")
@@ -138,15 +145,39 @@ def tfidf_search(query, rag_db, embeddings_path, vectorizer_path):
     """Search with TF-IDF using files in *dataset_dir* (both vectorizer & embeddings)."""
     try:
         print(f"TF-IDF search for rag_db='{rag_db}' using data dir '{embeddings_path}'")
-        vectorizers_cache = {}
-        vectorizer_table = load_vectorizer_by_path(vectorizers_cache, vectorizer_path)
-        if vectorizer_table is None:
-            return {'message': 'ERROR_VECTORIZER_NOT_FOUND',
-                    'system_prompt': 'Vectorizer components not found.'}
-        embeddings_table = load_dataset_by_path(embeddings_path)
-        if embeddings_table is None:
-            return {'message': 'ERROR_EMBEDDINGS_NOT_FOUND',
-                    'system_prompt': 'Embedding batches not found.'}
+        
+        # Try to use preloaded data first
+        if PRELOADER_AVAILABLE:
+            preloader = get_preloader()
+            preloaded_data = preloader.get_preloaded_tfidf_data(rag_db)
+            
+            if preloaded_data is not None:
+                print(f"Using preloaded TF-IDF data for {rag_db}")
+                vectorizer_table = preloaded_data['vectorizer_table']
+                embeddings_table = preloaded_data['embeddings_table']
+            else:
+                print(f"No preloaded data found for {rag_db}, loading from disk")
+                vectorizers_cache = {}
+                vectorizer_table = load_vectorizer_by_path(vectorizers_cache, vectorizer_path)
+                if vectorizer_table is None:
+                    return {'message': 'ERROR_VECTORIZER_NOT_FOUND',
+                            'system_prompt': 'Vectorizer components not found.'}
+                embeddings_table = load_dataset_by_path(embeddings_path)
+                if embeddings_table is None:
+                    return {'message': 'ERROR_EMBEDDINGS_NOT_FOUND',
+                            'system_prompt': 'Embedding batches not found.'}
+        else:
+            # Fallback to original loading method
+            vectorizers_cache = {}
+            vectorizer_table = load_vectorizer_by_path(vectorizers_cache, vectorizer_path)
+            if vectorizer_table is None:
+                return {'message': 'ERROR_VECTORIZER_NOT_FOUND',
+                        'system_prompt': 'Vectorizer components not found.'}
+            embeddings_table = load_dataset_by_path(embeddings_path)
+            if embeddings_table is None:
+                return {'message': 'ERROR_EMBEDDINGS_NOT_FOUND',
+                        'system_prompt': 'Embedding batches not found.'}
+        
         query_embedding = encode_query_from_dataset(query, vectorizer_table)
         documents = faiss_search_dataset(query_embedding, embeddings_table)
         return documents

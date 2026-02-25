@@ -5,13 +5,17 @@ DIR=$(realpath "$(dirname "${BASH_SOURCE[0]}")")
 # Navigate to project directory
 cd $DIR
 
-# Activate the virtual environment
-# We assume it is installed in the same directory as the copilot checkout
-
-venv=$(realpath $DIR/../../venv)
+# Activate the virtual environment (copilot_utils_env in utilities directory)
+venv=$(realpath $DIR/copilot_utils_env)
 source $venv/bin/activate
 
 ## Start the Flask server
 #python3 server.py
-gunicorn --bind 0.0.0.0:5000 server:app
-
+gunicorn -w 4 -k gevent \
+  --worker-connections 100 \
+  --timeout 120 \
+  --bind 0.0.0.0:5001 \
+  --access-logfile access.log \
+  --error-logfile error.log \
+  --log-level info \
+  server:app

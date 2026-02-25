@@ -2,6 +2,7 @@
 
 const { OpenAI } = require('openai');
 const fetch = require('node-fetch');
+const config = require('../config.json');
 
 // ========================================
 // Error Handling
@@ -33,14 +34,41 @@ async function postJson(url, data, apiKey = null) {
             body: JSON.stringify(data)
         });
         if (!res.ok) {
-            throw new LLMServiceError(`HTTP error: ${res.status} ${res.statusText}`);
+            let responseText = '';
+            try {
+                responseText = await res.text();
+            } catch (_error) {
+                responseText = '';
+            }
+            const snippet = responseText ? responseText.slice(0, 500) : '';
+            throw new LLMServiceError(`HTTP error: ${res.status} ${res.statusText}${snippet ? ` | body: ${snippet}` : ''}`);
         }
-        return await res.json();
+        const responseText = await res.text();
+        try {
+            return JSON.parse(responseText);
+        } catch (parseError) {
+            const snippet = responseText ? responseText.slice(0, 500) : '';
+            throw new LLMServiceError(`Failed to parse JSON response${snippet ? ` | body: ${snippet}` : ''}`, parseError);
+        }
     } catch (error) {
         if (error instanceof LLMServiceError) {
             throw error;
         }
         throw new LLMServiceError('Failed to make POST request', error);
+    }
+}
+
+function toPreview(value, maxLen = 800) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    if (typeof value === 'string') {
+        return value.slice(0, maxLen);
+    }
+    try {
+        return JSON.stringify(value).slice(0, maxLen);
+    } catch (_error) {
+        return String(value).slice(0, maxLen);
     }
 }
 
@@ -109,15 +137,12 @@ async function queryRequestChat(url, model, system_prompt, query) {
         var payload = {
             model, temperature: 1.0,
             messages: [{ role: 'system', content: system_prompt }, { role: 'user', content: query }]
-        }        
-        return model === 'gpt4o'
-            ? await queryRequestChatArgo(url, model, system_prompt, query)
-            : await postJson(url, payload).then(res => {
-                if (!res?.choices?.[0]?.message?.content) {
-                    throw new LLMServiceError('Invalid response format from chat API');
-                }
-                return res.choices[0].message.content;
-            });
+        }
+        const res = await postJson(url, payload);
+        if (!res?.choices?.[0]?.message?.content) {
+            throw new LLMServiceError('Invalid response format from chat API');
+        }
+        return res.choices[0].message.content;
     } catch (error) {
         throw new LLMServiceError('Failed to query chat API', error);
     }
@@ -125,21 +150,43 @@ async function queryRequestChat(url, model, system_prompt, query) {
 
 async function queryRequestChatArgo(url, model, system_prompt, query) {
     try {
-        if (!url || !model || !system_prompt || !query) {
+        if (!url || !model || !query) {
             throw new LLMServiceError('Missing required parameters for queryRequestChatArgo');
         }
+        console.log('[ArgoDebug] queryRequestChatArgo request', {
+            url,
+            model,
+            query_length: query.length,
+            system_prompt_length: (system_prompt || '').length
+        });
         const res = await postJson(url, {
             model,
             prompt: [query],
-            system: system_prompt,
+            system: system_prompt || '',
             user: "cucinell",
             temperature: 1.0
+        });
+        console.log('[ArgoDebug] queryRequestChatArgo response', {
+            url,
+            model,
+            response_keys: res && typeof res === 'object' ? Object.keys(res) : null,
+            has_response_field: !!res?.response,
+            response_type: typeof res?.response,
+            response_length: typeof res?.response === 'string' ? res.response.length : null,
+            response_preview: toPreview(res?.response),
+            raw_response_preview: toPreview(res)
         });
         if (!res?.response) {
             throw new LLMServiceError('Invalid response format from Argo API');
         }
         return res.response;
     } catch (error) {
+        console.error('[ArgoDebug] queryRequestChatArgo failed', {
+            url,
+            model,
+            error: error.message,
+            original_error: error.originalError?.message || null
+        });
         throw new LLMServiceError('Failed to query Argo API', error);
     }
 }
@@ -162,6 +209,8 @@ async function queryChatOnly({ query, model, system_prompt = '', modelData }) {
             response = await queryClient(openai_client, model, llmMessages);
         } else if (modelData.queryType === 'request') {
             response = await queryRequestChat(modelData.endpoint, model, system_prompt || '', query);
+        } else if (modelData.queryType === 'argo') {
+            response = await queryRequestChatArgo(modelData.endpoint, model, system_prompt || '', query);
         } else {
             throw new LLMServiceError(`Invalid queryType: ${modelData.queryType}`);
         }
@@ -269,29 +318,55 @@ async function queryRequestEmbeddingTfidf(query, vectorizer, endpoint) {
 
 async function queryRag(query, rag_db, user_id, model, num_docs, session_id) {
     try {
-        if (!query || !rag_db || !user_id || !model) {
+        if (!query || !rag_db) {
             const missingParams = [];
             if (!query) missingParams.push('query');
             if (!rag_db) missingParams.push('rag_db');
-            if (!user_id) missingParams.push('user_id');
-            if (!model) missingParams.push('model');
             throw new LLMServiceError(`Missing required parameters for queryRag: ${missingParams.join(', ')}`);
         }
-        
-        const res = await postJson('http://0.0.0.0:5000/rag', { 
-            query, 
-            rag_db, 
-            user_id, 
-            model, 
-            num_docs, 
-            session_id 
-        });
+
+        const ragApiBaseUrl = (process.env.RAG_API_URL || config.rag_api_url || 'http://0.0.0.0:8001').replace(/\/+$/, '');
+        const encodedDatabase = encodeURIComponent(rag_db);
+        const ragQueryUrl = `${ragApiBaseUrl}/query/${encodedDatabase}`;
+        const parsedTopK = Number.parseInt(num_docs, 10);
+        const requestPayload = {
+            query,
+            ...(Number.isInteger(parsedTopK) && parsedTopK > 0 ? { top_k: parsedTopK } : {})
+        };
+
+        const res = await postJson(ragQueryUrl, requestPayload);
 
         if (!res) {
             throw new LLMServiceError('Invalid response format from RAG API: No response received');
         }
+        if (!Array.isArray(res.documents)) {
+            throw new LLMServiceError('Invalid response format from RAG API: documents must be an array');
+        }
 
-        return res;
+        // Keep a string array for backwards compatibility with existing prompt formatting code.
+        const documents = res.documents
+            .map((doc) => {
+                if (typeof doc === 'string') {
+                    return doc;
+                }
+                if (doc && typeof doc === 'object') {
+                    if (typeof doc.content === 'string') {
+                        return doc.content;
+                    }
+                    if (typeof doc.text === 'string') {
+                        return doc.text;
+                    }
+                }
+                return '';
+            })
+            .filter(Boolean);
+
+        return {
+            documents: documents.length > 0 ? documents : ['No documents found'],
+            document_results: res.documents,
+            embedding: res.embedding || null,
+            database: res.database || rag_db
+        };
     } catch (error) {
         if (error instanceof LLMServiceError) {
             throw error;
@@ -319,6 +394,118 @@ async function queryLambdaModel(input, rag_flag) {
 }
 
 // ========================================
+// Streaming Utility (SSE-style)
+// ========================================
+
+/**
+ * Stream a JSON POST request and invoke a callback for each text chunk.
+ * This helper is designed for LLM endpoints that return Server-Sent-Events
+ * (e.g. lines beginning with "data: ") similar to the OpenAI streaming API.
+ *
+ * @param {string} url        – Endpoint to POST to
+ * @param {object} data       – JSON payload
+ * @param {function(string)} onChunk – Callback invoked with each text chunk
+ * @param {string|null} apiKey – Optional Bearer token
+ */
+async function postJsonStream(url, data, onChunk, apiKey = null) {
+    try {
+        if (!url || !data || !onChunk) {
+            throw new LLMServiceError('Missing required parameters for postJsonStream');
+        }
+
+        const headers = { 'Content-Type': 'application/json' };
+        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+        const res = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(data)
+        });
+
+        if (!res.ok) {
+            throw new LLMServiceError(`HTTP error: ${res.status} ${res.statusText}`);
+        }
+
+        return new Promise((resolve, reject) => {
+            let buffer = '';
+
+            const processPart = (rawPart) => {
+                let part = (rawPart || '').trim();
+                if (!part) return;
+
+                // Remove the SSE prefix if present (e.g., "data: ...")
+                if (part.startsWith('data:')) {
+                    part = part.slice(5).trim();
+                }
+
+                // Handle stream terminator
+                if (part === '[DONE]') {
+                    return;
+                }
+
+                // Try to parse JSON – fallback to raw text if parsing fails
+                let textChunk = '';
+                try {
+                    const parsed = JSON.parse(part);
+                    // Attempt to extract assistant text from common response formats
+                    textChunk =
+                        parsed.choices?.[0]?.delta?.content ||
+                        parsed.choices?.[0]?.message?.content ||
+                        parsed.response ||
+                        '';
+                } catch (_) {
+                    textChunk = part; // raw text
+                }
+
+                if (textChunk) {
+                    onChunk(textChunk);
+                }
+            };
+
+            // node-fetch returns a Node.js Readable stream
+            res.body.on('data', (chunk) => {
+                buffer += chunk.toString();
+
+                // Split on newlines – each SSE event is separated by a blank line
+                const parts = buffer.split(/\n/);
+                // Keep the last partial line in the buffer
+                buffer = parts.pop();
+
+                for (const part of parts) {
+                    try {
+                        processPart(part);
+                    } catch (cbErr) {
+                        // If the consumer throws, stop streaming
+                        res.body.destroy();
+                        reject(cbErr);
+                        return;
+                    }
+                }
+            });
+
+            res.body.on('end', () => {
+                // Process any trailing buffered content (e.g., single JSON response with no newline).
+                if (buffer && buffer.trim()) {
+                    try {
+                        processPart(buffer);
+                    } catch (cbErr) {
+                        reject(cbErr);
+                        return;
+                    }
+                }
+                resolve();
+            });
+            res.body.on('error', (err) => reject(new LLMServiceError('Stream read error', err)));
+        });
+    } catch (error) {
+        if (error instanceof LLMServiceError) {
+            throw error;
+        }
+        throw new LLMServiceError('Failed to perform streaming POST request', error);
+    }
+}
+
+// ========================================
 // Module Exports
 // ========================================
 
@@ -327,25 +514,26 @@ module.exports = {
 
     // Error handling
     LLMServiceError,
-    
+
     // Utility functions
     count_tokens,
     safe_count_tokens,
-    
+    postJsonStream,
+
     // OpenAI client functions
     setupOpenaiClient,
     queryClient,
-    
+
     // Chat API functions
     queryRequestChat,
     queryRequestChatArgo,
     queryChatOnly,
     queryChatImage,
-    
+
     // Embedding functions
     queryRequestEmbedding,
     queryRequestEmbeddingTfidf,
-    
+
     // Specialized service functions
     queryRag,
     queryLambdaModel

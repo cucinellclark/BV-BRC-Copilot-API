@@ -88,7 +88,8 @@ Every endpoint **requires** a BV-BRC JWT supplied via the `Authorization: Bearer
 | POST | `/rag-distllm` | RAG through **distllm** distributed embeddings. |
 | POST | `/chat-image` | Image + text prompt. |
 | GET  | `/start-chat` | Generate a UUID session id. |
-| GET  | `/get-session-messages` | Messages for a session. |
+| GET  | `/get-session-messages` | Messages for a session (`include_files=true` optionally includes paginated file metadata). |
+| GET  | `/get-session-files` | Paginated file metadata for a session (`limit`, `offset`). |
 | GET  | `/get-session-title` | Retrieve session title. |
 | GET  | `/get-all-sessions` | List sessions for a user. |
 | POST | `/generate-title-from-messages` | Auto-title a conversation. |

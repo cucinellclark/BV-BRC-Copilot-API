@@ -2,10 +2,51 @@
 //var debug = require('debug')('p3-web');
 var app = require('../index');
 var conf = require('../config.json');
+const { discoverTools } = require('../services/mcp/toolDiscovery');
+const { connectToDatabase } = require('../database');
 
 app.set('port', conf.http_port || 7032);
 
-var server = app.listen(app.get('port'), '0.0.0.0',  function () {
-  console.log('Express server listening on port ' + server.address().port);
+// Initialize server components on startup
+async function initializeServer() {
+  // Initialize MongoDB connection pool
+  console.log('[Startup] Initializing MongoDB connection pool...');
+  try {
+    await connectToDatabase();
+    console.log('[Startup] MongoDB connection pool initialized successfully');
+  } catch (error) {
+    console.error('[Startup] Failed to connect to MongoDB:', error.message);
+    console.warn('[Startup] Continuing without MongoDB - database features will be unavailable');
+  }
+  
+  // Initialize MCP tools
+  console.log('[Startup] Initializing MCP tool discovery...');
+  try {
+    await discoverTools();
+    console.log('[Startup] MCP tools discovered successfully');
+  } catch (error) {
+    console.error('[Startup] Failed to discover MCP tools:', error.message);
+    console.warn('[Startup] Continuing without MCP tools - agent features will be limited');
+  }
+  
+  // Start the server
+  const bindHost = conf.api_url || '0.0.0.0';
+  var server = app.listen(app.get('port'), bindHost, function () {
+    const port = server.address().port;
+    const host = server.address().address;
+    const apiUrl = conf.api_url ? `http://${conf.api_url}:${port}` : `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`;
+    console.log('[Startup] Express server listening on port ' + port);
+    console.log('[Startup] API URL: ' + apiUrl);
+    console.log('[Startup] Health checks available at:');
+    console.log('[Startup]   - /copilot-api/health/live (liveness)');
+    console.log('[Startup]   - /copilot-api/health/ready (readiness)');
+    console.log('[Startup]   - /copilot-api/health/mongodb (MongoDB-specific)');
+  });
+}
+
+// Run initialization
+initializeServer().catch(error => {
+  console.error('[Startup] Fatal error during initialization:', error);
+  process.exit(1);
 });
 

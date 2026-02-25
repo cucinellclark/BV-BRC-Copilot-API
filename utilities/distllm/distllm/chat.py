@@ -364,7 +364,7 @@ def chat_with_model(config: ChatAppConfig, query: str, extra_context: Optional[s
 def distllm_chat(query: str, rag_db: str, data_path: str, faiss_index_path: str, extra_context: Optional[str] = None) -> dict:
     data = get_data(rag_db, data_path, faiss_index_path)
     config = ChatAppConfig.from_dict(data)
-    documents, embeddings = chat_with_model(config, query, extra_context)
+    documents, embeddings = chat_with_model(config, query, extra_context) # no chatting, just retrieval
     embeddings = embeddings.tolist() # only one embedding per query
     return json.dumps({'documents': documents, 'embedding': embeddings[0]})
 

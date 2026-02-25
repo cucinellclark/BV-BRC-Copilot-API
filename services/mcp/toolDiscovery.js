@@ -1,0 +1,324 @@
+// services/mcp/toolDiscovery.js
+
+const fs = require('fs').promises;
+const path = require('path');
+const axios = require('axios');
+const { sessionManager } = require('./mcpSessionManager');
+
+const ROOT_CONFIG_PATH = path.join(__dirname, '../../config.json');
+const MCP_CONFIG_PATH = path.join(__dirname, 'config.json');
+const TOOLS_MANIFEST_PATH = path.join(__dirname, 'tools.json');
+const TOOLS_PROMPT_PATH = path.join(__dirname, 'tools-for-prompt.txt');
+
+/**
+ * Discover tools from all configured MCP servers
+ * Called on API startup
+ */
+async function discoverTools() {
+  console.log('[MCP Tool Discovery] Starting...');
+  
+  try {
+    // Load root config for auth_token
+    const rootConfigFile = await fs.readFile(ROOT_CONFIG_PATH, 'utf8');
+    const rootConfig = JSON.parse(rootConfigFile);
+    
+    // Load MCP config
+    const configFile = await fs.readFile(MCP_CONFIG_PATH, 'utf8');
+    const config = JSON.parse(configFile);
+    
+    const toolsManifest = {
+      discovered_at: new Date().toISOString(),
+      servers: {},
+      tools: {},
+      tool_count: 0
+    };
+    
+    // Fetch tools from each server (skip disabled servers)
+    const enabledServers = Object.entries(config.servers).filter(
+      ([serverKey, serverConfig]) => !serverConfig.disabled
+    );
+    
+    // Fetch tools from enabled servers only
+    const serverPromises = enabledServers.map(
+      ([serverKey, serverConfig]) => {
+        return fetchServerTools(serverKey, serverConfig, config.global_settings, rootConfig.auth_token);
+      }
+    );
+    
+    const serverResults = await Promise.allSettled(serverPromises);
+    
+    // Aggregate results
+    serverResults.forEach((result, index) => {
+      const [serverKey, serverConfig] = enabledServers[index];
+      
+      if (result.status === 'fulfilled' && result.value) {
+        const { tools, metadata } = result.value;
+        
+        toolsManifest.servers[serverKey] = {
+          status: 'connected',
+          tool_count: tools.length,
+          ...metadata
+        };
+        
+        // Get list of disabled tools
+        const disabledTools = config.global_settings?.disabled_tools || [];
+        
+        // Filter out disabled tools
+        const enabledTools = tools.filter(tool => !disabledTools.includes(tool.name));
+        const disabledCount = tools.length - enabledTools.length;
+        
+        // Log enabled tools only (after filtering) to avoid confusion
+        if (enabledTools.length > 0) {
+          const enabledToolNames = enabledTools.map(t => t.name).join(', ');
+          console.log(`[MCP Tool Discovery] Tools from ${serverKey}: ${enabledToolNames}`);
+        }
+        
+        if (disabledCount > 0) {
+          const disabledToolNames = tools
+            .filter(tool => disabledTools.includes(tool.name))
+            .map(t => t.name)
+            .join(', ');
+          console.log(`[MCP Tool Discovery] Filtered out ${disabledCount} disabled tool(s) from ${serverKey}: ${disabledToolNames}`);
+        }
+        
+        // Add enabled tools to manifest
+        enabledTools.forEach(tool => {
+          const toolId = `${serverKey}.${tool.name}`;
+          toolsManifest.tools[toolId] = {
+            ...tool,
+            server: serverKey,
+            server_url: config.servers[serverKey].url
+          };
+          toolsManifest.tool_count++;
+        });
+        
+        // Update server tool count to reflect enabled tools only
+        toolsManifest.servers[serverKey].tool_count = enabledTools.length;
+        
+        console.log(`[MCP Tool Discovery] ✓ ${serverKey}: ${enabledTools.length} tools${disabledCount > 0 ? ` (${disabledCount} disabled)` : ''}`);
+      } else {
+        toolsManifest.servers[serverKey] = {
+          status: 'failed',
+          error: result.reason?.message || 'Unknown error'
+        };
+        console.error(`[MCP Tool Discovery] ✗ ${serverKey}: ${result.reason?.message}`);
+      }
+    });
+    
+    // Write manifest file (machine-readable)
+    await fs.writeFile(
+      TOOLS_MANIFEST_PATH,
+      JSON.stringify(toolsManifest, null, 2)
+    );
+    
+    // Write prompt-optimized file (human/LLM-readable) with local tools appended
+    await writeToolsForPrompt(toolsManifest);
+    
+    console.log(`[MCP Tool Discovery] Complete. ${toolsManifest.tool_count} tools from ${enabledServers.length} server(s)`);
+    
+    return toolsManifest;
+  } catch (error) {
+    console.error('[MCP Tool Discovery] Failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Fetch tools from a single MCP server using JSON-RPC
+ * Uses the shared mcpExecutor session manager to avoid duplication
+ */
+async function fetchServerTools(serverKey, serverConfig, globalSettings, authToken) {
+  const mcpEndpoint = `${serverConfig.url}/mcp`;
+  const retryAttempts = globalSettings?.connection_retry_attempts || 3;
+  const retryDelay = globalSettings?.connection_retry_delay || 5000;
+  
+  // Check if this server should receive the auth token
+  const allowlist = globalSettings?.token_server_allowlist || [];
+  const shouldIncludeToken = allowlist.includes(serverKey);
+  
+  let lastError;
+  
+  for (let attempt = 1; attempt <= retryAttempts; attempt++) {
+    try {
+      // Use shared session manager (creates/reuses session)
+      const sessionId = await sessionManager.getOrCreateSession(
+        serverKey,
+        serverConfig,
+        authToken
+      );
+      
+      console.log(`[MCP Tool Discovery] Using session ${sessionId} for ${serverKey}`);
+      
+      // Build headers with session ID
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'mcp-session-id': sessionId
+      };
+      
+      // Add auth token if server is in allowlist
+      if (shouldIncludeToken && authToken) {
+        headers['Authorization'] = authToken.startsWith('Bearer ') ? authToken : `Bearer ${authToken}`;
+      }
+      
+      // Fallback to server-specific auth if configured
+      if (serverConfig.auth) {
+        headers['Authorization'] = serverConfig.auth.startsWith('Bearer ') ? serverConfig.auth : `Bearer ${serverConfig.auth}`;
+      }
+      
+      // Request tools list (session already initialized by session manager)
+      const toolsRequest = {
+        jsonrpc: '2.0',
+        id: `discovery-${serverKey}-${Date.now()}`,
+        method: 'tools/list',
+        params: {}
+      };
+      
+      const response = await axios.post(mcpEndpoint, toolsRequest, {
+        timeout: serverConfig.timeout || 10000,
+        headers,
+        withCredentials: true
+      });
+      
+      // Parse SSE format response if needed
+      let responseData = response.data;
+      if (typeof responseData === 'string') {
+        const dataMatch = responseData.match(/data: (.+?)(?:\r?\n|$)/);
+        if (dataMatch && dataMatch[1]) {
+          responseData = JSON.parse(dataMatch[1]);
+        }
+      }
+      
+      // Note: This shows total tools discovered from server before filtering
+      // Filtered/disabled tools will be logged separately in discoverTools()
+      console.log(`[MCP Tool Discovery] Discovered ${responseData.result?.tools?.length || 0} tools from ${serverKey} (before filtering)`);
+      
+      // Check for JSON-RPC error
+      if (responseData.error) {
+        throw new Error(`JSON-RPC error: ${responseData.error.message || JSON.stringify(responseData.error)}`);
+      }
+      
+      // Extract tools from JSON-RPC result
+      const tools = responseData.result?.tools || [];
+      
+      // Don't log all tool names here - they'll be logged after filtering in discoverTools()
+      // This avoids confusion where disabled tools appear in logs
+      
+      return {
+        tools,
+        metadata: {
+          server_name: serverConfig.name,
+          server_description: serverConfig.description,
+          discovered_at: new Date().toISOString()
+        }
+      };
+    } catch (error) {
+      lastError = error;
+      const errorMsg = error.response?.data?.error?.message || error.message;
+      console.error(`[MCP Tool Discovery] ${serverKey} attempt ${attempt} failed: ${errorMsg}`);
+      
+      // Clear session on error so it retries initialization
+      if (error.message.includes('session') || error.message.includes('Session')) {
+        console.log(`[MCP Tool Discovery] Clearing session for ${serverKey} due to session error`);
+        sessionManager.clearSession(serverKey);
+      }
+      
+      if (attempt < retryAttempts) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
+    }
+  }
+  
+  throw new Error(`Failed to connect to ${serverKey} after ${retryAttempts} attempts: ${lastError.message}`);
+}
+
+/**
+ * Write tools in a format optimized for LLM prompts (includes local tools)
+ */
+async function writeToolsForPrompt(manifest) {
+  let promptText = `# Available MCP Tools (${manifest.tool_count} total)\n`;
+  promptText += `# Last Updated: ${manifest.discovered_at}\n\n`;
+  promptText += `**IMPORTANT: When using tools, you MUST use the full tool ID format: server_name.tool_name**\n\n`;
+  
+  // Group by server (only include enabled and connected servers)
+  Object.entries(manifest.servers).forEach(([serverKey, serverInfo]) => {
+    if (serverInfo.status !== 'connected') return; // Skip disabled and failed servers
+    
+    promptText += `## ${serverInfo.server_name}\n`;
+    promptText += `${serverInfo.server_description}\n\n`;
+    
+    // List tools from this server
+    const serverTools = Object.entries(manifest.tools)
+      .filter(([toolId, tool]) => tool.server === serverKey)
+      .map(([toolId, tool]) => ({ toolId, tool }));
+    
+    serverTools.forEach(({ toolId, tool }) => {
+      promptText += `### ${toolId}\n`;
+      promptText += `Tool Name: ${tool.name}\n`;
+      promptText += `${tool.description || 'No description'}\n`;
+      
+      if (tool.inputSchema?.properties) {
+        promptText += `**Parameters:**\n`;
+        Object.entries(tool.inputSchema.properties).forEach(([paramName, paramSpec]) => {
+          const required = tool.inputSchema.required?.includes(paramName) ? ' (required)' : '';
+          const description = paramSpec.description || '';
+          // Hide/annotate parameters that the system will inject server-side.
+          // In particular, internal_server.* file tools operate on Copilot session files and
+          // MUST be bound to the trusted chat session_id, not an LLM-supplied value.
+          if (toolId.startsWith('internal_server.') && paramName === 'session_id') {
+            promptText += `- ${paramName}${required}: ${paramSpec.type} - (auto-provided by system; do NOT set)\n`;
+          } else {
+            promptText += `- ${paramName}${required}: ${paramSpec.type} - ${description}\n`;
+          }
+        });
+      }
+      
+      promptText += '\n';
+    });
+    
+    promptText += '\n';
+  });
+  
+  await fs.writeFile(TOOLS_PROMPT_PATH, promptText);
+}
+
+/**
+ * Load cached tools manifest
+ */
+async function loadToolsManifest() {
+  try {
+    const manifestFile = await fs.readFile(TOOLS_MANIFEST_PATH, 'utf8');
+    return JSON.parse(manifestFile);
+  } catch (error) {
+    console.warn('[MCP] Tools manifest not found, run discovery first');
+    return null;
+  }
+}
+
+/**
+ * Load tools formatted for prompts (now includes local tools in the file itself)
+ */
+async function loadToolsForPrompt() {
+  try {
+    return await fs.readFile(TOOLS_PROMPT_PATH, 'utf8');
+  } catch (error) {
+    console.warn('[MCP] Tools prompt file not found');
+    return '';
+  }
+}
+
+/**
+ * Get tool definition by ID
+ */
+async function getToolDefinition(toolId) {
+  const manifest = await loadToolsManifest();
+  return manifest?.tools[toolId] || null;
+}
+
+module.exports = {
+  discoverTools,
+  loadToolsManifest,
+  loadToolsForPrompt,
+  getToolDefinition
+};
+
