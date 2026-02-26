@@ -6,7 +6,7 @@ DIR=$(realpath "$(dirname "${BASH_SOURCE[0]}")")
 cd $DIR
 
 # Activate the virtual environment (copilot_utils_env in utilities directory)
-venv=$(realpath $DIR/copilot_utils_env)
+venv=$(realpath $DIR/../../venv)
 source $venv/bin/activate
 
 ## Start the Flask server

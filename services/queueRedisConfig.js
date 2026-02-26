@@ -23,11 +23,16 @@ function getQueueCategory() {
 }
 
 function getQueueRedisConfig() {
-  return {
+  const redisConfig = {
     host: config.redis.host,
     port: config.redis.port,
     db: getQueueCategory()
   };
+  // Include password when Redis requires authentication
+  if (config.redis?.password != null && config.redis.password !== '') {
+    redisConfig.password = config.redis.password;
+  }
+  return redisConfig;
 }
 
 module.exports = {
