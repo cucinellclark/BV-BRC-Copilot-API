@@ -1,0 +1,92 @@
+{
+  "servers": {
+    "bvbrc_server": {
+      "name": "BV-BRC MCP Server",
+      "url": "http://140.221.78.67:8051",
+      "type": "mcp",
+      "auth": null,
+      "timeout": 30000,
+      "description": "Provides access to BV-BRC services, workspace and data",
+      "disabled": false
+    },
+    "internal_server": {
+      "name": "Internal MCP Server",
+      "url": "http://140.221.78.67:8054",
+      "type": "mcp",
+      "auth": null,
+      "timeout": 30000,
+      "description": "Provides access to internal services like code execution and rag databases",
+      "disabled": true
+    }
+  },
+  "global_settings": {
+    "connection_retry_attempts": 3,
+    "connection_retry_delay": 5000,
+    "tool_execution_timeout": 60000,
+    "enable_tool_streaming": true,
+    "token_server_allowlist": ["bvbrc_server", "internal_server"],
+    "rag_max_docs": 10,
+    "rag_tools": [
+      "helpdesk_service_usage"
+    ],
+    "finalize_tools": [
+      "helpdesk_service_usage",
+      "plan_workflow",
+      "submit_workflow",
+      "workspace_browse_tool",
+      "list_jobs"
+    ],
+    "replayable_tools": [
+      "workspace_browse_tool",
+      "workspace_get_file_metadata_tool",
+      "list_jobs",
+      "get_recent_jobs",
+      "bvbrc_search_data",
+      "plan_workflow",
+      "submit_workflow"
+    ],
+    "replay_data_page_size_default": 100,
+    "bypass_file_handling_tools": [
+      "workspace_browse_tool",
+      "plan_workflow",
+      "submit_workflow",
+      "helpdesk_service_usage",
+      "preview_file",
+      "read_file_lines",
+      "search_file",
+      "query_json",
+      "get_sra_metadata",
+      "workspace_preview_file_tool",
+      "bvbrc_plan_query_collection",
+      "bvbrc_collection_fields_and_parameters",
+      "list_jobs",
+      "get_job_details",
+      "read_file_bytes_tool"
+    ],
+    "tool_policies": {
+      "bvbrc_search_data": {
+        "upload_only_extensions": ["tsv"]
+      }
+    },
+    "context_aware_tools": [
+      "plan_workflow"
+    ],
+    "disabled_tools": [
+      "bvbrc_collection_fields_and_parameters",
+      "submit_workflow"
+    ],
+    "exclude_from_context": {
+      "unconditional": [
+        "list_jobs"
+      ],
+      "conditional": {
+        "workspace_browse_tool": {
+          "result_types": ["list_result", "search_result"]
+        }
+      }
+    },
+    "tool_prompt_enhancements": {
+      "helpdesk_service_usage": "When presenting information from helpdesk_service_usage results, be descriptive and detailed about the documents returned from the tool. Provide comprehensive explanations of the features, capabilities, and usage instructions mentioned in the documents. Include relevant context and examples when available in the tool results."
+    }
+  }
+}

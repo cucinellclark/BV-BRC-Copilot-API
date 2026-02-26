@@ -1,6 +1,0 @@
-{
-    "embedding_url": "http://lambda12.cels.anl.gov:9998/v1/embeddings",
-    "embedding_model": "Salesforce/SFR-Embedding-Mistral",
-    "embedding_apiKey": "BRCMistral"
-  }
-  

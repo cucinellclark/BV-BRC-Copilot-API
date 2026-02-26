@@ -1,5 +1,6 @@
-const { connectToDatabase } = require('../../database');
-const { LLMServiceError } = require('../../llm/llmServices');
+const { connectToDatabase } = require('../database');
+const { LLMServiceError } = require('./llmServices');
+const { formatSize } = require('./fileUtils');
 
 /**
  * Get model data from the database
@@ -11,11 +12,11 @@ async function getModelData(model) {
   try {
     const db = await connectToDatabase();
     const modelData = await db.collection('modelList').findOne({ model });
-    
+
     if (!modelData) {
       throw new LLMServiceError(`Invalid model: ${model}`);
     }
-    
+
     return modelData;
   } catch (error) {
     if (error instanceof LLMServiceError) {
@@ -64,11 +65,11 @@ async function getRagData(ragDbName) {
   try {
     const db = await connectToDatabase();
     const ragData = await db.collection('ragList').findOne({ name: ragDbName });
-    
+
     if (!ragData) {
       throw new LLMServiceError(`Invalid RAG database: ${ragDbName}`);
     }
-    
+
     return ragData;
   } catch (error) {
     if (error instanceof LLMServiceError) {
@@ -88,20 +89,12 @@ async function getChatSession(sessionId) {
     if (!sessionId) {
       return null;
     }
-    console.log(`[getChatSession] Looking up session: ${sessionId}`);
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
     const session = await chatCollection.findOne({ session_id: sessionId });
-    
-    if (session) {
-      console.log(`[getChatSession] Session found: ${sessionId}`);
-    } else {
-      console.log(`[getChatSession] Session not found: ${sessionId}`);
-    }
-    
+
     return session;
   } catch (error) {
-    console.error(`[getChatSession] Error looking up session ${sessionId}:`, error);
     throw new LLMServiceError('Failed to get chat session', error);
   }
 }
@@ -115,15 +108,150 @@ async function getSessionMessages(sessionId) {
   try {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    return await chatCollection
-      .find({ session_id: sessionId })
+    const query = { session_id: sessionId };
+    const result = await chatCollection
+      .find(query)
       .project({
         'messages.embedding': 0
       })
       .sort({ timestamp: -1 })
       .toArray();
+    
+    // Extract messages array from the first session document
+    if (result && result.length > 0 && result[0].messages) {
+      const messages = result[0].messages;
+      return messages;
+    }
+    return [];
   } catch (error) {
     throw new LLMServiceError('Failed to get session messages', error);
+  }
+}
+
+/**
+ * Search stored RAG chunk references from chat session system messages.
+ * @param {object} filters - Search filters
+ * @param {string} [filters.chunk_id] - Chunk identifier
+ * @param {string} [filters.rag_db] - RAG database/config name
+ * @param {string} [filters.rag_api_name] - RAG API name metadata
+ * @param {string} [filters.doc_id] - Source document identifier
+ * @param {string} [filters.source_id] - Source record/file identifier
+ * @param {string} [filters.session_id] - Session identifier
+ * @param {string} [filters.user_id] - User identifier
+ * @param {string} [filters.message_id] - Message identifier
+ * @param {number} [filters.limit=50] - Page size
+ * @param {number} [filters.offset=0] - Page offset
+ * @param {boolean} [filters.include_content=false] - Include chunk text content
+ * @returns {object} Paginated chunk references
+ */
+async function searchRagChunkReferences(filters = {}) {
+  try {
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+
+    const limit = Number.isFinite(filters.limit) ? Math.min(Math.max(filters.limit, 1), 200) : 50;
+    const offset = Number.isFinite(filters.offset) && filters.offset >= 0 ? filters.offset : 0;
+    const includeContent = filters.include_content === true;
+
+    const sessionMatch = {};
+    if (filters.session_id) sessionMatch.session_id = filters.session_id;
+    if (filters.user_id) sessionMatch.user_id = filters.user_id;
+
+    const pipeline = [];
+    if (Object.keys(sessionMatch).length > 0) {
+      pipeline.push({ $match: sessionMatch });
+    }
+
+    pipeline.push(
+      { $unwind: '$messages' },
+      { $match: { 'messages.role': 'system', 'messages.documents': { $type: 'array' } } },
+      { $unwind: '$messages.documents' },
+      { $match: { 'messages.documents': { $type: 'object' } } },
+      {
+        $project: {
+          _id: 0,
+          session_id: '$session_id',
+          user_id: '$user_id',
+          message_id: '$messages.message_id',
+          message_timestamp: '$messages.timestamp',
+          content: '$messages.documents.content',
+          score: '$messages.documents.score',
+          metadata: { $ifNull: ['$messages.documents.metadata', {}] },
+          chunk_id: {
+            $ifNull: [
+              '$messages.documents.metadata.chunk_id',
+              { $ifNull: ['$messages.documents.metadata.chunkId', '$messages.documents.chunk_id'] }
+            ]
+          },
+          doc_id: {
+            $ifNull: [
+              '$messages.documents.metadata.doc_id',
+              { $ifNull: ['$messages.documents.metadata.document_id', '$messages.documents.doc_id'] }
+            ]
+          },
+          source_id: {
+            $ifNull: [
+              '$messages.documents.metadata.source_id',
+              { $ifNull: ['$messages.documents.metadata.source', '$messages.documents.metadata.record_id'] }
+            ]
+          },
+          rag_db: {
+            $ifNull: [
+              '$messages.documents.metadata.rag_db',
+              '$messages.documents.metadata.config_name'
+            ]
+          },
+          rag_api_name: '$messages.documents.metadata.rag_api_name'
+        }
+      }
+    );
+
+    const resultMatch = {};
+    if (filters.chunk_id) resultMatch.chunk_id = filters.chunk_id;
+    if (filters.rag_db) resultMatch.rag_db = filters.rag_db;
+    if (filters.rag_api_name) resultMatch.rag_api_name = filters.rag_api_name;
+    if (filters.doc_id) resultMatch.doc_id = filters.doc_id;
+    if (filters.source_id) resultMatch.source_id = filters.source_id;
+    if (filters.message_id) resultMatch.message_id = filters.message_id;
+    if (Object.keys(resultMatch).length > 0) {
+      pipeline.push({ $match: resultMatch });
+    }
+
+    const countPipeline = [...pipeline, { $count: 'total' }];
+    const totalResult = await chatCollection.aggregate(countPipeline).toArray();
+    const total = totalResult[0]?.total || 0;
+
+    pipeline.push(
+      { $sort: { message_timestamp: -1 } },
+      { $skip: offset },
+      { $limit: limit }
+    );
+
+    const rows = await chatCollection.aggregate(pipeline).toArray();
+    const items = rows.map((row) => ({
+      session_id: row.session_id || null,
+      user_id: row.user_id || null,
+      message_id: row.message_id || null,
+      message_timestamp: row.message_timestamp || null,
+      chunk_id: row.chunk_id || null,
+      doc_id: row.doc_id || null,
+      source_id: row.source_id || null,
+      rag_db: row.rag_db || null,
+      rag_api_name: row.rag_api_name || null,
+      score: Number.isFinite(row.score) ? row.score : null,
+      ...(includeContent ? { content: row.content || '' } : {}),
+      metadata: row.metadata || {}
+    }));
+
+    return {
+      items,
+      total,
+      limit,
+      offset,
+      has_more: offset + items.length < total
+    };
+  } catch (error) {
+    throw new LLMServiceError('Failed to search RAG chunk references', error);
   }
 }
 
@@ -169,7 +297,12 @@ async function getUserSessions(userId, limit = 20, offset = 0) {
       .limit(limit)
       .toArray();
 
-    return { sessions, total };
+    const normalizedSessions = sessions.map((session) => ({
+      ...session,
+      workflow_ids: Array.isArray(session.workflow_ids) ? session.workflow_ids : []
+    }));
+
+    return { sessions: normalizedSessions, total };
   } catch (error) {
     throw new LLMServiceError('Failed to get user sessions', error);
   }
@@ -255,24 +388,97 @@ async function saveUserPrompt(userId, name, text) {
  */
 async function createChatSession(sessionId, userId, title = 'Untitled') {
   try {
-    console.log(`[createChatSession] Creating new session: ${sessionId} for user: ${userId} with title: "${title}"`);
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    
+
     const result = await chatCollection.insertOne({
       session_id: sessionId,
       user_id: userId,
       title,
       created_at: new Date(),
       messages: [],
+      workflow_ids: [],
       last_modified: new Date()
     });
-    
-    console.log(`[createChatSession] Session created successfully: ${sessionId}`);
+
     return result;
   } catch (error) {
-    console.error(`[createChatSession] Error creating session ${sessionId} for user ${userId}:`, error);
     throw new LLMServiceError('Failed to create chat session', error);
+  }
+}
+
+/**
+ * Register a chat session idempotently.
+ * Creates a new session when missing, otherwise only refreshes last_modified.
+ * @param {string} sessionId - The session ID
+ * @param {string} userId - The user ID
+ * @param {string} title - Optional title for newly created sessions
+ * @returns {Object} Registration result with created flag
+ */
+async function registerChatSession(sessionId, userId, title = 'New Chat') {
+  try {
+    if (!sessionId || !userId) {
+      throw new LLMServiceError('Session ID and user ID are required');
+    }
+
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    const now = new Date();
+    const normalizedTitle = (typeof title === 'string' && title.trim()) ? title.trim() : 'New Chat';
+
+    const result = await chatCollection.updateOne(
+      { session_id: sessionId, user_id: userId },
+      {
+        $setOnInsert: {
+          session_id: sessionId,
+          user_id: userId,
+          title: normalizedTitle,
+          created_at: now,
+          messages: [],
+          workflow_ids: []
+        },
+        $set: { last_modified: now }
+      },
+      { upsert: true }
+    );
+
+    return {
+      created: !!result.upsertedCount,
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+      upsertedId: result.upsertedId || null
+    };
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to register chat session', error);
+  }
+}
+
+/**
+ * Add a workflow ID to a chat session.
+ * Uses $addToSet so duplicates are ignored.
+ * @param {string} sessionId - The session ID
+ * @param {string} workflowId - Workflow ID to add
+ * @returns {Object} Update result
+ */
+async function addWorkflowIdToSession(sessionId, workflowId) {
+  try {
+    if (!sessionId || !workflowId) {
+      return null;
+    }
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    return await chatCollection.updateOne(
+      { session_id: sessionId },
+      {
+        $addToSet: { workflow_ids: workflowId },
+        $set: { last_modified: new Date() }
+      }
+    );
+  } catch (error) {
+    throw new LLMServiceError('Failed to add workflow ID to session', error);
   }
 }
 
@@ -286,7 +492,7 @@ async function addMessagesToSession(sessionId, messages) {
   try {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    
+
     return await chatCollection.updateOne(
       { session_id: sessionId },
       {
@@ -309,12 +515,12 @@ async function addMessagesToSession(sessionId, messages) {
 async function getOrCreateChatSession(sessionId, userId, title = 'Untitled') {
   try {
     let chatSession = await getChatSession(sessionId);
-    
+
     if (!chatSession) {
       await createChatSession(sessionId, userId, title);
       chatSession = await getChatSession(sessionId);
     }
-    
+
     return chatSession;
   } catch (error) {
     throw new LLMServiceError('Failed to get or create chat session', error);
@@ -331,7 +537,7 @@ async function saveSummary(sessionId, summary) {
   try {
     const db = await connectToDatabase();
     const summaryCollection = db.collection('chatSummaries');
-    
+
     return await summaryCollection.updateOne(
       { session_id: sessionId },
       { $set: { summary, updated_at: new Date() } },
@@ -339,6 +545,49 @@ async function saveSummary(sessionId, summary) {
     );
   } catch (error) {
     throw new LLMServiceError('Failed to save summary', error);
+  }
+}
+
+/**
+ * Get summary document for a session
+ * @param {string} sessionId - The session ID
+ * @returns {Object|null} Summary document or null
+ */
+async function getSummaryBySessionId(sessionId) {
+  try {
+    if (!sessionId) return null;
+    const db = await connectToDatabase();
+    const summaryCollection = db.collection('chatSummaries');
+    return await summaryCollection.findOne({ session_id: sessionId });
+  } catch (error) {
+    throw new LLMServiceError('Failed to get summary', error);
+  }
+}
+
+/**
+ * Save or update summary document with metadata
+ * @param {string} sessionId - The session ID
+ * @param {string} userId - The user ID
+ * @param {object} summaryDoc - Summary fields to write
+ * @returns {Object} Update result
+ */
+async function saveSummaryDoc(sessionId, userId, summaryDoc = {}) {
+  try {
+    const db = await connectToDatabase();
+    const summaryCollection = db.collection('chatSummaries');
+    const updateDoc = {
+      ...summaryDoc,
+      session_id: sessionId,
+      user_id: userId,
+      updated_at: new Date()
+    };
+    return await summaryCollection.updateOne(
+      { session_id: sessionId },
+      { $set: updateDoc },
+      { upsert: true }
+    );
+  } catch (error) {
+    throw new LLMServiceError('Failed to save summary document', error);
   }
 }
 
@@ -351,26 +600,23 @@ async function saveSummary(sessionId, summary) {
  */
 async function rateConversation(sessionId, userId, rating) {
   try {
-    console.log(`[rateConversation] Rating session ${sessionId} with rating: ${rating}`);
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    
+
     const result = await chatCollection.updateOne(
       { session_id: sessionId, user_id: userId },
       { $set: { rating, rated_at: new Date() } }
     );
-    
+
     if (result.matchedCount === 0) {
       throw new LLMServiceError(`Session not found or user not authorized: ${sessionId}`);
     }
-    
-    console.log(`[rateConversation] Session ${sessionId} rated successfully`);
+
     return result;
   } catch (error) {
     if (error instanceof LLMServiceError) {
       throw error;
     }
-    console.error(`[rateConversation] Error rating session ${sessionId}:`, error);
     throw new LLMServiceError('Failed to rate conversation', error);
   }
 }
@@ -384,7 +630,6 @@ async function rateConversation(sessionId, userId, rating) {
  */
 async function rateMessage(userId, messageId, rating) {
   try {
-    console.log(`[rateMessage] Rating message ${messageId} with rating: ${rating}`);
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
 
@@ -397,13 +642,11 @@ async function rateMessage(userId, messageId, rating) {
       throw new LLMServiceError(`Message not found or user not authorized: ${messageId}`);
     }
 
-    console.log(`[rateMessage] Message ${messageId} rated successfully`);
     return result;
   } catch (error) {
     if (error instanceof LLMServiceError) {
       throw error;
     }
-    console.error(`[rateMessage] Error rating message ${messageId}:`, error);
     throw new LLMServiceError('Failed to rate message', error);
   }
 }
@@ -417,21 +660,18 @@ async function rateMessage(userId, messageId, rating) {
  */
 async function storeMessageEmbedding(sessionId, messageId, embedding) {
   try {
-    console.log(`[storeMessageEmbedding] Storing embedding for message ${messageId} in session ${sessionId}`);
     const db = await connectToDatabase();
     const embeddingsCollection = db.collection('message_embeddings');
-    
+
     const result = await embeddingsCollection.insertOne({
       session_id: sessionId,
       message_id: messageId,
       embedding,
       created_at: new Date()
     });
-    
-    console.log(`[storeMessageEmbedding] Embedding stored successfully for message ${messageId}`);
+
     return result;
   } catch (error) {
-    console.error(`[storeMessageEmbedding] Error storing embedding for message ${messageId}:`, error);
     throw new LLMServiceError('Failed to store message embedding', error);
   }
 }
@@ -443,19 +683,16 @@ async function storeMessageEmbedding(sessionId, messageId, embedding) {
  */
 async function getEmbeddingsBySessionId(sessionId) {
   try {
-    console.log(`[getEmbeddingsBySessionId] Retrieving embeddings for session: ${sessionId}`);
     const db = await connectToDatabase();
     const embeddingsCollection = db.collection('message_embeddings');
-    
+
     const embeddings = await embeddingsCollection
       .find({ session_id: sessionId })
       .sort({ created_at: 1 })
       .toArray();
-    
-    console.log(`[getEmbeddingsBySessionId] Found ${embeddings.length} embeddings for session ${sessionId}`);
+
     return embeddings;
   } catch (error) {
-    console.error(`[getEmbeddingsBySessionId] Error retrieving embeddings for session ${sessionId}:`, error);
     throw new LLMServiceError('Failed to get embeddings by session ID', error);
   }
 }
@@ -467,21 +704,13 @@ async function getEmbeddingsBySessionId(sessionId) {
  */
 async function getEmbeddingByMessageId(messageId) {
   try {
-    console.log(`[getEmbeddingByMessageId] Retrieving embedding for message: ${messageId}`);
     const db = await connectToDatabase();
     const embeddingsCollection = db.collection('message_embeddings');
-    
+
     const embedding = await embeddingsCollection.findOne({ message_id: messageId });
-    
-    if (embedding) {
-      console.log(`[getEmbeddingByMessageId] Embedding found for message ${messageId}`);
-    } else {
-      console.log(`[getEmbeddingByMessageId] Embedding not found for message ${messageId}`);
-    }
-    
+
     return embedding;
   } catch (error) {
-    console.error(`[getEmbeddingByMessageId] Error retrieving embedding for message ${messageId}:`, error);
     throw new LLMServiceError('Failed to get embedding by message ID', error);
   }
 }
@@ -505,6 +734,216 @@ async function getChatCollections() {
   }
 }
 
+/**
+ * Save file metadata to database
+ * @param {string} sessionId - The session ID
+ * @param {object} fileMetadata - File metadata object
+ * @returns {Object} Insert result
+ */
+async function saveFileMetadata(sessionId, fileMetadata) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+
+    const result = await filesCollection.insertOne({
+      session_id: sessionId,
+      ...fileMetadata,
+      created_at: new Date()
+    });
+
+    return result;
+  } catch (error) {
+    throw new LLMServiceError('Failed to save file metadata', error);
+  }
+}
+
+/**
+ * Get file metadata by fileId and sessionId
+ * @param {string} sessionId - The session ID
+ * @param {string} fileId - The file ID
+ * @returns {Object|null} File metadata or null if not found
+ */
+async function getFileMetadata(sessionId, fileId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+
+    const fileMetadata = await filesCollection.findOne({
+      session_id: sessionId,
+      fileId: fileId
+    });
+
+    if (fileMetadata) {
+      // Update last accessed time
+      await filesCollection.updateOne(
+        { _id: fileMetadata._id },
+        { $set: { lastAccessed: new Date() } }
+      );
+    }
+
+    return fileMetadata;
+  } catch (error) {
+    throw new LLMServiceError('Failed to get file metadata', error);
+  }
+}
+
+/**
+ * Get all file metadata for a session
+ * @param {string} sessionId - The session ID
+ * @returns {Array} Array of file metadata objects
+ */
+async function getSessionFiles(sessionId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+
+    return await filesCollection
+      .find({ session_id: sessionId })
+      .sort({ created_at: -1 })
+      .toArray();
+  } catch (error) {
+    throw new LLMServiceError('Failed to get session files', error);
+  }
+}
+
+/**
+ * Convert stored file metadata into a client-safe DTO.
+ * Intentionally excludes internal fields like local filesystem paths.
+ * @param {object} fileMetadata - Stored file metadata document
+ * @returns {object} Client-safe file metadata
+ */
+function mapSessionFileToClient(fileMetadata) {
+  const createdAt = fileMetadata.created_at || fileMetadata.created || null;
+  const sizeBytes = Number.isFinite(fileMetadata.size) ? fileMetadata.size : 0;
+
+  return {
+    file_id: fileMetadata.fileId,
+    file_name: fileMetadata.fileName || null,
+    tool_id: fileMetadata.toolId || null,
+    created_at: createdAt,
+    last_accessed: fileMetadata.lastAccessed || null,
+    data_type: fileMetadata.dataType || null,
+    size_bytes: sizeBytes,
+    size_formatted: formatSize(sizeBytes),
+    record_count: Number.isFinite(fileMetadata.recordCount) ? fileMetadata.recordCount : 0,
+    fields: Array.isArray(fileMetadata.fields) ? fileMetadata.fields : [],
+    is_error: fileMetadata.isError === true,
+    workspace_path: fileMetadata.workspacePath || null,
+    workspace_url: fileMetadata.workspaceUrl || null,
+    query_parameters: fileMetadata.queryParameters || null
+  };
+}
+
+/**
+ * Get paginated, client-safe file metadata for a session
+ * @param {string} sessionId - The session ID
+ * @param {number} limit - Page size
+ * @param {number} offset - Page offset
+ * @returns {object} Paginated file metadata
+ */
+async function getSessionFilesPaginated(sessionId, limit = 20, offset = 0) {
+  try {
+    limit = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 100) : 20;
+    offset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+    const query = { session_id: sessionId };
+
+    const total = await filesCollection.countDocuments(query);
+    const files = await filesCollection
+      .find(query)
+      .sort({ created_at: -1 })
+      .skip(offset)
+      .limit(limit)
+      .toArray();
+
+    return {
+      files: files.map(mapSessionFileToClient),
+      total,
+      limit,
+      offset,
+      has_more: offset + files.length < total
+    };
+  } catch (error) {
+    throw new LLMServiceError('Failed to get paginated session files', error);
+  }
+}
+
+/**
+ * Delete file metadata
+ * @param {string} sessionId - The session ID
+ * @param {string} fileId - The file ID
+ * @returns {Object} Delete result
+ */
+async function deleteFileMetadata(sessionId, fileId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+
+    const result = await filesCollection.deleteOne({
+      session_id: sessionId,
+      fileId: fileId
+    });
+
+    return result;
+  } catch (error) {
+    throw new LLMServiceError('Failed to delete file metadata', error);
+  }
+}
+
+/**
+ * Get total storage used by a session
+ * @param {string} sessionId - The session ID
+ * @returns {number} Total size in bytes
+ */
+async function getSessionStorageSize(sessionId) {
+  try {
+    const db = await connectToDatabase();
+    const filesCollection = db.collection('session_files');
+
+    const result = await filesCollection.aggregate([
+      { $match: { session_id: sessionId } },
+      { $group: { _id: null, totalSize: { $sum: '$size' } } }
+    ]).toArray();
+
+    return result.length > 0 ? result[0].totalSize : 0;
+  } catch (error) {
+    throw new LLMServiceError('Failed to get session storage size', error);
+  }
+}
+
+/**
+ * Get unique workflow IDs referenced by any chat session for a user.
+ * @param {string} userId - The user ID
+ * @returns {Array<string>} Unique workflow IDs
+ */
+async function getUserWorkflowIds(userId) {
+  try {
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+
+    const sessions = await chatCollection
+      .find({ user_id: userId })
+      .project({ workflow_ids: 1 })
+      .toArray();
+
+    const uniqueIds = new Set();
+    sessions.forEach((session) => {
+      const ids = Array.isArray(session.workflow_ids) ? session.workflow_ids : [];
+      ids.forEach((id) => {
+        if (typeof id === 'string' && id.trim().length > 0) {
+          uniqueIds.add(id.trim());
+        }
+      });
+    });
+
+    return Array.from(uniqueIds);
+  } catch (error) {
+    throw new LLMServiceError('Failed to get user workflow IDs', error);
+  }
+}
+
 module.exports = {
   getModelData,
   getActiveModels,
@@ -512,6 +951,7 @@ module.exports = {
   getRagData,
   getChatSession,
   getSessionMessages,
+  searchRagChunkReferences,
   getSessionTitle,
   getUserSessions,
   updateSessionTitle,
@@ -519,13 +959,24 @@ module.exports = {
   getUserPrompts,
   saveUserPrompt,
   createChatSession,
+  registerChatSession,
+  addWorkflowIdToSession,
   addMessagesToSession,
   getOrCreateChatSession,
   saveSummary,
+  getSummaryBySessionId,
+  saveSummaryDoc,
   rateConversation,
   rateMessage,
   storeMessageEmbedding,
   getEmbeddingsBySessionId,
   getEmbeddingByMessageId,
-  getChatCollections
-}; 
+  getChatCollections,
+  saveFileMetadata,
+  getFileMetadata,
+  getSessionFiles,
+  getSessionFilesPaginated,
+  deleteFileMetadata,
+  getSessionStorageSize,
+  getUserWorkflowIds
+};
