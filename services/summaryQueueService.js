@@ -3,12 +3,11 @@ const config = require('../config.json');
 const { createLogger } = require('./logger');
 const { getSummaryBySessionId, getChatSession } = require('./dbUtils');
 const { generateSummaryForSession } = require('./memory/conversationSummaryService');
-const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
+const { getQueueRedisConfig } = require('./queueRedisConfig');
 
 const logger = createLogger('SummaryQueue');
 
 const redisConfig = getQueueRedisConfig();
-const queueCategory = getQueueCategory();
 
 const summaryQueue = new Queue('chat-summary', {
   redis: redisConfig,
@@ -31,7 +30,6 @@ logger.info('Summary queue worker initialized', {
   queueName: 'chat-summary',
   workerConcurrency,
   queueEnabled,
-  queueCategory,
   redisDb: redisConfig.db,
   summarizationEnabled: config.conversation?.summarization?.enabled || false
 });
