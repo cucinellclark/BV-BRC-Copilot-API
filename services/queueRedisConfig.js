@@ -1,7 +1,7 @@
 const config = require('../config.json');
 
 function getQueueRedisConfig() {
-  const db = Number.isInteger(config.redis?.db) ? config.redis.db : 0;
+  const db = Number.isInteger(config.redis?.db) ? config.redis.db : 10;
 
   const redisConfig = {
     host: config.redis.host,
