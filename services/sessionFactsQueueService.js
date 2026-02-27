@@ -2,12 +2,11 @@ const Queue = require('bull');
 const config = require('../config.json');
 const { createLogger } = require('./logger');
 const { generateSessionFactsUpdate } = require('./memory/sessionFactsService');
-const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
+const { getQueueRedisConfig } = require('./queueRedisConfig');
 
 const logger = createLogger('SessionFactsQueue');
 
 const redisConfig = getQueueRedisConfig();
-const queueCategory = getQueueCategory();
 
 const factsQueue = new Queue('session-facts', {
   redis: redisConfig,
@@ -30,7 +29,6 @@ logger.info('Session facts queue worker initialized', {
   queueName: 'session-facts',
   workerConcurrency,
   queueEnabled,
-  queueCategory,
   redisDb: redisConfig.db
 });
 
