@@ -3,13 +3,12 @@
 const Queue = require('bull');
 const config = require('../config.json');
 const { createLogger } = require('./logger');
-const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
+const { getQueueRedisConfig } = require('./queueRedisConfig');
 const ChatService = require('./chatService');
 
 const logger = createLogger('RagQueueService');
 
 const redisConfig = getQueueRedisConfig();
-const queueCategory = getQueueCategory();
 
 const ragQueue = new Queue('rag-operations', {
     redis: redisConfig,
@@ -30,8 +29,7 @@ const ragQueue = new Queue('rag-operations', {
     }
 });
 
-logger.info('RAG queue Redis category selected', {
-    queueCategory,
+logger.info('RAG queue Redis db selected', {
     redisDb: redisConfig.db
 });
 

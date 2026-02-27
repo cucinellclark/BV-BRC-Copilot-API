@@ -6,14 +6,13 @@ const config = require('../config.json');
 const { createLogger } = require('./logger');
 const AgentOrchestrator = require('./agentOrchestrator');
 const mcpConfig = require('./mcp/config.json');
-const { getQueueCategory, getQueueRedisConfig } = require('./queueRedisConfig');
+const { getQueueRedisConfig } = require('./queueRedisConfig');
 
 // Initialize logger
 const logger = createLogger('QueueService');
 
 // Redis configuration from config.json
 const redisConfig = getQueueRedisConfig();
-const queueCategory = getQueueCategory();
 
 // Create Bull queue for agent operations
 const agentQueue = new Queue('agent-operations', {
@@ -35,8 +34,7 @@ const agentQueue = new Queue('agent-operations', {
     }
 });
 
-logger.info('Agent queue Redis category selected', {
-    queueCategory,
+logger.info('Agent queue Redis db selected', {
     redisDb: redisConfig.db
 });
 
