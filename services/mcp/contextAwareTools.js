@@ -26,7 +26,9 @@ function buildEnhancedContext(opts = {}) {
     historyContext = '',
     sessionMemory = null,
     session_id = null,
-    selected_jobs = null
+    selected_jobs = null,
+    workspace_items = null,
+    selected_workflows = null
   } = opts;
 
   const parts = [];
@@ -100,7 +102,29 @@ function buildEnhancedContext(opts = {}) {
       .slice(0, 20);
 
     if (selectedIds.length > 0) {
-      parts.push(`\nSelected Job IDs:\n${selectedIds.join(', ')}`);
+      parts.push(`\nUser-Selected Job IDs (act on these):\n${selectedIds.join(', ')}`);
+    }
+  }
+
+  if (Array.isArray(workspace_items) && workspace_items.length > 0) {
+    const filePaths = workspace_items
+      .map(item => (item && typeof item.path === 'string' ? `${item.name || ''} (${item.path})` : null))
+      .filter(Boolean)
+      .slice(0, 20);
+
+    if (filePaths.length > 0) {
+      parts.push(`\nUser-Selected Workspace Files (act on these):\n${filePaths.join('\n')}`);
+    }
+  }
+
+  if (Array.isArray(selected_workflows) && selected_workflows.length > 0) {
+    const workflowIds = selected_workflows
+      .map(wf => (wf && typeof (wf.workflow_id || wf.id) === 'string' ? (wf.workflow_id || wf.id) : null))
+      .filter(Boolean)
+      .slice(0, 20);
+
+    if (workflowIds.length > 0) {
+      parts.push(`\nUser-Selected Workflow IDs (act on these):\n${workflowIds.join(', ')}`);
     }
   }
 
@@ -161,7 +185,9 @@ function applyContextEnhancement(toolId, parameters = {}, context = {}, toolDef 
       historyContext: context.historyContext,
       sessionMemory: context.sessionMemory,
       session_id: context.session_id,
-      selected_jobs: context.selected_jobs
+      selected_jobs: context.selected_jobs,
+      workspace_items: context.workspace_items,
+      selected_workflows: context.selected_workflows
     });
 
     // Get original user_query from LLM

@@ -471,15 +471,15 @@ async function summarizeImageContext({
     : '';
 
   const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
-    ? `\n\nWorkspace files (for context):\n${JSON.stringify(workspace_items, null, 2)}`
+    ? `\n\n<selected_workspace_files count="${workspace_items.length}">\nUser-selected workspace files:\n${JSON.stringify(workspace_items, null, 2)}\n</selected_workspace_files>`
     : '';
 
   const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
-    ? `\n\nSelected jobs (for context):\n${JSON.stringify(selected_jobs, null, 2)}`
+    ? `\n\n<selected_jobs count="${selected_jobs.length}">\nUser-selected jobs:\n${JSON.stringify(selected_jobs, null, 2)}\n</selected_jobs>`
     : '';
 
   const selectedWorkflowsStr = selected_workflows && Array.isArray(selected_workflows) && selected_workflows.length > 0
-    ? `\n\nSelected workflows (for context):\n${JSON.stringify(selected_workflows, null, 2)}`
+    ? `\n\n<selected_workflows count="${selected_workflows.length}">\nUser-selected workflows:\n${JSON.stringify(selected_workflows, null, 2)}\n</selected_workflows>`
     : '';
 
   const imageInstruction = [
@@ -1713,15 +1713,15 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 
     // Format workspace items if available
     const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
-      ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
+      ? `\n\n<selected_workspace_files count="${workspace_items.length}">\nThe user has selected these ${workspace_items.length} workspace file(s). Use their paths and metadata as direct inputs to tool calls when relevant to the query.\n${JSON.stringify(workspace_items, null, 2)}\n</selected_workspace_files>`
       : '';
 
     const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
-      ? `\n\nSELECTED JOBS (available for reference):\n${JSON.stringify(selected_jobs, null, 2)}\n\nThese jobs were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_jobs count="${selected_jobs.length}">\nThe user has selected these ${selected_jobs.length} job(s). Use their job IDs and details to fulfill the user's request (e.g., check status, retrieve results, resubmit).\n${JSON.stringify(selected_jobs, null, 2)}\n</selected_jobs>`
       : '';
 
     const selectedWorkflowsStr = selected_workflows && Array.isArray(selected_workflows) && selected_workflows.length > 0
-      ? `\n\nSELECTED WORKFLOWS (available for reference):\n${JSON.stringify(selected_workflows, null, 2)}\n\nThese workflows were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_workflows count="${selected_workflows.length}">\nThe user has selected these ${selected_workflows.length} workflow(s). Use their workflow IDs and details to fulfill the user's request (e.g., run, inspect, modify).\n${JSON.stringify(selected_workflows, null, 2)}\n</selected_workflows>`
       : '';
 
     // Log workspace items inclusion in prompt
@@ -1871,15 +1871,15 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
     // Format workspace items if available
     const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
-      ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
+      ? `\n\n<selected_workspace_files count="${workspace_items.length}">\nThe user has selected these ${workspace_items.length} workspace file(s). Your response must address these items directly.\n${JSON.stringify(workspace_items, null, 2)}\n</selected_workspace_files>`
       : '';
 
     const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
-      ? `\n\nSELECTED JOBS (available for reference):\n${JSON.stringify(selected_jobs, null, 2)}\n\nThese jobs were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_jobs count="${selected_jobs.length}">\nThe user has selected these ${selected_jobs.length} job(s). Your response must address these items directly.\n${JSON.stringify(selected_jobs, null, 2)}\n</selected_jobs>`
       : '';
 
     const selectedWorkflowsStr = selected_workflows && Array.isArray(selected_workflows) && selected_workflows.length > 0
-      ? `\n\nSELECTED WORKFLOWS (available for reference):\n${JSON.stringify(selected_workflows, null, 2)}\n\nThese workflows were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_workflows count="${selected_workflows.length}">\nThe user has selected these ${selected_workflows.length} workflow(s). Your response must address these items directly.\n${JSON.stringify(selected_workflows, null, 2)}\n</selected_workflows>`
       : '';
 
     // Log workspace items inclusion in final response prompt
