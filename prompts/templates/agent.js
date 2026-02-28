@@ -94,7 +94,7 @@ Remember:
 ORIGINAL USER QUERY:
 {{query}}
 
-TOOLS EXECUTED:
+STEPS TAKEN:
 {{executionTrace}}
 
 TOOL RESULTS:
