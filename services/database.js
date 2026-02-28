@@ -1,7 +1,7 @@
 // database.js
 
 const { MongoClient } = require('mongodb');
-const config = require('./utilities/mongodb_config.json'); // Load from utilities directory
+const config = require('../utilities/mongodb_config.json'); // Updated path to point to utilities directory
 
 // MongoDB setup with connection pooling
 const mongoUri = config['mongoDBUrl'];

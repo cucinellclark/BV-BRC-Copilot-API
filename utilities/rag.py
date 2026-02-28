@@ -3,7 +3,7 @@ import requests
 import os
 from typing import Optional, Dict, Any
 from mongo_helper import get_rag_configs
-from distllm.chat import distllm_chat
+from distllm.chat import distllm_chat, distllm_chat_with_retriever
 from tfidf_vectorizer.tfidf_vectorizer import tfidf_search
 
 # Import preloader
@@ -178,9 +178,13 @@ def distllm_rag(query, rag_db, user_id, model, num_docs, session_id, rag_config,
             if preloaded_retriever is not None:
                 print(f"Using preloaded distllm retriever for {rag_db}")
                 # Use the preloaded retriever directly
-                # This would require modifying the distllm_chat function to accept a retriever
-                # For now, we'll fall back to the original method
-                pass
+                response = distllm_chat_with_retriever(query, rag_db, preloaded_retriever, extra_context)
+                
+                # Parse the JSON response
+                if isinstance(response, str):
+                    response = json.loads(response)
+                
+                return response
         
         # Original method - load from configuration
         data = rag_config.get('data', {})
