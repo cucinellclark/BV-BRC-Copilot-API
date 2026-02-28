@@ -2,7 +2,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const { executeMcpTool, isFinalizeTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
-const { loadToolsForPrompt } = require('./mcp/toolDiscovery');
+const { loadToolsForPrompt, loadToolsManifest } = require('./mcp/toolDiscovery');
 const {
   getModelData,
   getChatSession,
@@ -471,15 +471,15 @@ async function summarizeImageContext({
     : '';
 
   const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
-    ? `\n\nWorkspace files (for context):\n${JSON.stringify(workspace_items, null, 2)}`
+    ? `\n\n<selected_workspace_files count="${workspace_items.length}">\nUser-selected workspace files:\n${JSON.stringify(workspace_items, null, 2)}\n</selected_workspace_files>`
     : '';
 
   const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
-    ? `\n\nSelected jobs (for context):\n${JSON.stringify(selected_jobs, null, 2)}`
+    ? `\n\n<selected_jobs count="${selected_jobs.length}">\nUser-selected jobs:\n${JSON.stringify(selected_jobs, null, 2)}\n</selected_jobs>`
     : '';
 
   const selectedWorkflowsStr = selected_workflows && Array.isArray(selected_workflows) && selected_workflows.length > 0
-    ? `\n\nSelected workflows (for context):\n${JSON.stringify(selected_workflows, null, 2)}`
+    ? `\n\n<selected_workflows count="${selected_workflows.length}">\nUser-selected workflows:\n${JSON.stringify(selected_workflows, null, 2)}\n</selected_workflows>`
     : '';
 
   const imageInstruction = [
@@ -670,17 +670,56 @@ function hasSufficientData(toolResults) {
 }
 
 /**
- * Remove MCP tool identifiers from text before it is sent to final response generation.
+ * Cached set of known tool-related identifiers built from the tools manifest.
+ * Populated lazily on first call to sanitizeToolNames().
  */
-function sanitizeToolNames(text) {
+let _toolNameSet = null;
+
+async function _loadToolNameSet() {
+  if (_toolNameSet) return _toolNameSet;
+
+  const set = new Set();
+  try {
+    const manifest = await loadToolsManifest();
+    if (manifest) {
+      // Add server keys (e.g. "bvbrc_server")
+      for (const serverKey of Object.keys(manifest.servers || {})) {
+        set.add(serverKey);
+      }
+      // Add full tool IDs and bare tool names
+      for (const [toolId, tool] of Object.entries(manifest.tools || {})) {
+        set.add(toolId);           // e.g. "bvbrc_server.bvbrc_search_data"
+        if (tool.name) set.add(tool.name); // e.g. "bvbrc_search_data"
+      }
+    }
+  } catch (_) {
+    // Manifest not available yet; set stays empty and will retry next call
+    _toolNameSet = null;
+    return set;
+  }
+  _toolNameSet = set;
+  return set;
+}
+
+/**
+ * Remove known MCP tool identifiers from text using the discovered tools manifest.
+ * Only exact, known identifiers are removed – no regex guessing.
+ */
+async function sanitizeToolNames(text) {
   if (typeof text !== 'string' || !text) return text;
 
-  return text
-    // Common MCP tool id format: server_name.tool_name
-    .replace(/\b[a-zA-Z0-9_-]+(?:_server)?\.[a-zA-Z0-9_.-]+\b/g, '[tool]')
-    // Defensive cleanup for internal server mentions in free text
-    .replace(/\binternal_server\b/gi, 'internal system')
-    .replace(/\bmcp\b/gi, 'internal system');
+  const toolNames = await _loadToolNameSet();
+
+  let result = text;
+  // Replace longest matches first so "bvbrc_server.bvbrc_search_data" is
+  // removed before "bvbrc_server" can leave a dangling ".bvbrc_search_data".
+  const sorted = [...toolNames].sort((a, b) => b.length - a.length);
+  for (const name of sorted) {
+    result = result.split(name).join('');
+  }
+
+  // Collapse leftover whitespace artifacts
+  return result.replace(/  +/g, ' ').trim();
 }
 
 /**
@@ -1674,15 +1713,15 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
 
     // Format workspace items if available
     const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
-      ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
+      ? `\n\n<selected_workspace_files count="${workspace_items.length}">\nThe user has selected these ${workspace_items.length} workspace file(s). Use their paths and metadata as direct inputs to tool calls when relevant to the query.\n${JSON.stringify(workspace_items, null, 2)}\n</selected_workspace_files>`
       : '';
 
     const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
-      ? `\n\nSELECTED JOBS (available for reference):\n${JSON.stringify(selected_jobs, null, 2)}\n\nThese jobs were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_jobs count="${selected_jobs.length}">\nThe user has selected these ${selected_jobs.length} job(s). Use their job IDs and details to fulfill the user's request (e.g., check status, retrieve results, resubmit).\n${JSON.stringify(selected_jobs, null, 2)}\n</selected_jobs>`
       : '';
 
     const selectedWorkflowsStr = selected_workflows && Array.isArray(selected_workflows) && selected_workflows.length > 0
-      ? `\n\nSELECTED WORKFLOWS (available for reference):\n${JSON.stringify(selected_workflows, null, 2)}\n\nThese workflows were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_workflows count="${selected_workflows.length}">\nThe user has selected these ${selected_workflows.length} workflow(s). Use their workflow IDs and details to fulfill the user's request (e.g., run, inspect, modify).\n${JSON.stringify(selected_workflows, null, 2)}\n</selected_workflows>`
       : '';
 
     // Log workspace items inclusion in prompt
@@ -1832,15 +1871,15 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
     // Format workspace items if available
     const workspaceStr = workspace_items && Array.isArray(workspace_items) && workspace_items.length > 0
-      ? `\n\nWORKSPACE FILES (available for reference):\n${JSON.stringify(workspace_items, null, 2)}\n\nThese files are in the user's workspace and may be relevant to the query.`
+      ? `\n\n<selected_workspace_files count="${workspace_items.length}">\nThe user has selected these ${workspace_items.length} workspace file(s). Your response must address these items directly.\n${JSON.stringify(workspace_items, null, 2)}\n</selected_workspace_files>`
       : '';
 
     const selectedJobsStr = selected_jobs && Array.isArray(selected_jobs) && selected_jobs.length > 0
-      ? `\n\nSELECTED JOBS (available for reference):\n${JSON.stringify(selected_jobs, null, 2)}\n\nThese jobs were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_jobs count="${selected_jobs.length}">\nThe user has selected these ${selected_jobs.length} job(s). Your response must address these items directly.\n${JSON.stringify(selected_jobs, null, 2)}\n</selected_jobs>`
       : '';
 
     const selectedWorkflowsStr = selected_workflows && Array.isArray(selected_workflows) && selected_workflows.length > 0
-      ? `\n\nSELECTED WORKFLOWS (available for reference):\n${JSON.stringify(selected_workflows, null, 2)}\n\nThese workflows were selected by the user in chat and may be relevant to the query.`
+      ? `\n\n<selected_workflows count="${selected_workflows.length}">\nThe user has selected these ${selected_workflows.length} workflow(s). Your response must address these items directly.\n${JSON.stringify(selected_workflows, null, 2)}\n</selected_workflows>`
       : '';
 
     // Log workspace items inclusion in final response prompt
@@ -1923,12 +1962,15 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
         }
       );
     } else {
-      // Tool-based response: include trace and results without exposing MCP tool identities.
-      const traceStr = executionTrace.map((t, index) =>
-        `Step ${index + 1} (Iteration ${t.iteration}): ${sanitizeToolNames(t.reasoning || '')} [${t.status || 'pending'}]`
-      ).join('\n');
+      // Tool-based response: include reasoning trace and results without exposing MCP tool identities.
+      const traceLines = [];
+      for (let i = 0; i < executionTrace.length; i++) {
+        const t = executionTrace[i];
+        const reasoning = await sanitizeToolNames(t.reasoning || '');
+        traceLines.push(`Step ${i + 1}: ${reasoning} [${t.status || 'pending'}]`);
+      }
+      const traceStr = traceLines.join('\n');
 
-      // Format gathered results while omitting MCP tool IDs and internal tool instructions.
       // Use a global character budget so we include as much tool output as possible.
       const maxToolResultChars = Number.isFinite(mcpConfig.global_settings?.final_response_tool_chars)
         ? mcpConfig.global_settings.final_response_tool_chars
@@ -1936,12 +1978,12 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
       let remainingToolChars = Math.max(4000, maxToolResultChars);
       const resultChunks = [];
 
-      Object.entries(toolResults).forEach(([toolId, result], index) => {
+      for (const [toolId, result] of Object.entries(toolResults)) {
         if (remainingToolChars <= 0) {
-          return;
+          break;
         }
 
-        const sourceLabel = `Result Source ${index + 1}`;
+        const sourceLabel = `Result Source ${resultChunks.length + 1}`;
         let chunk = '';
 
         // Check if this is a file reference (expected for all results)
@@ -1952,12 +1994,15 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
                     `${result.errorMessage ? `Error Message: ${result.errorMessage}\n` : ''}` +
                     `Error payload was captured for this step.\n`;
           } else {
-            const sampleRecordStr = sanitizeToolNames(JSON.stringify(result.summary?.sampleRecord, null, 2));
+            const sampleRecordStr = await sanitizeToolNames(JSON.stringify(result.summary?.sampleRecord, null, 2));
+            const queryParamsStr = result.queryParameters
+              ? `Query Parameters: ${await sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n`
+              : '';
             chunk = `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
                     `Data Type: ${result.summary.dataType}\n` +
                     `Fields: ${Array.isArray(result.summary.fields) ? result.summary.fields.join(', ') : ''}\n` +
                     `Sample Record: ${sampleRecordStr}\n` +
-                    `${result.queryParameters ? `Query Parameters: ${sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n` : ''}`;
+                    queryParamsStr;
           }
         } else {
           // Fallback for non-file-reference results (workspace/jobs and other bypass tools)
@@ -1969,7 +2014,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
             ? result.items
             : result;
           const safeLlmResult = stripInternalResponseMetadata(llmResult);
-          const resultStr = sanitizeToolNames(JSON.stringify(safeLlmResult, null, 2));
+          const resultStr = await sanitizeToolNames(JSON.stringify(safeLlmResult, null, 2));
           chunk = `${sourceLabel}:\n${resultStr}`;
         }
 
@@ -1980,7 +2025,7 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
 
         resultChunks.push(chunk);
         remainingToolChars -= chunk.length;
-      });
+      }
 
       if (Object.keys(toolResults).length > resultChunks.length) {
         resultChunks.push(
