@@ -4,27 +4,32 @@
  * 
  * Standalone script to purge all jobs from Bull queues.
  * This will remove all waiting, active, delayed, completed, and failed jobs.
- * Purges queues based on the configured queue category (showcase or development).
+ * Purges queues based on the configured Redis DB (config.redis.db).
  * 
  * Usage:
  *   node purge-queues.js
+ *   node purge-queues.js --db <n>  (override Redis DB, e.g. --db 10)
  *   node purge-queues.js --dry-run  (show what would be purged without actually purging)
  *   node purge-queues.js --stop-active  (stop/cancel active jobs before purging)
  */
 
 const Queue = require('bull');
-const config = require('./config.json');
-const { getQueueRedisConfig, getQueueCategory } = require('./services/queueRedisConfig');
-
-// Get Redis configuration based on queue category (showcase or development)
-const redisConfig = getQueueRedisConfig();
-const queueCategory = getQueueCategory();
-const categoryName = queueCategory === 1 ? 'showcase' : 'development';
+const { getQueueRedisConfig } = require('./services/queueRedisConfig');
 
 // Parse command line arguments
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run') || args.includes('-d');
 const stopActive = args.includes('--stop-active') || args.includes('-s');
+
+// Allow --db N to override which Redis DB to purge
+let redisConfig = getQueueRedisConfig();
+const dbIndex = args.indexOf('--db');
+if (dbIndex !== -1 && args[dbIndex + 1] !== undefined) {
+    const dbOverride = parseInt(args[dbIndex + 1], 10);
+    if (!isNaN(dbOverride) && dbOverride >= 0) {
+        redisConfig = { ...redisConfig, db: dbOverride };
+    }
+}
 
 /**
  * Stop/cancel active jobs in a queue
@@ -200,13 +205,13 @@ async function main() {
     console.log('='.repeat(60));
     console.log('Queue Purge Script');
     console.log('='.repeat(60));
-    console.log(`\nQueue Category: ${categoryName} (Redis DB: ${redisConfig.db})`);
+    console.log(`\nRedis DB: ${redisConfig.db}`);
     
     if (dryRun) {
         console.log('\n⚠ DRY RUN MODE - No jobs will be actually purged\n');
     } else {
         console.log('\n⚠ WARNING: This will permanently delete all jobs from the queues!');
-        console.log(`   Target: ${categoryName} queues (Redis DB ${redisConfig.db})`);
+        console.log(`   Target: Redis DB ${redisConfig.db}`);
         if (stopActive) {
             console.log('   Active jobs will be stopped before purging.');
         }

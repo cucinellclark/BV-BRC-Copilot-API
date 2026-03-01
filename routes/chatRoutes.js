@@ -1217,17 +1217,6 @@ router.post('/rag/stream', authenticate, async (req, res) => {
     }
 });
 
-router.post('/rag-distllm', authenticate, async (req, res) => {
-    try {
-        const { query, rag_db, user_id, model, num_docs, session_id } = req.body;
-        const response = await ChatService.handleRagRequestDistllm({ query, rag_db, user_id, model, num_docs, session_id });
-        res.status(200).json(response);
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
 router.post('/chat-image', authenticate, async (req, res) => {
     try {
         const { query, model, session_id, user_id, system_prompt, save_chat = true, image } = req.body;

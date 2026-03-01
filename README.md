@@ -85,7 +85,6 @@ Every endpoint **requires** a BV-BRC JWT supplied via the `Authorization: Bearer
 | POST | `/chat` | Plain LLM chat (stores history). |
 | POST | `/chat-only` | One-off chat (no DB interaction). |
 | POST | `/rag` | Retrieval-augmented query using standard vector database. |
-| POST | `/rag-distllm` | RAG through **distllm** distributed embeddings. |
 | POST | `/chat-image` | Image + text prompt. |
 | GET  | `/start-chat` | Generate a UUID session id. |
 | GET  | `/get-session-messages` | Messages for a session (`include_files=true` optionally includes paginated file metadata). |
@@ -127,7 +126,7 @@ The codebase follows a classic MVC-ish layout:
 |-- routes/        # Express routers (chat, db)
 |-- services/      # LLM integrations, Mongo helpers
 |-- middleware/    # Auth & other HTTP middlewares
-|-- utilities/     # Stand-alone scripts & python helpers (distllm, tfidf, …)
+|-- utilities/     # Stand-alone scripts & python helpers
 |-- bin/launch-…   # Entrypoints for PM2 / docker
 ```
 
