@@ -3,7 +3,6 @@ import os, sys, json
 from tokenizer import count_tokens
 from text_utils import create_query_from_messages
 from state_utils import get_path_state
-import logging
 from datetime import datetime
 
 app = Flask(__name__)
@@ -127,6 +126,10 @@ def log_startup():
     startup_logger.info("=" * 60)
 
 log_startup()
+
+# Use logging to ensure output appears in Gunicorn
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)

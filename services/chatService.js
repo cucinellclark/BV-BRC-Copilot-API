@@ -1,7 +1,6 @@
 // services/chatService.js
 
-const { v4: uuidv4 } = require('uuid');
-const { connectToDatabase } = require('../database');
+// Import from the new modular structure
 const {
   setupOpenaiClient,
   queryClient,
@@ -821,11 +820,11 @@ async function handleCopilotStreamRequest(opts, res) {
   }
 }
 
-
 module.exports = {
   // Core chat flows
   handleCopilotRequest,
   handleCopilotStreamRequest,
+  setupCopilotStream,
   handleChatRequest,
   handleRagRequest,
   handleRagStreamRequest,
