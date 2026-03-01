@@ -1,7 +1,7 @@
 // services/queryEnhancement.js
 
-const { getModelData } = require('../core/dbUtils');
-const { queryChatOnly, queryChatImage } = require('../../llm/llmServices');
+const { getModelData } = require('./dbUtils');
+const { queryChatOnly, queryChatImage } = require('./llmServices');
 
 /**
  * Enhance a user query by injecting relevant context from the system prompt or image.

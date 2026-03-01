@@ -1,4 +1,4 @@
-const { connectToDatabase } = require('../../database');
+const { connectToDatabase } = require('../database');
 const config = require('../../config.json');
 
 const COLLECTION = 'session_memory';

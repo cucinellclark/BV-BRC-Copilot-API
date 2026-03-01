@@ -13,8 +13,8 @@ const {
   postJson,
   postJsonStream,
   LLMServiceError
-} = require('../llm/llmServices');
-const { getModelData } = require('../chat/core/dbUtils');
+} = require('../llmServices');
+const { getModelData } = require('../dbUtils');
 
 const MAX_TOKEN_HEADROOM = 500;
 

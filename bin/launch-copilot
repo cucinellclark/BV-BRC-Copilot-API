@@ -3,7 +3,7 @@
 var app = require('../index');
 var conf = require('../config.json');
 const { discoverTools } = require('../services/mcp/toolDiscovery');
-const { connectToDatabase } = require('../database');
+const { connectToDatabase } = require('../services/database');
 
 app.set('port', conf.http_port || 7032);
 

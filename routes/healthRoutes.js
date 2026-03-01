@@ -1,7 +1,7 @@
 // routes/healthRoutes.js
 
 const express = require('express');
-const { checkConnectionHealth, getPoolStats } = require('../database');
+const { checkConnectionHealth, getPoolStats } = require('../services/database');
 const router = express.Router();
 
 /**

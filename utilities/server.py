@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import os, sys, json
+import os, sys, json, logging
 from tokenizer import count_tokens
 from text_utils import create_query_from_messages
 from state_utils import get_path_state

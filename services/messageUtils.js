@@ -1,7 +1,7 @@
 // services/messageUtils.js
 
 const { v4: uuidv4 } = require('uuid');
-const { postJson } = require('../../llm/llmServices');
+const { postJson } = require('./llmServices');
 
 // Helper function to create message objects with consistent structure
 function createMessage(role, content, tokenCount) {

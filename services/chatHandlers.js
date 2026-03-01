@@ -8,8 +8,8 @@ const {
   addMessagesToSession
 } = require('./dbUtils');
 const { prepareCopilotContext } = require('./contextBuilder');
-const { runModel } = require('../../queries/modelQueries');
-const { createMessage, createQueryFromMessages } = require('../utils/messageUtils');
+const { runModel } = require('./queries/modelQueries');
+const { createMessage, createQueryFromMessages } = require('./messageUtils');
 const {
   queryRequestEmbedding,
   queryRequestChat,
@@ -20,8 +20,8 @@ const {
   setupOpenaiClient,
   queryClient,
   LLMServiceError
-} = require('../../llm/llmServices');
-const config = require('../../../config.json');
+} = require('./llmServices');
+const config = require('../config.json');
 
 async function handleCopilotRequest(opts) {
   try {

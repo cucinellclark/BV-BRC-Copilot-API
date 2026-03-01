@@ -1,15 +1,15 @@
 // services/streamingHandlers.js
 
 const { v4: uuidv4 } = require('uuid');
-const { LLMServiceError } = require('../../llm/llmServices');
+const { LLMServiceError } = require('./llmServices');
 const {
   getModelData,
   createChatSession,
   addMessagesToSession
-} = require('../core/dbUtils');
-const { prepareCopilotContext } = require('../core/contextBuilder');
-const { runModel, runModelStream } = require('../../queries/modelQueries');
-const { createMessage } = require('../utils/messageUtils');
+} = require('./dbUtils');
+const { prepareCopilotContext } = require('./contextBuilder');
+const { runModel, runModelStream } = require('./queries/modelQueries');
+const { createMessage } = require('./messageUtils');
 const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
 const streamStore = require('./streamStore');
 
