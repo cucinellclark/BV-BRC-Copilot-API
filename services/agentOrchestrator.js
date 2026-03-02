@@ -186,7 +186,10 @@ function isJobsBrowseTool(toolId) {
 
 function isWorkflowTool(toolId) {
   if (typeof toolId !== 'string') return false;
-  return toolId.includes('plan_workflow') || toolId.includes('submit_workflow');
+  const workflowTools = mcpConfig.global_settings?.workflow_tools || [];
+  // Strip server prefix (e.g., "bvbrc_server.plan_genome_assembly" -> "plan_genome_assembly")
+  const bareToolId = toolId.includes('.') ? toolId.split('.').pop() : toolId;
+  return workflowTools.includes(bareToolId);
 }
 
 function unwrapDisplayResult(result) {

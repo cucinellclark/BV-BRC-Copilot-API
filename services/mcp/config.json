@@ -35,14 +35,16 @@
       "list_jobs",
       "get_recent_jobs",
       "bvbrc_search_data",
-      "plan_workflow",
-      "submit_workflow"
+      "plan_genome_assembly",
+      "plan_genome_annotation",
+      "plan_comparative_systems"
     ],
     "replay_data_page_size_default": 100,
     "bypass_file_handling_tools": [
       "workspace_browse_tool",
-      "plan_workflow",
-      "submit_workflow",
+      "plan_genome_assembly",
+      "plan_genome_annotation",
+      "plan_comparative_systems",
       "helpdesk_service_usage",
       "preview_file",
       "read_file_lines",
@@ -67,11 +69,15 @@
         "upload_only_extensions": ["tsv"]
       }
     },
-    "context_aware_tools": [
-      "plan_workflow"
+    "context_aware_tools": [],
+    "workflow_tools": [
+      "plan_genome_assembly",
+      "plan_genome_annotation",
+      "plan_comparative_systems"
     ],
     "disabled_tools": [
       "bvbrc_collection_fields_and_parameters",
+      "plan_workflow",
       "submit_workflow",
       "get_genome_group_ids",
       "get_feature_group_ids"
