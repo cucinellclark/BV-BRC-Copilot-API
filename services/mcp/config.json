@@ -54,7 +54,13 @@
       "bvbrc_collection_fields_and_parameters",
       "list_jobs",
       "get_job_details",
-      "read_file_bytes_tool"
+      "read_file_bytes_tool",
+      "list_genome_groups",
+      "get_genome_group",
+      "create_genome_group",
+      "list_feature_groups",
+      "get_feature_group",
+      "create_feature_group"
     ],
     "tool_policies": {
       "bvbrc_search_data": {
@@ -66,7 +72,9 @@
     ],
     "disabled_tools": [
       "bvbrc_collection_fields_and_parameters",
-      "submit_workflow"
+      "submit_workflow",
+      "get_genome_group_ids",
+      "get_feature_group_ids"
     ],
     "exclude_from_context": {
       "unconditional": [

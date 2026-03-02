@@ -23,6 +23,12 @@ EXECUTION GUIDELINES:
       → Use workspace_browse_tool (from bvbrc_server)
       → Signals: "my files", "my workspace", "find my [X] files", references to user-uploaded data
       → Use name_contains for filename search terms
+    - For genome groups or feature groups:
+      → Use list_genome_groups or list_feature_groups to discover available groups
+      → Use get_genome_group or get_feature_group to retrieve IDs from a group by name
+      → Use create_genome_group or create_feature_group to create new groups
+      → DO NOT use workspace_browse_tool for group operations
+      → Groups are identified by name only — never construct workspace paths for groups
     - If the query asks about BV-BRC itself (capabilities, features, how-to), it's a helpdesk question
     - If the query asks for specific data/records from BV-BRC database collections, it's a data query
     - If the query refers to the user's own files or workspace, it's a workspace query
