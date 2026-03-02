@@ -29,13 +29,6 @@
     "rag_tools": [
       "helpdesk_service_usage"
     ],
-    "finalize_tools": [
-      "helpdesk_service_usage",
-      "plan_workflow",
-      "submit_workflow",
-      "workspace_browse_tool",
-      "list_jobs"
-    ],
     "replayable_tools": [
       "workspace_browse_tool",
       "workspace_get_file_metadata_tool",

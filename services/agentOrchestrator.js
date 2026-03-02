@@ -1,7 +1,7 @@
 // services/agentOrchestrator.js
 
 const { v4: uuidv4 } = require('uuid');
-const { executeMcpTool, isFinalizeTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
+const { executeMcpTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
 const { loadToolsForPrompt, loadToolsManifest } = require('./mcp/toolDiscovery');
 const {
   getModelData,
@@ -836,7 +836,6 @@ async function executeAgentLoop(opts) {
   const collectedRagDocs = [];
   let iteration = 0;
   let finalResponseSourceTool = null; // Track which tool generated the final response
-  let finalizeAfterTerminalTool = null; // Terminal tool executed; synthesize final response next
   let finalResponse = null;
   let sessionMemory = null;
   let queryForAgent = query;
@@ -1299,16 +1298,6 @@ async function executeAgentLoop(opts) {
           }
         }
 
-        // Terminal tools end planning, but still go through final response synthesis.
-        const shouldFinalizeNow = isFinalizeTool(nextAction.action);
-        if (shouldFinalizeNow) {
-          throwIfCancelled('before_finalize_tool_emit');
-          logger.info('Terminal tool executed, ending planning loop and generating final response', {
-            tool: nextAction.action
-          });
-          finalizeAfterTerminalTool = nextAction.action;
-          break;
-        }
       } catch (error) {
         if (error && error.isCancelled) {
           throw error;
@@ -1381,27 +1370,6 @@ async function executeAgentLoop(opts) {
           break;
         }
       }
-    }
-
-    if (!finalResponse && finalizeAfterTerminalTool) {
-      throwIfCancelled('before_terminal_tool_finalize_generation');
-      finalResponse = await generateFinalResponse(
-        queryForAgent,
-        system_prompt,
-        executionTrace,
-        toolResults,
-        model,
-        historyContext,
-        stream,
-        responseStream,
-        logger,
-        finalizeAfterTerminalTool,
-        sessionMemory,
-        workspace_items,
-        selected_jobs,
-        selected_workflows
-      );
-      finalResponseSourceTool = finalizeAfterTerminalTool;
     }
 
     // Safety net: hit max iterations
