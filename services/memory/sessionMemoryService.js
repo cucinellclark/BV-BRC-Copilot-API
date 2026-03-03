@@ -235,6 +235,7 @@ async function updateSessionFacts({ session_id, user_id, facts, source = 'llm', 
 }
 
 function formatSessionMemory(memory) {
+  return ''; // Session facts disabled
   if (!memory) return 'No session memory available';
   const focus = memory.focus ? JSON.stringify(memory.focus, null, 2) : 'null';
   const facts = memory.facts && Object.keys(memory.facts).length > 0
