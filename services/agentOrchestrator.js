@@ -2227,7 +2227,12 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
             const queryParamsStr = result.queryParameters
               ? `Query Parameters: ${await sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n`
               : '';
-            chunk = `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
+            // When snapshot mode, lead with the total count so the LLM reports it accurately
+            const hasTotal = typeof result.numFound === 'number' && result.numFound > 0;
+            const headerLine = hasTotal
+              ? `[QUERY MATCHED ${result.numFound} total records (showing first ${result.summary.recordCount} as preview)]`
+              : `[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]`;
+            chunk = `${sourceLabel}:\n${headerLine}\n` +
                     `Data Type: ${result.summary.dataType}\n` +
                     `Fields: ${Array.isArray(result.summary.fields) ? result.summary.fields.join(', ') : ''}\n` +
                     `Sample Record: ${sampleRecordStr}\n` +
