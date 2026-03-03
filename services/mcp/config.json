@@ -93,10 +93,10 @@
           "result_types": ["list_result", "search_result"]
         },
         "list_genome_groups": {
-          "result_types": ["list_result"]
+          "result_types": ["search_result"]
         },
         "list_feature_groups": {
-          "result_types": ["list_result"]
+          "result_types": ["search_result"]
         }
       }
     },

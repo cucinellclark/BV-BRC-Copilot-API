@@ -176,7 +176,10 @@ function createMessage(role, content) {
 }
 
 function isWorkspaceBrowseTool(toolId) {
-  return typeof toolId === 'string' && toolId.includes('workspace_browse_tool');
+  if (typeof toolId !== 'string') return false;
+  return toolId.includes('workspace_browse_tool') ||
+    toolId.includes('list_genome_groups') ||
+    toolId.includes('list_feature_groups');
 }
 
 function isJobsBrowseTool(toolId) {
