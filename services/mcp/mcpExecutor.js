@@ -1272,6 +1272,29 @@ async function executeMcpTool(toolId, parameters = {}, authToken = null, context
       }
     }
 
+    // Filter parameters to only those defined in the tool's input schema.
+    // Replay calls may include extra metadata (e.g. group_type, path) that the
+    // MCP tool function doesn't accept, causing Pydantic validation errors.
+    if (toolDef.inputSchema && toolDef.inputSchema.properties && typeof parameters === 'object') {
+      const allowedKeys = new Set(Object.keys(toolDef.inputSchema.properties));
+      const originalKeys = Object.keys(parameters);
+      const filtered = {};
+      for (const key of originalKeys) {
+        if (allowedKeys.has(key)) {
+          filtered[key] = parameters[key];
+        }
+      }
+      const droppedKeys = originalKeys.filter(k => !allowedKeys.has(k));
+      if (droppedKeys.length > 0) {
+        log.info('Filtered unknown parameters before MCP tool call', {
+          toolId,
+          droppedKeys,
+          allowedKeys: [...allowedKeys]
+        });
+      }
+      parameters = filtered;
+    }
+
     // Build JSON-RPC request.
     // NOTE: FastMCP progress notifications (notifications/progress) require a
     // client-provided progress token in request params metadata.

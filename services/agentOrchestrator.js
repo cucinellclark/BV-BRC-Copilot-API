@@ -1665,6 +1665,28 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
                 }];
               }
 
+              // Replayable envelope results — give planner a concise summary
+              if (
+                value &&
+                typeof value === 'object' &&
+                value.result && typeof value.result === 'object' &&
+                value.call && typeof value.call === 'object' &&
+                value.call.replayable === true
+              ) {
+                const inner = value.result;
+                const itemCount = typeof inner.count === 'number'
+                  ? inner.count
+                  : (Array.isArray(inner.items) ? inner.items.length : 0);
+                return [key, {
+                  type: 'UI_GRID_RENDERED',
+                  count: itemCount,
+                  message: inner.message || `${itemCount} result(s) displayed in table.`,
+                  path: inner.path || null,
+                  tool_name: inner.tool_name || value.call.tool || key,
+                  note: 'Full results are displayed to the user in an interactive table. Do NOT re-fetch or enumerate.'
+                }];
+              }
+
               // Fallback for non-file-reference results (should be rare/error cases)
               const resultStr = JSON.stringify(value);
               if (resultStr.length > 2000) {
@@ -1975,6 +1997,36 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
                     `Sample Record: ${sampleRecordStr}\n` +
                     queryParamsStr;
           }
+        } else if (
+          result &&
+          typeof result === 'object' &&
+          result.result && typeof result.result === 'object' &&
+          result.call && typeof result.call === 'object' &&
+          result.call.replayable === true
+        ) {
+          // Replayable envelope results (workspace browse, group listings, etc.)
+          // Provide the LLM a concise summary; full data is rendered in the UI grid.
+          const inner = result.result;
+          const itemCount = typeof inner.count === 'number'
+            ? inner.count
+            : (Array.isArray(inner.items) ? inner.items.length : 0);
+          const message = inner.message || `${itemCount} result(s) returned.`;
+          const toolName = inner.tool_name || result.call.tool || toolId;
+          const path = inner.path || '';
+          const sampleItems = Array.isArray(inner.items)
+            ? inner.items.slice(0, 3).map(item => {
+                if (item && typeof item === 'object') {
+                  return item.name || JSON.stringify(item);
+                }
+                return String(item);
+              })
+            : [];
+          chunk = `${sourceLabel}:\n[UI GRID RENDERED - ${itemCount} items displayed in table]\n` +
+                  `Tool: ${toolName}\n` +
+                  `${path ? `Path: ${path}\n` : ''}` +
+                  `Summary: ${message}\n` +
+                  `${sampleItems.length > 0 ? `Sample Items: ${sampleItems.join(', ')}\n` : ''}` +
+                  `The full list is displayed to the user in an interactive table. Do NOT enumerate all items. Provide a brief summary instead.`;
         } else {
           // Fallback for non-file-reference results (workspace/jobs and other bypass tools)
           const llmResult = (isJobsBrowseTool(toolId) &&

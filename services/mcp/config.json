@@ -37,7 +37,9 @@
       "bvbrc_search_data",
       "plan_genome_assembly",
       "plan_genome_annotation",
-      "plan_comparative_systems"
+      "plan_comparative_systems",
+      "list_genome_groups",
+      "list_feature_groups"
     ],
     "replay_data_page_size_default": 100,
     "bypass_file_handling_tools": [
@@ -89,6 +91,12 @@
       "conditional": {
         "workspace_browse_tool": {
           "result_types": ["list_result", "search_result"]
+        },
+        "list_genome_groups": {
+          "result_types": ["list_result"]
+        },
+        "list_feature_groups": {
+          "result_types": ["list_result"]
         }
       }
     },
