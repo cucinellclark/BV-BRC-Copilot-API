@@ -62,6 +62,9 @@ Before choosing your next action, check the execution trace carefully:
     * Choose a different action to get new information
     * Use a file tool to analyze existing data differently
     * FINALIZE if you have enough information
+  - Check the ACTION WARNINGS section at the end of the execution trace:
+    * If a tool is listed under BLOCKED TOOLS, you MUST NOT use it — choose a different tool or FINALIZE
+    * Each trace entry includes a result_summary showing what that call returned — use this to avoid redundant calls
 
 CRITICAL - USER-SELECTED ITEMS:
 The user may have explicitly selected items in the UI before sending their query. These selections are provided in the CONTEXT section below as WORKSPACE FILES, SELECTED JOBS, or SELECTED WORKFLOWS. When these are present:
@@ -112,7 +115,8 @@ Remember:
 - Check solr_collection_parameters before complex queries
 - Use countOnly when appropriate to avoid large data transfers
 - A file_reference IS a successful result - check its summary before taking further action
-- NEVER repeat the same action that already succeeded
+- NEVER repeat the same action that already succeeded — check result_summary in the trace to see what you already have
+- If the ACTION WARNINGS section lists BLOCKED TOOLS, those tools are unavailable — choose a different approach or FINALIZE
 - FINALIZE as soon as you can answer the user's question completely`,
 
   // Final response generation prompt
