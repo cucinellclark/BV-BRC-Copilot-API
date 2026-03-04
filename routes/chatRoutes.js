@@ -1685,6 +1685,61 @@ router.get('/get-user-workflow-summary', authenticate, async (req, res) => {
     }
 });
 
+router.post('/submit-workflow/:workflowId', authenticate, async (req, res) => {
+    try {
+        const { workflowId } = req.params;
+        if (!workflowId) {
+            return res.status(400).json({ message: 'workflowId is required' });
+        }
+
+        const authHeader = req.headers ? req.headers.authorization : '';
+        if (!authHeader) {
+            return res.status(401).json({ message: 'Authorization header is required' });
+        }
+
+        const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
+
+        // Proxy the submit request to the workflow engine
+        const submitUrl = `${workflowBaseUrl}/workflows/${encodeURIComponent(workflowId)}/submit`;
+        const response = await axios.post(
+            submitUrl,
+            {},
+            {
+                headers: {
+                    'Authorization': authHeader,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 30000
+            }
+        );
+
+        return res.status(200).json({
+            workflow_id: workflowId,
+            status: response.data?.status || 'pending',
+            message: response.data?.message || 'Workflow submitted for execution',
+            submitted_at: new Date().toISOString(),
+            ...response.data
+        });
+    } catch (error) {
+        console.error('Error submitting workflow:', error.message);
+
+        // Forward workflow engine error details if available
+        if (error.response) {
+            return res.status(error.response.status || 500).json({
+                message: 'Workflow submission failed',
+                error: error.response.data?.detail || error.response.data?.message || error.message,
+                workflow_id: req.params.workflowId
+            });
+        }
+
+        return res.status(500).json({
+            message: 'Failed to submit workflow',
+            error: error.message,
+            workflow_id: req.params.workflowId
+        });
+    }
+});
+
 router.post('/put-chat-entry', async (req, res) => {
     console.log('Inserting chat entry');
     console.log(req.body);

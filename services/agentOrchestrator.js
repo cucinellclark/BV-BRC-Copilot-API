@@ -1,7 +1,7 @@
 // services/agentOrchestrator.js
 
 const { v4: uuidv4 } = require('uuid');
-const { executeMcpTool, isFinalizeTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
+const { executeMcpTool, isRagTool, isReplayableTool } = require('./mcp/mcpExecutor');
 const { loadToolsForPrompt, loadToolsManifest } = require('./mcp/toolDiscovery');
 const {
   getModelData,
@@ -96,6 +96,76 @@ function prepareToolResult(toolId, result, ragMaxDocs = 5) {
 }
 
 /**
+ * Create a concise summary of a tool result for embedding in the execution trace.
+ * This ensures the planner can see what ALL prior tool calls returned, even when
+ * toolResults[action] gets overwritten by a subsequent call to the same tool.
+ */
+function summarizeResultForTrace(safeResult) {
+  if (!safeResult) return null;
+
+  // File reference (most common case)
+  if (safeResult.type === 'file_reference') {
+    const isError = safeResult.isError === true || safeResult.error === true;
+    if (isError) {
+      return {
+        type: 'error',
+        errorType: safeResult.errorType || 'unknown',
+        errorMessage: safeResult.errorMessage || 'Tool returned an error'
+      };
+    }
+    return {
+      type: 'file_reference',
+      file_id: safeResult.file_id,
+      recordCount: safeResult.summary?.recordCount ?? null,
+      fields: safeResult.summary?.fields ?? null,
+      description: safeResult.summary?.description || null
+    };
+  }
+
+  // RAG result
+  if (safeResult.type === 'rag_result') {
+    return {
+      type: 'rag_result',
+      count: safeResult.count || 0,
+      summary: safeResult.summary || null
+    };
+  }
+
+  // Replayable envelope
+  if (safeResult.result && safeResult.call && safeResult.call.replayable === true) {
+    const inner = safeResult.result;
+    const itemCount = typeof inner.count === 'number'
+      ? inner.count
+      : (Array.isArray(inner.items) ? inner.items.length : 0);
+    return {
+      type: 'ui_grid',
+      count: itemCount,
+      message: inner.message || `${itemCount} result(s)`
+    };
+  }
+
+  // Error result
+  if (safeResult.error) {
+    return {
+      type: 'error',
+      errorMessage: typeof safeResult.error === 'string' ? safeResult.error : JSON.stringify(safeResult.error)
+    };
+  }
+
+  // Generic object — just note it exists
+  if (typeof safeResult === 'object') {
+    const keys = Object.keys(safeResult);
+    return {
+      type: 'object',
+      keys: keys.slice(0, 10),
+      keyCount: keys.length
+    };
+  }
+
+  return { type: typeof safeResult };
+}
+
+/**
  * Extract workflow_id from a workflow tool result
  * Handles various result structures from workflow tools (plan_workflow, submit_workflow)
  * Including MCP wrappers
@@ -176,7 +246,10 @@ function createMessage(role, content) {
 }
 
 function isWorkspaceBrowseTool(toolId) {
-  return typeof toolId === 'string' && toolId.includes('workspace_browse_tool');
+  if (typeof toolId !== 'string') return false;
+  return toolId.includes('workspace_browse_tool') ||
+    toolId.includes('list_genome_groups') ||
+    toolId.includes('list_feature_groups');
 }
 
 function isJobsBrowseTool(toolId) {
@@ -186,7 +259,10 @@ function isJobsBrowseTool(toolId) {
 
 function isWorkflowTool(toolId) {
   if (typeof toolId !== 'string') return false;
-  return toolId.includes('plan_workflow') || toolId.includes('submit_workflow');
+  const workflowTools = mcpConfig.global_settings?.workflow_tools || [];
+  // Strip server prefix (e.g., "bvbrc_server.plan_genome_assembly" -> "plan_genome_assembly")
+  const bareToolId = toolId.includes('.') ? toolId.split('.').pop() : toolId;
+  return workflowTools.includes(bareToolId);
 }
 
 function unwrapDisplayResult(result) {
@@ -601,15 +677,6 @@ function isDuplicateAction(plannedAction, executionTrace) {
     return { isDuplicate: false };
   }
 
-  // Only track duplicates for actions where re-running is costly or redundant
-  const duplicateTrackedActions = new Set([
-    'bvbrc_server.bvbrc_search_data'
-  ]);
-
-  if (!duplicateTrackedActions.has(plannedAction.action)) {
-    return { isDuplicate: false };
-  }
-
   // Don't check FINALIZE actions
   if (plannedAction.action === 'FINALIZE') {
     return { isDuplicate: false };
@@ -642,6 +709,50 @@ function isDuplicateAction(plannedAction, executionTrace) {
   }
 
   return { isDuplicate: false };
+}
+
+/**
+ * Count how many times each tool has been called (successfully or not) in the execution trace.
+ * Returns an object keyed by action name with the count as value.
+ */
+function getToolCallCounts(executionTrace) {
+  const counts = {};
+  for (const entry of executionTrace) {
+    if (!entry || !entry.action || entry.action === 'FINALIZE' || entry.action === 'DUPLICATE_DETECTED' || entry.action === 'TOOL_BLOCKED') {
+      continue;
+    }
+    counts[entry.action] = (counts[entry.action] || 0) + 1;
+  }
+  return counts;
+}
+
+/**
+ * Check if a tool has exceeded the maximum allowed calls.
+ * This catches cases where the same tool is called with different parameters
+ * repeatedly, which isDuplicateAction would not catch.
+ * Configurable via config.json: agent.max_calls_per_tool (default: 3)
+ */
+const MAX_CALLS_PER_TOOL = config.agent?.max_calls_per_tool || 3;
+
+function isToolCallLimitExceeded(plannedAction, executionTrace) {
+  if (!plannedAction || !plannedAction.action || plannedAction.action === 'FINALIZE') {
+    return { exceeded: false };
+  }
+
+  const counts = getToolCallCounts(executionTrace);
+  const count = counts[plannedAction.action] || 0;
+
+  if (count >= MAX_CALLS_PER_TOOL) {
+    return {
+      exceeded: true,
+      action: plannedAction.action,
+      count,
+      max: MAX_CALLS_PER_TOOL,
+      message: `Tool "${plannedAction.action}" has already been called ${count} times (max ${MAX_CALLS_PER_TOOL}). Choose a different tool or FINALIZE.`
+    };
+  }
+
+  return { exceeded: false };
 }
 
 /**
@@ -836,7 +947,6 @@ async function executeAgentLoop(opts) {
   const collectedRagDocs = [];
   let iteration = 0;
   let finalResponseSourceTool = null; // Track which tool generated the final response
-  let finalizeAfterTerminalTool = null; // Terminal tool executed; synthesize final response next
   let finalResponse = null;
   let sessionMemory = null;
   let queryForAgent = query;
@@ -985,9 +1095,14 @@ async function executeAgentLoop(opts) {
       }
     }
 
+    // Track how many times we re-plan within a single iteration to prevent infinite loops
+    // when duplicates or tool blocks keep triggering without advancing the iteration counter
+    const MAX_REPLANS_PER_ITERATION = 2;
+
     while (iteration < max_iterations) {
       throwIfCancelled('before_iteration');
       iteration++;
+      let replansThisIteration = 0;
       logger.info(`=== Iteration ${iteration}/${max_iterations} ===`);
 
       // Plan next action (with optional history)
@@ -1011,62 +1126,159 @@ async function executeAgentLoop(opts) {
         reasoning: nextAction.reasoning
       });
 
-      // PRE-EXECUTION DUPLICATE DETECTION
-      // Check if this action is a duplicate before executing
-      const duplicateCheck = isDuplicateAction(nextAction, executionTrace);
+      // PRE-EXECUTION GUARD: duplicate detection + per-tool call limit
+      // If the action is blocked, re-plan within the same iteration (up to MAX_REPLANS_PER_ITERATION)
+      // so we don't waste iteration budget on no-ops.
+      let actionBlocked = true;
+      while (actionBlocked && nextAction.action !== 'FINALIZE') {
+        actionBlocked = false;
 
-      if (duplicateCheck.isDuplicate) {
-        logger.warn('Duplicate action detected', {
-          action: duplicateCheck.action,
-          duplicateIteration: duplicateCheck.duplicateIteration,
-          currentIteration: iteration,
-          message: duplicateCheck.message
-        });
-
-        // Emit SSE event for duplicate detection
-        if (stream && responseStream) {
-          emitSSE(responseStream, 'duplicate_detected', {
-            iteration,
+        // --- Exact-parameter duplicate check ---
+        const duplicateCheck = isDuplicateAction(nextAction, executionTrace);
+        if (duplicateCheck.isDuplicate) {
+          logger.warn('Duplicate action detected', {
             action: duplicateCheck.action,
             duplicateIteration: duplicateCheck.duplicateIteration,
+            currentIteration: iteration,
             message: duplicateCheck.message
           });
-        }
 
-        // If we already have sufficient data, force finalization
-        if (hasSufficientData(toolResults)) {
-          logger.info('Forcing finalization due to duplicate action with sufficient data');
-
-          // Override action to FINALIZE
-          nextAction = {
-            action: 'FINALIZE',
-            reasoning: `Duplicate action detected (already executed in iteration ${duplicateCheck.duplicateIteration}). Finalizing with existing data.`,
-            parameters: {}
-          };
-
-          // Emit SSE event
           if (stream && responseStream) {
-            emitSSE(responseStream, 'forced_finalize', {
-              reason: 'duplicate_with_data',
-              message: 'Preventing duplicate execution - sufficient data already available'
+            emitSSE(responseStream, 'duplicate_detected', {
+              iteration,
+              action: duplicateCheck.action,
+              duplicateIteration: duplicateCheck.duplicateIteration,
+              message: duplicateCheck.message
             });
           }
-        } else {
-          // No sufficient data yet, but still a duplicate
-          logger.warn('Duplicate action detected but insufficient data - continuing to let planner adapt');
 
-          // Add a warning to trace
-          const warningEntry = {
+          // Force FINALIZE if we have data, otherwise re-plan
+          if (hasSufficientData(toolResults)) {
+            logger.info('Forcing finalization due to duplicate action with sufficient data');
+            nextAction = {
+              action: 'FINALIZE',
+              reasoning: `Duplicate action detected (already executed in iteration ${duplicateCheck.duplicateIteration}). Finalizing with existing data.`,
+              parameters: {}
+            };
+            if (stream && responseStream) {
+              emitSSE(responseStream, 'forced_finalize', {
+                reason: 'duplicate_with_data',
+                message: 'Preventing duplicate execution - sufficient data already available'
+              });
+            }
+            break;
+          }
+
+          // No data yet — add warning and re-plan within this iteration
+          executionTrace.push({
             iteration,
             action: 'DUPLICATE_DETECTED',
             reasoning: duplicateCheck.message,
             parameters: {},
             timestamp: new Date().toISOString(),
             status: 'warning'
-          };
-          executionTrace.push(warningEntry);
+          });
 
-          // Continue to next iteration to replan
+          replansThisIteration++;
+          if (replansThisIteration > MAX_REPLANS_PER_ITERATION) {
+            logger.warn('Max re-plans exceeded within iteration, forcing FINALIZE');
+            nextAction = {
+              action: 'FINALIZE',
+              reasoning: 'Unable to find a non-duplicate action after multiple re-plan attempts. Finalizing with available data.',
+              parameters: {}
+            };
+            if (stream && responseStream) {
+              emitSSE(responseStream, 'forced_finalize', {
+                reason: 'replan_limit_exceeded',
+                message: 'Max re-plan attempts exceeded within single iteration'
+              });
+            }
+            break;
+          }
+
+          // Re-plan: ask the planner again with the updated trace
+          nextAction = await planNextAction(
+            queryForAgent, system_prompt, executionTrace, toolResults, model,
+            historyContext, sessionMemory, workspace_items, selected_jobs, selected_workflows, logger
+          );
+          throwIfCancelled('after_replan');
+          logger.info('Re-planned action after duplicate', { action: nextAction.action, reasoning: nextAction.reasoning });
+          actionBlocked = true;
+          continue;
+        }
+
+        // --- Per-tool call limit check ---
+        const limitCheck = isToolCallLimitExceeded(nextAction, executionTrace);
+        if (limitCheck.exceeded) {
+          logger.warn('Tool call limit exceeded', {
+            action: limitCheck.action,
+            count: limitCheck.count,
+            max: limitCheck.max,
+            currentIteration: iteration
+          });
+
+          if (stream && responseStream) {
+            emitSSE(responseStream, 'tool_blocked', {
+              iteration,
+              action: limitCheck.action,
+              count: limitCheck.count,
+              max: limitCheck.max,
+              message: limitCheck.message
+            });
+          }
+
+          if (hasSufficientData(toolResults)) {
+            logger.info('Forcing finalization due to tool call limit with sufficient data');
+            nextAction = {
+              action: 'FINALIZE',
+              reasoning: limitCheck.message + ' Finalizing with existing data.',
+              parameters: {}
+            };
+            if (stream && responseStream) {
+              emitSSE(responseStream, 'forced_finalize', {
+                reason: 'tool_call_limit',
+                message: limitCheck.message
+              });
+            }
+            break;
+          }
+
+          // No data yet — block this tool and re-plan
+          executionTrace.push({
+            iteration,
+            action: 'TOOL_BLOCKED',
+            reasoning: limitCheck.message,
+            blocked_tool: limitCheck.action,
+            parameters: {},
+            timestamp: new Date().toISOString(),
+            status: 'warning'
+          });
+
+          replansThisIteration++;
+          if (replansThisIteration > MAX_REPLANS_PER_ITERATION) {
+            logger.warn('Max re-plans exceeded within iteration, forcing FINALIZE');
+            nextAction = {
+              action: 'FINALIZE',
+              reasoning: 'Unable to find a valid action after multiple re-plan attempts. Finalizing with available data.',
+              parameters: {}
+            };
+            if (stream && responseStream) {
+              emitSSE(responseStream, 'forced_finalize', {
+                reason: 'replan_limit_exceeded',
+                message: 'Max re-plan attempts exceeded within single iteration'
+              });
+            }
+            break;
+          }
+
+          // Re-plan: ask the planner again with the updated trace (which now has the TOOL_BLOCKED entry)
+          nextAction = await planNextAction(
+            queryForAgent, system_prompt, executionTrace, toolResults, model,
+            historyContext, sessionMemory, workspace_items, selected_jobs, selected_workflows, logger
+          );
+          throwIfCancelled('after_replan');
+          logger.info('Re-planned action after tool block', { action: nextAction.action, reasoning: nextAction.reasoning });
+          actionBlocked = true;
           continue;
         }
       }
@@ -1184,6 +1396,11 @@ async function executeAgentLoop(opts) {
         };
         traceEntry.status = isErrorResult ? 'error' : 'success';
 
+        // Store a concise result summary on the trace entry so the planner
+        // can see what ALL prior calls returned, even when toolResults[action]
+        // gets overwritten by a later call to the same tool.
+        traceEntry.result_summary = summarizeResultForTrace(safeResult);
+
         if (session_id) {
           try {
             sessionMemory = await updateSessionMemory({
@@ -1299,16 +1516,6 @@ async function executeAgentLoop(opts) {
           }
         }
 
-        // Terminal tools end planning, but still go through final response synthesis.
-        const shouldFinalizeNow = isFinalizeTool(nextAction.action);
-        if (shouldFinalizeNow) {
-          throwIfCancelled('before_finalize_tool_emit');
-          logger.info('Terminal tool executed, ending planning loop and generating final response', {
-            tool: nextAction.action
-          });
-          finalizeAfterTerminalTool = nextAction.action;
-          break;
-        }
       } catch (error) {
         if (error && error.isCancelled) {
           throw error;
@@ -1339,6 +1546,7 @@ async function executeAgentLoop(opts) {
 
         traceEntry.error = error.message;
         traceEntry.status = 'failed';
+        traceEntry.result_summary = { type: 'error', errorMessage: error.message };
         toolResults[nextAction.action] = { error: error.message };
 
         // Emit SSE event for tool execution failure
@@ -1381,27 +1589,6 @@ async function executeAgentLoop(opts) {
           break;
         }
       }
-    }
-
-    if (!finalResponse && finalizeAfterTerminalTool) {
-      throwIfCancelled('before_terminal_tool_finalize_generation');
-      finalResponse = await generateFinalResponse(
-        queryForAgent,
-        system_prompt,
-        executionTrace,
-        toolResults,
-        model,
-        historyContext,
-        stream,
-        responseStream,
-        logger,
-        finalizeAfterTerminalTool,
-        sessionMemory,
-        workspace_items,
-        selected_jobs,
-        selected_workflows
-      );
-      finalResponseSourceTool = finalizeAfterTerminalTool;
     }
 
     // Safety net: hit max iterations
@@ -1632,39 +1819,59 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
       ? `\n\nCONVERSATION HISTORY (for context):\n${historyContext}`
       : '';
 
-    // Format execution trace for prompt with duplicate detection
+    // Format execution trace for prompt with duplicate detection and result summaries
     let traceStr = 'No actions executed yet';
     if (executionTrace.length > 0) {
-      const formattedTrace = executionTrace.map(t => ({
-        iteration: t.iteration,
-        action: t.action,
-        reasoning: t.reasoning,
-        status: t.status,
-        error: t.error,
-        parameters: t.parameters // Include parameters for visibility
-      }));
+      const formattedTrace = executionTrace.map(t => {
+        const entry = {
+          iteration: t.iteration,
+          action: t.action,
+          reasoning: t.reasoning,
+          status: t.status,
+          error: t.error,
+          parameters: t.parameters // Include parameters for visibility
+        };
+        // Include result summary so the planner can see what each call returned,
+        // even when the latest toolResults[action] has been overwritten
+        if (t.result_summary) {
+          entry.result_summary = t.result_summary;
+        }
+        // Include blocked tool info so the planner knows which tools are off-limits
+        if (t.blocked_tool) {
+          entry.blocked_tool = t.blocked_tool;
+        }
+        return entry;
+      });
 
       traceStr = JSON.stringify(formattedTrace, null, 2);
 
-      // Add duplicate warning section if there are duplicates
-      const duplicateWarnings = [];
+      // Build warnings section: duplicates + blocked tools
+      const warnings = [];
       const actionCounts = {};
+      const blockedTools = new Set();
 
       for (const trace of executionTrace) {
         if (trace.status === 'success') {
           const key = trace.action;
           actionCounts[key] = (actionCounts[key] || 0) + 1;
         }
+        if (trace.action === 'TOOL_BLOCKED' && trace.blocked_tool) {
+          blockedTools.add(trace.blocked_tool);
+        }
       }
 
       for (const [action, count] of Object.entries(actionCounts)) {
         if (count > 1) {
-          duplicateWarnings.push(`⚠️  WARNING: "${action}" has been executed ${count} times!`);
+          warnings.push(`WARNING: "${action}" has been executed ${count} times! DO NOT call it again with the same parameters.`);
         }
       }
 
-      if (duplicateWarnings.length > 0) {
-        traceStr = `${traceStr}\n\n=== DUPLICATE ACTION WARNINGS ===\n${duplicateWarnings.join('\n')}\n\nDO NOT repeat these actions with the same parameters!`;
+      if (blockedTools.size > 0) {
+        warnings.push(`BLOCKED TOOLS (call limit reached — do NOT use these): ${[...blockedTools].join(', ')}`);
+      }
+
+      if (warnings.length > 0) {
+        traceStr = `${traceStr}\n\n=== ACTION WARNINGS ===\n${warnings.join('\n')}`;
       }
     }
 
@@ -1691,6 +1898,28 @@ async function planNextAction(query, systemPrompt, executionTrace, toolResults, 
                   local_tmp_path: value.filePath || null,
                   message: 'Result saved to a local /tmp session file.',
                   note: 'Result saved to a local /tmp session file. Prefer local_tmp_path for any downstream file access.'
+                }];
+              }
+
+              // Replayable envelope results — give planner a concise summary
+              if (
+                value &&
+                typeof value === 'object' &&
+                value.result && typeof value.result === 'object' &&
+                value.call && typeof value.call === 'object' &&
+                value.call.replayable === true
+              ) {
+                const inner = value.result;
+                const itemCount = typeof inner.count === 'number'
+                  ? inner.count
+                  : (Array.isArray(inner.items) ? inner.items.length : 0);
+                return [key, {
+                  type: 'UI_GRID_RENDERED',
+                  count: itemCount,
+                  message: inner.message || `${itemCount} result(s) displayed in table.`,
+                  path: inner.path || null,
+                  tool_name: inner.tool_name || value.call.tool || key,
+                  note: 'Full results are displayed to the user in an interactive table. Do NOT re-fetch or enumerate.'
                 }];
               }
 
@@ -1998,12 +2227,47 @@ async function generateFinalResponse(query, systemPrompt, executionTrace, toolRe
             const queryParamsStr = result.queryParameters
               ? `Query Parameters: ${await sanitizeToolNames(JSON.stringify(result.queryParameters, null, 2))}\n`
               : '';
-            chunk = `${sourceLabel}:\n[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]\n` +
+            // When snapshot mode, lead with the total count so the LLM reports it accurately
+            const hasTotal = typeof result.numFound === 'number' && result.numFound > 0;
+            const headerLine = hasTotal
+              ? `[QUERY MATCHED ${result.numFound} total records (showing first ${result.summary.recordCount} as preview)]`
+              : `[FILE SAVED - ${result.summary.recordCount} records, ${result.summary.sizeFormatted}]`;
+            chunk = `${sourceLabel}:\n${headerLine}\n` +
                     `Data Type: ${result.summary.dataType}\n` +
                     `Fields: ${Array.isArray(result.summary.fields) ? result.summary.fields.join(', ') : ''}\n` +
                     `Sample Record: ${sampleRecordStr}\n` +
                     queryParamsStr;
           }
+        } else if (
+          result &&
+          typeof result === 'object' &&
+          result.result && typeof result.result === 'object' &&
+          result.call && typeof result.call === 'object' &&
+          result.call.replayable === true
+        ) {
+          // Replayable envelope results (workspace browse, group listings, etc.)
+          // Provide the LLM a concise summary; full data is rendered in the UI grid.
+          const inner = result.result;
+          const itemCount = typeof inner.count === 'number'
+            ? inner.count
+            : (Array.isArray(inner.items) ? inner.items.length : 0);
+          const message = inner.message || `${itemCount} result(s) returned.`;
+          const toolName = inner.tool_name || result.call.tool || toolId;
+          const path = inner.path || '';
+          const sampleItems = Array.isArray(inner.items)
+            ? inner.items.slice(0, 3).map(item => {
+                if (item && typeof item === 'object') {
+                  return item.name || JSON.stringify(item);
+                }
+                return String(item);
+              })
+            : [];
+          chunk = `${sourceLabel}:\n[UI GRID RENDERED - ${itemCount} items displayed in table]\n` +
+                  `Tool: ${toolName}\n` +
+                  `${path ? `Path: ${path}\n` : ''}` +
+                  `Summary: ${message}\n` +
+                  `${sampleItems.length > 0 ? `Sample Items: ${sampleItems.join(', ')}\n` : ''}` +
+                  `The full list is displayed to the user in an interactive table. Do NOT enumerate all items. Provide a brief summary instead.`;
         } else {
           // Fallback for non-file-reference results (workspace/jobs and other bypass tools)
           const llmResult = (isJobsBrowseTool(toolId) &&

@@ -404,6 +404,23 @@ class FileManager {
       fileReference.call = normalized.metadata.call;
     }
 
+    // Preserve snapshot metadata for data tools so the client can display
+    // total counts and download links for the full dataset.
+    if (normalized.metadata) {
+      if (typeof normalized.metadata.numFound === 'number') {
+        fileReference.numFound = normalized.metadata.numFound;
+      }
+      if (typeof normalized.metadata.is_snapshot === 'boolean') {
+        fileReference.is_snapshot = normalized.metadata.is_snapshot;
+      }
+      if (typeof normalized.metadata.snapshot_limit === 'number') {
+        fileReference.snapshot_limit = normalized.metadata.snapshot_limit;
+      }
+      if (typeof normalized.metadata.collection === 'string') {
+        fileReference.collection = normalized.metadata.collection;
+      }
+    }
+
     // Add workspace info if uploaded
     if (workspaceInfo) {
       fileReference.workspace = workspaceInfo;
