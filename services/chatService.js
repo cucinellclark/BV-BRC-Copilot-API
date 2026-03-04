@@ -32,6 +32,7 @@ const fs = require('fs');
 const { safeParseJson } = require('./jsonUtils');
 const { prepareCopilotContext } = require('./contextBuilder');
 const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
+const { setupCopilotStream } = require('./streamingHandlers');
 const promptManager = require('../prompts');
 const { buildConversationContext } = require('./memory/conversationContextService');
 const { maybeQueueSummary } = require('./summaryQueueService');

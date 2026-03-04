@@ -40,5 +40,3 @@ tenacity==8.5.0
 tiktoken==0.9.0
 tokenizers==0.21.1
 
-# local packages – the “-e” flag installs them in editable mode
--e ./distllm

@@ -1289,20 +1289,6 @@ router.post('/rag/stream', authenticate, async (req, res) => {
     }
 });
 
-router.post('/rag-distllm', authenticate, async (req, res) => {
-    try {
-        const { query, rag_db, user_id, model, num_docs, session_id } = req.body;
-        const response = await ChatService.handleRagRequestDistllm({ query, rag_db, user_id, model, num_docs, session_id });
-        res.status(200).json(response);
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
-// ========== MULTIMODAL CHAT ENDPOINTS ==========
-// Chat with image input capabilities
-
 router.post('/chat-image', authenticate, async (req, res) => {
     try {
         const { query, model, session_id, user_id, system_prompt, save_chat = true, image } = req.body;
@@ -1696,6 +1682,61 @@ router.get('/get-user-workflow-summary', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Error retrieving user workflow summary:', error);
         return res.status(500).json({ message: 'Failed to retrieve user workflow summary', error: error.message });
+    }
+});
+
+router.post('/submit-workflow/:workflowId', authenticate, async (req, res) => {
+    try {
+        const { workflowId } = req.params;
+        if (!workflowId) {
+            return res.status(400).json({ message: 'workflowId is required' });
+        }
+
+        const authHeader = req.headers ? req.headers.authorization : '';
+        if (!authHeader) {
+            return res.status(401).json({ message: 'Authorization header is required' });
+        }
+
+        const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
+
+        // Proxy the submit request to the workflow engine
+        const submitUrl = `${workflowBaseUrl}/workflows/${encodeURIComponent(workflowId)}/submit`;
+        const response = await axios.post(
+            submitUrl,
+            {},
+            {
+                headers: {
+                    'Authorization': authHeader,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 30000
+            }
+        );
+
+        return res.status(200).json({
+            workflow_id: workflowId,
+            status: response.data?.status || 'pending',
+            message: response.data?.message || 'Workflow submitted for execution',
+            submitted_at: new Date().toISOString(),
+            ...response.data
+        });
+    } catch (error) {
+        console.error('Error submitting workflow:', error.message);
+
+        // Forward workflow engine error details if available
+        if (error.response) {
+            return res.status(error.response.status || 500).json({
+                message: 'Workflow submission failed',
+                error: error.response.data?.detail || error.response.data?.message || error.message,
+                workflow_id: req.params.workflowId
+            });
+        }
+
+        return res.status(500).json({
+            message: 'Failed to submit workflow',
+            error: error.message,
+            workflow_id: req.params.workflowId
+        });
     }
 });
 

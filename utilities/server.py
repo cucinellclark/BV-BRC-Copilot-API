@@ -1,17 +1,35 @@
 from flask import Flask, request, jsonify
-import os, json, sys, logging
-from datetime import datetime
-import tfidf_vectorizer as tv
+import os, sys, json, logging
 from tokenizer import count_tokens
-from rag import rag_handler
 from text_utils import create_query_from_messages
 from state_utils import get_path_state
 from datetime import datetime
-from vector_preloader import preload_databases, get_preloader
 
 app = Flask(__name__)
 
 file_path = os.path.dirname(os.path.realpath(__file__))
+
+# ---------------------------------------------------------------------------
+# Startup logger
+# ---------------------------------------------------------------------------
+startup_logger = logging.getLogger("startup")
+startup_logger.setLevel(logging.INFO)
+
+_startup_log_path = os.path.join(file_path, "startup.log")
+if not startup_logger.handlers:
+    _file_handler = logging.FileHandler(_startup_log_path)
+    _file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                          datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    startup_logger.addHandler(_file_handler)
+
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                          datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    startup_logger.addHandler(_console_handler)
 
 # ---------------------------------------------------------------------------
 # Access logging (Apache combined log format)
@@ -61,12 +79,6 @@ def log_request(response):
 
 # TODO: add error checking to each function
 
-@app.route('/tfidf_encode', methods=["POST"])
-def call_encode_query():
-    data = request.get_json()
-    query_embedding_array = tv.encode_query(data) 
-    return jsonify({"query_embedding": query_embedding_array}), 200
-
 @app.route('/count_tokens', methods=["POST"])
 def tokenize_query():
     data = request.get_json()
@@ -91,30 +103,34 @@ def path_state():
     path_state = get_path_state(data['path'])
     return jsonify(path_state), 200
 
-@app.route('/rag', methods=["POST"])
-def rag():
-    data = request.get_json()
-    response = rag_handler(data['query'], data['rag_db'], data['user_id'], data['model'], data.get('num_docs', 10), data['session_id'])
-    return jsonify(response), 200
+def log_startup():
+    """Log server startup information."""
+    startup_logger.info("=" * 60)
+    startup_logger.info("Copilot Utilities Server starting up")
+    startup_logger.info("=" * 60)
+    startup_logger.info(f"PID: {os.getpid()}")
+    startup_logger.info(f"Working directory: {file_path}")
+    startup_logger.info(f"Python: {sys.version}")
 
-@app.route('/preload_status', methods=["GET"])
-def get_preload_status():
-    """Get the status of preloaded vector databases."""
-    preloader = get_preloader()
-    status = preloader.get_preload_status()
-    return jsonify(status), 200
+    # Log registered routes
+    routes = []
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint != 'static':
+            methods = ','.join(sorted(rule.methods - {'OPTIONS', 'HEAD'}))
+            routes.append(f"  {methods:6s} {rule.rule}")
+    startup_logger.info(f"Registered routes ({len(routes)}):")
+    for route in sorted(routes):
+        startup_logger.info(route)
 
-# Preload vector databases when module is imported
+    startup_logger.info("Startup complete")
+    startup_logger.info("=" * 60)
+
+log_startup()
+
 # Use logging to ensure output appears in Gunicorn
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-logger.info("Preloading vector databases...")
-print("Preloading vector databases...", flush=True)
-preload_results = preload_databases()
-logger.info(f"Preload results: {preload_results}")
-print(f"Preload results: {preload_results}", flush=True)
-
 if __name__ == "__main__":
-    app.run(host='0.0.0.0',port=5000)
+    app.run(host='0.0.0.0', port=5000)
 
