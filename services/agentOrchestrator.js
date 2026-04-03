@@ -952,8 +952,12 @@ async function executeAgentLoop(opts) {
   let queryForAgent = query;
   let imageContextNotice = null;
 
-  // Get auth token (from opts or config)
-  const authToken = auth_token || config.auth_token;
+  // Use the authenticated user's token. No fallback to a hardcoded service token.
+  // auth_token must be supplied by the caller (from the user's Authorization header).
+  const authToken = auth_token || null;
+  if (!authToken) {
+    logger.warn('No auth_token provided for agent execution — MCP tool calls requiring authentication will fail');
+  }
 
   // Get or create chat session early so tool-side metadata writes (e.g. workflow_ids)
   // always have an existing chat_sessions document to update.

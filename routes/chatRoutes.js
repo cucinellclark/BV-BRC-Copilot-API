@@ -25,7 +25,7 @@ const {
   getUserWorkflowIds,
   searchRagChunkReferences
 } = require('../services/dbUtils');
-const authenticate = require('../middleware/auth');
+const { requireAuth, resolveUserId } = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
 const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback, abortJob } = require('../services/queueService');
@@ -168,7 +168,7 @@ async function getUserWorkflowsWithDetail(userId, authHeader) {
 }
 
 // ========== MAIN CHAT ROUTES ==========
-router.post('/copilot', authenticate, async (req, res) => {
+router.post('/copilot', requireAuth, async (req, res) => {
     const logger = createLogger('CopilotRoute', req.body.session_id);
 
     try {
@@ -181,6 +181,10 @@ router.post('/copilot', authenticate, async (req, res) => {
 
         if (req.body.stream === true) {
             // -------- Streaming (SSE) path --------
+            // Validate user identity before streaming
+            const streamResolved = resolveUserId(req, req.body.user_id);
+            if (streamResolved.error) return res.status(streamResolved.status).json({ message: streamResolved.error });
+
             logger.debug('Using streaming response');
             res.set({
                 // Headers required for proper SSE behaviour and to disable proxy buffering
@@ -194,14 +198,19 @@ router.post('/copilot', authenticate, async (req, res) => {
                 res.flushHeaders();
             }
 
-            await ChatService.handleCopilotStreamRequest(req.body, res);
+            // Override user_id in body with the authenticated identity
+            const streamBody = { ...req.body, user_id: streamResolved.userId };
+            await ChatService.handleCopilotStreamRequest(streamBody, res);
             // The stream handler is responsible for ending the response
             return;
         }
 
         // -------- Standard JSON path --------
         logger.debug('Using standard JSON response');
-        const { query, model, session_id, user_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
+        const { query, model, session_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
         const response = await ChatService.handleCopilotRequest({ query, model, session_id, user_id, system_prompt, save_chat, include_history, rag_db, num_docs, image, enhanced_prompt });
 
         logger.info('Copilot request completed successfully');
@@ -223,7 +232,7 @@ router.post('/copilot', authenticate, async (req, res) => {
 });
 
 // ========== AGENT COPILOT ROUTE (QUEUED WITH STREAMING) ==========
-router.post('/copilot-agent', authenticate, async (req, res) => {
+router.post('/copilot-agent', requireAuth, async (req, res) => {
     const logger = createLogger('AgentRoute', req.body.session_id);
 
     try {
@@ -231,11 +240,9 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             query,
             model,
             session_id,
-            user_id,
             system_prompt = '',
             save_chat = true,
             include_history = true,
-            auth_token = null,
             stream = true,  // Default to streaming
             workspace_items = null,
             selected_jobs = null,
@@ -243,16 +250,23 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
             images = null
         } = req.body;
 
+        // Validate and resolve user identity from the authenticated token
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        // Use the token from the validated Authorization header, not from the request body
+        const auth_token = req.authToken || null;
+
         // Validate required fields
-        if (!query || !model || !user_id) {
+        if (!query || !model) {
             logger.warn('Missing required fields', {
                 has_query: !!query,
-                has_model: !!model,
-                has_user_id: !!user_id
+                has_model: !!model
             });
             return res.status(400).json({
                 message: 'Missing required fields',
-                required: ['query', 'model', 'user_id']
+                required: ['query', 'model']
             });
         }
 
@@ -482,22 +496,19 @@ router.post('/copilot-agent', authenticate, async (req, res) => {
     }
 });
 
-router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
+router.post('/mcp/replay-tool-call', requireAuth, async (req, res) => {
     const logger = createLogger('McpReplayRoute', req.body && req.body.session_id);
     try {
-        const authHeader = req.headers.authorization || '';
-        if (!authHeader) {
-            return res.status(401).json({
-                message: 'Missing Authorization header'
-            });
-        }
+        const authHeader = req.authToken || '';
 
         const toolCall = req.body && typeof req.body.tool_call === 'object' ? req.body.tool_call : {};
         const toolId = req.body.tool_id || toolCall.tool || toolCall.tool_id;
         const parameters = req.body.parameters || req.body.arguments_executed || toolCall.arguments_executed || toolCall.arguments || {};
         const replayPageSize = req.body.page_size || config.global_settings?.replay_data_page_size_default;
         const sessionId = req.body.session_id || null;
-        const userId = req.user || req.body.user_id || null;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const userId = resolved.userId;
 
         if (!toolId || typeof toolId !== 'string') {
             return res.status(400).json({
@@ -575,7 +586,7 @@ router.post('/mcp/replay-tool-call', authenticate, async (req, res) => {
 });
 
 // ========== JOB STATUS ROUTE ==========
-router.get('/job/:jobId/status', authenticate, async (req, res) => {
+router.get('/job/:jobId/status', requireAuth, async (req, res) => {
     const logger = createLogger('JobStatus');
 
     try {
@@ -615,7 +626,7 @@ router.get('/job/:jobId/status', authenticate, async (req, res) => {
 });
 
 // ========== QUEUE STATS ROUTE (for monitoring) ==========
-router.get('/queue/stats', authenticate, async (req, res) => {
+router.get('/queue/stats', requireAuth, async (req, res) => {
     const logger = createLogger('QueueStats');
 
     try {
@@ -642,7 +653,7 @@ router.get('/queue/stats', authenticate, async (req, res) => {
 });
 
 // ========== JOB ABORT ROUTE ==========
-router.post('/job/:jobId/abort', authenticate, async (req, res) => {
+router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
     const logger = createLogger('JobAbort');
 
     try {
@@ -696,7 +707,7 @@ router.post('/job/:jobId/abort', authenticate, async (req, res) => {
 });
 
 // ========== STREAM RECONNECTION ENDPOINT ==========
-router.get('/job/:jobId/stream', authenticate, async (req, res) => {
+router.get('/job/:jobId/stream', requireAuth, async (req, res) => {
     const logger = createLogger('JobStream');
     const { jobId } = req.params;
 
@@ -831,7 +842,7 @@ router.get('/job/:jobId/stream', authenticate, async (req, res) => {
 });
 
 // ========== RAG QUEUE ROUTES ==========
-router.get('/rag/job/:jobId/status', authenticate, async (req, res) => {
+router.get('/rag/job/:jobId/status', requireAuth, async (req, res) => {
     const logger = createLogger('RagJobStatus');
     try {
         const { jobId } = req.params;
@@ -857,7 +868,7 @@ router.get('/rag/job/:jobId/status', authenticate, async (req, res) => {
     }
 });
 
-router.get('/rag/queue/stats', authenticate, async (req, res) => {
+router.get('/rag/queue/stats', requireAuth, async (req, res) => {
     const logger = createLogger('RagQueueStats');
     try {
         const stats = await getRagQueueStats();
@@ -875,7 +886,7 @@ router.get('/rag/queue/stats', authenticate, async (req, res) => {
     }
 });
 
-router.post('/rag/job/:jobId/abort', authenticate, async (req, res) => {
+router.post('/rag/job/:jobId/abort', requireAuth, async (req, res) => {
     const logger = createLogger('RagJobAbort');
     try {
         const { jobId } = req.params;
@@ -911,7 +922,7 @@ router.post('/rag/job/:jobId/abort', authenticate, async (req, res) => {
     }
 });
 
-router.get('/rag/job/:jobId/stream', authenticate, async (req, res) => {
+router.get('/rag/job/:jobId/stream', requireAuth, async (req, res) => {
     const logger = createLogger('RagJobStream');
     const { jobId } = req.params;
 
@@ -1013,7 +1024,7 @@ router.get('/rag/job/:jobId/stream', authenticate, async (req, res) => {
     }
 });
 
-router.post('/chat', authenticate, async (req, res) => {
+router.post('/chat', requireAuth, async (req, res) => {
     const logger = createLogger('ChatRoute', req.body.session_id);
 
     try {
@@ -1022,7 +1033,10 @@ router.post('/chat', authenticate, async (req, res) => {
             model: req.body.model
         });
 
-        const { query, model, session_id, user_id, system_prompt, save_chat = true } = req.body;
+        const { query, model, session_id, system_prompt, save_chat = true } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
         const response = await ChatService.handleChatRequest({
             query,
             model,
@@ -1043,7 +1057,7 @@ router.post('/chat', authenticate, async (req, res) => {
     }
 });
 
-router.post('/chat-only', authenticate, async (req, res) => {
+router.post('/chat-only', requireAuth, async (req, res) => {
     try {
         const { query, model, system_prompt } = req.body;
         if (!query || !model) {
@@ -1061,7 +1075,7 @@ router.post('/chat-only', authenticate, async (req, res) => {
 // ========== STREAMING CHAT ENDPOINTS ==========
 // Real-time streaming chat functionality
 
-router.post('/setup-copilot-stream', authenticate, async (req, res) => {
+router.post('/setup-copilot-stream', requireAuth, async (req, res) => {
     try {
         const setupData = await ChatService.setupCopilotStream(req.body);
         res.status(200).json({ 
@@ -1074,7 +1088,7 @@ router.post('/setup-copilot-stream', authenticate, async (req, res) => {
     }
 });
 
-router.post('/copilot-stream', authenticate, async (req, res) => {
+router.post('/copilot-stream', requireAuth, async (req, res) => {
     try {
         // -------- Streaming (SSE) path --------
         res.set({
@@ -1115,24 +1129,27 @@ router.post('/copilot-stream', authenticate, async (req, res) => {
 // ========== RAG (RETRIEVAL AUGMENTED GENERATION) ENDPOINTS ==========
 // Document retrieval and enhanced chat with external knowledge
 
-router.post('/rag', authenticate, async (req, res) => {
+router.post('/rag', requireAuth, async (req, res) => {
     const logger = createLogger('RagRoute', req.body.session_id);
 
     try {
         const {
             query,
             model,
-            user_id,
             session_id,
             rag_db,
             num_docs,
             save_chat
         } = parseRagRequestPayload(req.body);
 
-        if (!query || !model || !user_id || !rag_db) {
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        if (!query || !model || !rag_db) {
             return res.status(400).json({
                 message: 'Missing required fields',
-                required: ['query', 'model', 'user_id', 'rag_db'],
+                required: ['query', 'model', 'rag_db'],
                 accepted_rag_db_fields: ['rag_db', 'database_name', 'db_name']
             });
         }
@@ -1178,24 +1195,27 @@ router.post('/rag', authenticate, async (req, res) => {
     }
 });
 
-router.post('/rag/stream', authenticate, async (req, res) => {
+router.post('/rag/stream', requireAuth, async (req, res) => {
     const logger = createLogger('RagStreamRoute', req.body.session_id);
 
     try {
         const {
             query,
             model,
-            user_id,
             session_id,
             rag_db,
             num_docs,
             save_chat
         } = parseRagRequestPayload(req.body);
 
-        if (!query || !model || !user_id || !rag_db) {
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        if (!query || !model || !rag_db) {
             return res.status(400).json({
                 message: 'Missing required fields',
-                required: ['query', 'model', 'user_id', 'rag_db'],
+                required: ['query', 'model', 'rag_db'],
                 accepted_rag_db_fields: ['rag_db', 'database_name', 'db_name']
             });
         }
@@ -1289,10 +1309,12 @@ router.post('/rag/stream', authenticate, async (req, res) => {
     }
 });
 
-router.post('/chat-image', authenticate, async (req, res) => {
+router.post('/chat-image', requireAuth, async (req, res) => {
     try {
-        const { query, model, session_id, user_id, system_prompt, save_chat = true, image } = req.body;
-        // const image = req.file ? req.file.buffer.toString('base64') : null;
+        const { query, model, session_id, system_prompt, save_chat = true, image } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
         const response = await ChatService.handleChatImageRequest({
             query,
             model,
@@ -1312,17 +1334,20 @@ router.post('/chat-image', authenticate, async (req, res) => {
 // ========== SESSION MANAGEMENT ENDPOINTS ==========
 // Chat session creation, retrieval, and management
 
-router.get('/start-chat', authenticate, (req, res) => {
+router.get('/start-chat', requireAuth, (req, res) => {
     const sessionId = uuidv4();
-    res.status(200).json({ message: 'created session id', session_id: sessionId });
+    res.status(200).json({ message: 'created session id', session_id: sessionId, user_id: req.user });
 });
 
-router.post('/register-session', authenticate, async (req, res) => {
+router.post('/register-session', requireAuth, async (req, res) => {
     try {
-        const { session_id, user_id, title } = req.body || {};
-        if (!session_id || !user_id) {
-            return res.status(400).json({ message: 'session_id and user_id are required' });
+        const { session_id, title } = req.body || {};
+        if (!session_id) {
+            return res.status(400).json({ message: 'session_id is required' });
         }
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const registration = await registerChatSession(session_id, user_id, title || 'New Chat');
         return res.status(200).json({
@@ -1336,12 +1361,15 @@ router.post('/register-session', authenticate, async (req, res) => {
     }
 });
 
-router.post('/add-workflow-to-session', authenticate, async (req, res) => {
+router.post('/add-workflow-to-session', requireAuth, async (req, res) => {
     try {
-        const { session_id, workflow_id, user_id } = req.body || {};
-        if (!session_id || !workflow_id || !user_id) {
-            return res.status(400).json({ message: 'session_id, workflow_id, and user_id are required' });
+        const { session_id, workflow_id } = req.body || {};
+        if (!session_id || !workflow_id) {
+            return res.status(400).json({ message: 'session_id and workflow_id are required' });
         }
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const session = await getChatSession(session_id);
         if (!session) {
@@ -1363,7 +1391,7 @@ router.post('/add-workflow-to-session', authenticate, async (req, res) => {
     }
 });
 
-router.get('/rag-chunk-search', authenticate, async (req, res) => {
+router.get('/rag-chunk-search', requireAuth, async (req, res) => {
     try {
         const chunk_id = typeof req.query.chunk_id === 'string' ? req.query.chunk_id.trim() : '';
         const rag_db = typeof req.query.rag_db === 'string'
@@ -1373,7 +1401,10 @@ router.get('/rag-chunk-search', authenticate, async (req, res) => {
         const doc_id = typeof req.query.doc_id === 'string' ? req.query.doc_id.trim() : '';
         const source_id = typeof req.query.source_id === 'string' ? req.query.source_id.trim() : '';
         const session_id = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
-        const user_id = typeof req.query.user_id === 'string' ? req.query.user_id.trim() : '';
+        // Validate user_id filter against authenticated identity if provided
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = req.query.user_id ? resolved.userId : '';
         const message_id = typeof req.query.message_id === 'string' ? req.query.message_id.trim() : '';
         const limitParam = parseInt(req.query.limit, 10);
         const offsetParam = parseInt(req.query.offset, 10);
@@ -1425,16 +1456,18 @@ router.get('/rag-chunk-search', authenticate, async (req, res) => {
     }
 });
 
-router.get('/get-session-messages', authenticate, async (req, res) => {
+router.get('/get-session-messages', requireAuth, async (req, res) => {
     try {
         const session_id = req.query.session_id;
-        const user_id = req.query.user_id;
         if (!session_id) {
             return res.status(400).json({ message: 'session_id is required' });
         }
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const session = await getChatSession(session_id);
-        if (user_id && session && session.user_id && session.user_id !== user_id) {
+        if (session && session.user_id && session.user_id !== user_id) {
             return res.status(403).json({ message: 'Not authorized to access this session' });
         }
         const workflowIds = session?.workflow_ids || [];
@@ -1511,13 +1544,15 @@ router.get('/get-session-messages', authenticate, async (req, res) => {
     }
 });
 
-router.get('/get-session-files', authenticate, async (req, res) => {
+router.get('/get-session-files', requireAuth, async (req, res) => {
     try {
         const session_id = req.query.session_id;
-        const user_id = req.query.user_id;
         if (!session_id) {
             return res.status(400).json({ message: 'session_id is required' });
         }
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const limitParam = parseInt(req.query.limit, 10);
         const offsetParam = parseInt(req.query.offset, 10);
@@ -1525,7 +1560,7 @@ router.get('/get-session-files', authenticate, async (req, res) => {
         const offset = (!isNaN(offsetParam) && offsetParam >= 0) ? offsetParam : 0;
 
         const session = await getChatSession(session_id);
-        if (user_id && session && session.user_id && session.user_id !== user_id) {
+        if (session && session.user_id && session.user_id !== user_id) {
             return res.status(403).json({ message: 'Not authorized to access this session' });
         }
 
@@ -1579,11 +1614,17 @@ router.get('/get-session-files', authenticate, async (req, res) => {
     }
 });
 
-router.get('/get-session-title', authenticate, async (req, res) => {
+router.get('/get-session-title', requireAuth, async (req, res) => {
     try {
         const session_id = req.query.session_id;
         if (!session_id) {
             return res.status(400).json({ message: 'session_id is required' });
+        }
+
+        // Verify session ownership
+        const session = await getChatSession(session_id);
+        if (session && session.user_id && session.user_id !== req.user) {
+            return res.status(403).json({ message: 'Not authorized to access this session' });
         }
 
         const title = await getSessionTitle(session_id);
@@ -1594,12 +1635,11 @@ router.get('/get-session-title', authenticate, async (req, res) => {
     }
 });
 
-router.get('/get-all-sessions', authenticate, async (req, res) => {
+router.get('/get-all-sessions', requireAuth, async (req, res) => {
     try {
-        const user_id = req.query.user_id;
-        if (!user_id) {
-            return res.status(400).json({ message: 'user_id is required' });
-        }
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         // Parse pagination parameters
         const limitParam = parseInt(req.query.limit, 10);
@@ -1616,12 +1656,11 @@ router.get('/get-all-sessions', authenticate, async (req, res) => {
     }
 });
 
-router.get('/get-user-workflows', authenticate, async (req, res) => {
+router.get('/get-user-workflows', requireAuth, async (req, res) => {
     try {
-        const user_id = req.query.user_id;
-        if (!user_id) {
-            return res.status(400).json({ message: 'user_id is required' });
-        }
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const limitParam = parseInt(req.query.limit, 10);
         const offsetParam = parseInt(req.query.offset, 10);
@@ -1650,12 +1689,11 @@ router.get('/get-user-workflows', authenticate, async (req, res) => {
     }
 });
 
-router.get('/get-user-workflow-summary', authenticate, async (req, res) => {
+router.get('/get-user-workflow-summary', requireAuth, async (req, res) => {
     try {
-        const user_id = req.query.user_id;
-        if (!user_id) {
-            return res.status(400).json({ message: 'user_id is required' });
-        }
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const authHeader = req.headers ? req.headers.authorization : '';
         const workflows = await getUserWorkflowsWithDetail(user_id, authHeader);
@@ -1685,17 +1723,15 @@ router.get('/get-user-workflow-summary', authenticate, async (req, res) => {
     }
 });
 
-router.post('/submit-workflow/:workflowId', authenticate, async (req, res) => {
+router.post('/submit-workflow/:workflowId', requireAuth, async (req, res) => {
     try {
         const { workflowId } = req.params;
         if (!workflowId) {
             return res.status(400).json({ message: 'workflowId is required' });
         }
 
-        const authHeader = req.headers ? req.headers.authorization : '';
-        if (!authHeader) {
-            return res.status(401).json({ message: 'Authorization header is required' });
-        }
+        // Auth header is guaranteed by requireAuth middleware
+        const authHeader = req.authToken;
 
         const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
 
@@ -1740,13 +1776,7 @@ router.post('/submit-workflow/:workflowId', authenticate, async (req, res) => {
     }
 });
 
-router.post('/put-chat-entry', async (req, res) => {
-    console.log('Inserting chat entry');
-    console.log(req.body);
-    // Implement insertion logic
-});
-
-router.post('/generate-title-from-messages', authenticate, async (req, res) => {
+router.post('/generate-title-from-messages', requireAuth, async (req, res) => {
     try {
         const { model, messages, user_id } = req.body;
         const message_str = messages.map(msg => `message: ${msg}`).join('\n\n');
@@ -1776,9 +1806,12 @@ router.post('/generate-title-from-messages', authenticate, async (req, res) => {
     }
 });
 
-router.post('/update-session-title', authenticate, async (req, res) => {
+router.post('/update-session-title', requireAuth, async (req, res) => {
     try {
-        const { title, session_id, user_id } = req.body;
+        const { title, session_id } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
         const updateResult = await updateSessionTitle(session_id, user_id, title);
 
         if (updateResult.matchedCount === 0) {
@@ -1792,12 +1825,15 @@ router.post('/update-session-title', authenticate, async (req, res) => {
     }
 });
 
-router.post('/delete-session', authenticate, async (req, res) => {
+router.post('/delete-session', requireAuth, async (req, res) => {
     try {
-        const { session_id, user_id } = req.body;
+        const { session_id } = req.body;
         if (!session_id) {
             return res.status(400).json({ message: 'Session ID is required' });
         }
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         const deleteResult = await deleteSession(session_id, user_id);
 
@@ -1812,40 +1848,14 @@ router.post('/delete-session', authenticate, async (req, res) => {
     }
 });
 
-router.post('/generate-title-from-messages', authenticate, async (req, res) => {
-    try {
-        const { model, messages, user_id } = req.body;
-        const message_str = messages.map(msg => `message: ${msg}`).join('\n\n');
-        const query = `Provide a very short, concise, descriptive title based on the content ` +
-            `of the messages. Only return the title, no other text.\n\n${message_str}`;
-
-        const modelData = await getModelData(model);
-        const queryType = modelData['queryType'];
-        let response;
-
-        if (queryType === 'client') {
-            const openai_client = ChatService.getOpenaiClient(modelData);
-            const queryMsg = [{ role: 'user', content: query }];
-            response = await ChatService.queryModel(openai_client, model, queryMsg);
-        } else if (queryType === 'request') {
-            response = await ChatService.queryRequest(modelData.endpoint, model, '', query);
-        } else {
-            return res.status(500).json({ message: 'Invalid query type', queryType });
-        }
-
-        res.status(200).json({ message: 'success', response });
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
 // ========== USER PROMPTS MANAGEMENT ==========
 // Saved prompts and templates for users
 
-router.get('/get-user-prompts', authenticate, async (req, res) => {
+router.get('/get-user-prompts', requireAuth, async (req, res) => {
     try {
-        const user_id = req.query.user_id;
+        const resolved = resolveUserId(req, req.query.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
         const prompts = await getUserPrompts(user_id);
         res.status(200).json({ prompts });
     } catch (error) {
@@ -1854,9 +1864,12 @@ router.get('/get-user-prompts', authenticate, async (req, res) => {
     }
 });
 
-router.post('/save-prompt', authenticate, async (req, res) => {
+router.post('/save-prompt', requireAuth, async (req, res) => {
     try {
-        const { name, text, user_id } = req.body;
+        const { name, text } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
         const updateResult = await saveUserPrompt(user_id, name, text);
         res.status(200).json({ update_result: updateResult, title: name, content: text });
     } catch (error) {
@@ -1868,14 +1881,17 @@ router.post('/save-prompt', authenticate, async (req, res) => {
 // ========== RATING & FEEDBACK ENDPOINTS ==========
 // User feedback and rating system
 
-router.post('/rate-conversation', authenticate, async (req, res) => {
+router.post('/rate-conversation', requireAuth, async (req, res) => {
     try {
-        const { session_id, user_id, rating } = req.body;
+        const { session_id, rating } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         // Validate required fields
-        if (!session_id || !user_id || rating === undefined) {
+        if (!session_id || rating === undefined) {
             return res.status(400).json({
-                message: 'session_id, user_id, and rating are required'
+                message: 'session_id and rating are required'
             });
         }
 
@@ -1899,14 +1915,17 @@ router.post('/rate-conversation', authenticate, async (req, res) => {
     }
 });
 
-router.post('/rate-message', authenticate, async (req, res) => {
+router.post('/rate-message', requireAuth, async (req, res) => {
     try {
-        const { user_id, message_id, rating } = req.body;
+        const { message_id, rating } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
 
         // Validate required fields
-        if (!user_id || !message_id || rating === undefined) {
+        if (!message_id || rating === undefined) {
             return res.status(400).json({
-                message: 'user_id, message_id, and rating are required'
+                message: 'message_id and rating are required'
             });
         }
 
@@ -1934,7 +1953,7 @@ router.post('/rate-message', authenticate, async (req, res) => {
 // ========== DEMO & UTILITY ENDPOINTS ==========
 // Demo functionality and utility endpoints
 
-router.post('/demo', authenticate, async (req, res) => {
+router.post('/demo', requireAuth, async (req, res) => {
     try {
         const { text, rag_flag } = req.body;
         const lambdaResponse = await ChatService.handleLambdaDemo(text, rag_flag);
@@ -1945,7 +1964,7 @@ router.post('/demo', authenticate, async (req, res) => {
     }
 });
 
-router.post('/get-path-state', authenticate, async (req, res) => {
+router.post('/get-path-state', requireAuth, async (req, res) => {
     try {
         const { path } = req.body;
         const pathState = await ChatService.getPathState(path);

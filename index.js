@@ -14,7 +14,22 @@ const app = express();
 
 // Middleware setup
 const size_limit = '50mb'
-app.use(cors()); // Enable CORS for all routes
+
+// CORS: restrict to known BV-BRC origins.
+// Add development origins as needed (e.g. http://localhost:3000).
+const corsOptions = {
+    origin: [
+        'https://alpha.bv-brc.org',
+        'https://www.bv-brc.org',
+        'https://bv-brc.org',
+        'https://dev-8.bv-brc.org',
+        'https://dev-7.bv-brc.org',
+        'http://localhost:3000',
+        'http://localhost:5173'
+    ],
+    credentials: true
+};
+app.use(cors(corsOptions));
 app.use(express.json({ limit: size_limit })); // limit: '1mb' Parse JSON requests
 app.use(bodyParser.json({ limit: size_limit })); // for parsing application/json
 app.use(bodyParser.urlencoded({ extended: true, limit: size_limit })); // for parsing application/x-www-form-urlencoded

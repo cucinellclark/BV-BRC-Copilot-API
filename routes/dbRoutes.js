@@ -6,14 +6,14 @@ const fetch = require('node-fetch');
 const { connectToDatabase } = require('../services/database');
 const { getActiveModels, getActiveRagDatabases } = require('../services/dbUtils');
 const router = express.Router();
-const authenticate = require('../middleware/auth');
+const { requireAuth } = require('../middleware/auth');
 
 // TODO: add an extra params argument or something?
 // - want to enable a parameter that allows for extra filtering, passed by the front end
 //      without bulking up this function
 // TODO: also decide between using camel case or underscores in the mongodb.
 //  Using one of each is dumb
-router.post('/get-model-list', authenticate, async (req, res) => {
+router.post('/get-model-list', requireAuth, async (req, res) => {
     try {
         const project_id = req.body; 
         var pid = null;

@@ -18,10 +18,6 @@ async function discoverTools() {
   console.log('[MCP Tool Discovery] Starting...');
   
   try {
-    // Load root config for auth_token
-    const rootConfigFile = await fs.readFile(ROOT_CONFIG_PATH, 'utf8');
-    const rootConfig = JSON.parse(rootConfigFile);
-    
     // Load MCP config
     const configFile = await fs.readFile(MCP_CONFIG_PATH, 'utf8');
     const config = JSON.parse(configFile);
@@ -38,10 +34,12 @@ async function discoverTools() {
       ([serverKey, serverConfig]) => !serverConfig.disabled
     );
     
-    // Fetch tools from enabled servers only
+    // Fetch tools from enabled servers only.
+    // No auth token is needed for discovery — the MCP server allows
+    // unauthenticated initialize and tools/list calls.
     const serverPromises = enabledServers.map(
       ([serverKey, serverConfig]) => {
-        return fetchServerTools(serverKey, serverConfig, config.global_settings, rootConfig.auth_token);
+        return fetchServerTools(serverKey, serverConfig, config.global_settings, null);
       }
     );
     
