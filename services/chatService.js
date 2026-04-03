@@ -1,5 +1,7 @@
 // services/chatService.js
 
+const { v4: uuidv4 } = require('uuid');
+
 // Import from the new modular structure
 const {
   setupOpenaiClient,
@@ -450,6 +452,7 @@ async function handleRagStreamRequest({
       ...(systemMessage && { systemMessage })
     };
   } catch (error) {
+    console.error('[handleRagStreamRequest] original error:', error.message, error.stack);
     if (error instanceof LLMServiceError) {
       throw error;
     }
