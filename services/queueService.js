@@ -5,8 +5,13 @@ const axios = require('axios');
 const config = require('../config.json');
 const { createLogger } = require('./logger');
 const AgentOrchestrator = require('./agentOrchestrator');
+const { executeOrchestratorLoop, checkOrchestratorHealth } = require('./orchestratorClient');
 const mcpConfig = require('./mcp/config.json');
 const { getQueueRedisConfig } = require('./queueRedisConfig');
+
+// Orchestrator routing: use the new Python orchestrator when enabled
+const useOrchestrator = config.orchestrator?.enabled === true;
+const fallbackToLegacy = config.orchestrator?.fallback_to_legacy !== false;
 
 // Initialize logger
 const logger = createLogger('QueueService');
@@ -36,6 +41,12 @@ const agentQueue = new Queue('agent-operations', {
 
 logger.info('Agent queue Redis db selected', {
     redisDb: redisConfig.db
+});
+
+logger.info('Agent execution routing', {
+    useOrchestrator,
+    orchestratorUrl: useOrchestrator ? (config.orchestrator?.url || 'default') : 'N/A',
+    fallbackToLegacy
 });
 
 // Track job progress for status endpoint
@@ -160,23 +171,33 @@ if (config.queue.enabled !== false) {
         const responseStream = streamCallback ? {
             write: (data) => {
                 // Agent writes SSE format, parse and re-emit
+                console.log('[STREAM WRAPPER] write() called with data type:', typeof data, 'length:', (data || '').length, 'preview:', typeof data === 'string' ? data.substring(0, 120) : '(non-string)');
                 if (typeof data === 'string' && data.startsWith('event:')) {
                     const lines = data.split('\n');
                     const eventLine = lines.find(l => l.startsWith('event:'));
                     const dataLine = lines.find(l => l.startsWith('data:'));
 
+                    console.log('[STREAM WRAPPER] parsed eventLine:', eventLine ? eventLine.substring(0, 60) : 'null', 'dataLine:', dataLine ? dataLine.substring(0, 80) : 'null');
+
                     if (eventLine && dataLine) {
                         const eventType = eventLine.replace('event:', '').trim();
                         const eventData = dataLine.replace('data:', '').trim();
+
+                        console.log('[STREAM WRAPPER] eventType:', eventType, 'eventData preview:', eventData.substring(0, 100));
 
                         try {
                             const parsed = JSON.parse(eventData);
                             safeStreamEmit(jobId, eventType, parsed);
                         } catch (e) {
                             // Not JSON, treat as plain text content
+                            console.log('[STREAM WRAPPER] JSON parse failed, sending as content:', e.message);
                             safeStreamEmit(jobId, 'content', { delta: eventData });
                         }
+                    } else {
+                        console.log('[STREAM WRAPPER] Missing eventLine or dataLine, dropping data');
                     }
+                } else {
+                    console.log('[STREAM WRAPPER] Data does not start with "event:", dropping');
                 }
             },
             end: () => {
@@ -187,8 +208,8 @@ if (config.queue.enabled !== false) {
             flushHeaders: () => {} // No-op
         } : null;
 
-        // Execute agent loop with streaming support
-        const result = await AgentOrchestrator.executeAgentLoop({
+        // Build the common options object
+        const agentOpts = {
             query: job.data.query,
             model: job.data.model,
             session_id: job.data.session_id,
@@ -203,11 +224,35 @@ if (config.queue.enabled !== false) {
             selected_jobs: job.data.selected_jobs,
             selected_workflows: job.data.selected_workflows,
             images: job.data.images,
+            files: job.data.files || null,
+            auto_submit_preference: job.data.auto_submit_preference || null,
             stream: !!streamCallback,
             responseStream: responseStream,
             progressCallback: progressCallback,
             shouldCancel: isCancellationRequested
-        });
+        };
+
+        // Execute via orchestrator (new path) or legacy agent loop
+        let result;
+        if (useOrchestrator) {
+            try {
+                jobLogger.info('Routing to Python orchestrator', { jobId: job.id });
+                result = await executeOrchestratorLoop(agentOpts);
+            } catch (orchErr) {
+                if (orchErr.isCancelled) throw orchErr;
+                if (fallbackToLegacy && orchErr.shouldFallback) {
+                    jobLogger.warn('Orchestrator failed, falling back to legacy agent loop', {
+                        jobId: job.id,
+                        error: orchErr.message
+                    });
+                    result = await AgentOrchestrator.executeAgentLoop(agentOpts);
+                } else {
+                    throw orchErr;
+                }
+            }
+        } else {
+            result = await AgentOrchestrator.executeAgentLoop(agentOpts);
+        }
 
         if (isCancellationRequested()) {
             const cancelError = new Error('Job cancelled by user');

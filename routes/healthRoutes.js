@@ -2,6 +2,8 @@
 
 const express = require('express');
 const { checkConnectionHealth, getPoolStats } = require('../services/database');
+const { checkOrchestratorHealth } = require('../services/orchestratorClient');
+const config = require('../config.json');
 const router = express.Router();
 
 /**
@@ -103,6 +105,16 @@ router.get('/status', async (req, res) => {
     const mongoHealth = await checkConnectionHealth();
     const poolStats = getPoolStats();
     
+    // Check orchestrator health if enabled
+    let orchestratorStatus = null;
+    if (config.orchestrator?.enabled) {
+        try {
+            orchestratorStatus = await checkOrchestratorHealth();
+        } catch (err) {
+            orchestratorStatus = { healthy: false, error: err.message };
+        }
+    }
+
     res.status(200).json({
         service: 'BV-BRC Copilot API',
         version: '1.0.0',
@@ -124,6 +136,14 @@ router.get('/status', async (req, res) => {
         mongodb: {
             health: mongoHealth,
             connectionPool: poolStats
+        },
+
+        orchestrator: orchestratorStatus ? {
+            enabled: true,
+            url: config.orchestrator?.url || null,
+            ...orchestratorStatus
+        } : {
+            enabled: false
         }
     });
 });
@@ -160,6 +180,45 @@ router.get('/mongodb', async (req, res) => {
         
         timestamp: new Date().toISOString()
     });
+});
+
+/**
+ * Orchestrator health check
+ * Checks connectivity to the Python multi-agent orchestrator on holly
+ */
+router.get('/orchestrator', async (req, res) => {
+    const orchestratorEnabled = config.orchestrator?.enabled === true;
+
+    if (!orchestratorEnabled) {
+        return res.status(200).json({
+            status: 'disabled',
+            message: 'Orchestrator is not enabled in config.json',
+            config: {
+                enabled: false,
+                url: config.orchestrator?.url || null
+            },
+            timestamp: new Date().toISOString()
+        });
+    }
+
+    try {
+        const health = await checkOrchestratorHealth();
+        const statusCode = health.healthy ? 200 : 503;
+
+        res.status(statusCode).json({
+            status: health.healthy ? 'healthy' : 'unhealthy',
+            orchestrator_url: config.orchestrator?.url || null,
+            ...health,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(503).json({
+            status: 'error',
+            orchestrator_url: config.orchestrator?.url || null,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 module.exports = router;

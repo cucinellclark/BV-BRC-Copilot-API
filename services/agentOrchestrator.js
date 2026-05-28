@@ -454,13 +454,16 @@ function buildAssistantToolDisplayMetadata(toolId, toolResult) {
   }
 
   if (isWorkflowTool(toolId)) {
-    if (displayResult.workflow_id || displayResult.workflow_name || displayResult.status || displayResult.partial_workflow) {
-      const resolvedWorkflowId = extractWorkflowId(displayResult);
+    const resolvedWorkflowId = extractWorkflowId(displayResult);
+    if (resolvedWorkflowId) {
       return {
-        isWorkflow: true,
-        workflow_id: resolvedWorkflowId || null,
-        workflow_name: displayResult.workflow_name || null,
-        workflow_status: displayResult.status || null,
+        workflow: {
+          workflow_id: resolvedWorkflowId,
+          status: displayResult.status || 'planned',
+          persisted: true,
+          workflow_name: displayResult.workflow_name || null,
+          step_count: displayResult.steps ? displayResult.steps.length : null
+        },
         uiAction: 'open_workflow_viewer'
       };
     }
@@ -1675,8 +1678,8 @@ async function executeAgentLoop(opts) {
 
     if (finalResponseSourceTool) {
       const finalToolResult = toolResults[finalResponseSourceTool];
-      // Persist canonical workflow_id on the assistant message so reloaded sessions
-      // can hydrate review/submit dialogs even when workflowData is lightweight.
+      // Persist workflow metadata on the assistant message as a nested object
+      // so reloaded sessions can render workflow cards without re-inference.
       if (isWorkflowTool(finalResponseSourceTool)) {
         const resolvedWorkflowId = extractWorkflowId(finalToolResult);
         logger.info('Resolving workflow_id for assistant message', {
@@ -1686,26 +1689,14 @@ async function executeAgentLoop(opts) {
           finalToolResultPreview: JSON.stringify(finalToolResult).substring(0, 500)
         });
         if (resolvedWorkflowId) {
-          assistantMessage.workflow_id = resolvedWorkflowId;
-          logger.info('Set assistant message workflow_id', { workflow_id: resolvedWorkflowId });
-          if (!assistantMessage.workflowData || typeof assistantMessage.workflowData !== 'object') {
-            assistantMessage.workflowData = {
-              workflow_id: resolvedWorkflowId,
-              execution_metadata: {
-                workflow_id: resolvedWorkflowId
-              }
-            };
-          } else if (!assistantMessage.workflowData.workflow_id) {
-            assistantMessage.workflowData.workflow_id = resolvedWorkflowId;
-          }
-          if (!assistantMessage.workflowData.execution_metadata ||
-              typeof assistantMessage.workflowData.execution_metadata !== 'object') {
-            assistantMessage.workflowData.execution_metadata = {};
-          }
-          if (!assistantMessage.workflowData.execution_metadata.workflow_id) {
-            assistantMessage.workflowData.execution_metadata.workflow_id = resolvedWorkflowId;
-          }
-          assistantMessage.isWorkflow = true;
+          assistantMessage.workflow = {
+            workflow_id: resolvedWorkflowId,
+            status: 'planned',
+            persisted: true,
+            workflow_name: (finalToolResult && finalToolResult.workflow_name) || null,
+            step_count: (finalToolResult && finalToolResult.steps && finalToolResult.steps.length) || null
+          };
+          logger.info('Set assistant message workflow', { workflow: assistantMessage.workflow });
         }
       }
     }

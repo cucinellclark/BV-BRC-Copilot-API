@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "jest"
   },
   "keywords": [],
   "author": "",
@@ -20,5 +21,8 @@
     "openai": "^4.68.3",
     "p3-user": "git+https://github.com/PATRIC3/p3_user.git#c0fee2a0ac833fa78401266d705f8c5a6b80e4f3",
     "pm2": "^5.4.2"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
   }
 }

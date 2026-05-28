@@ -18,6 +18,7 @@ const {
   saveUserPrompt,
   registerChatSession,
   addWorkflowIdToSession,
+  addMessagesToSession,
   rateConversation,
   rateMessage,
   getSessionFilesPaginated,
@@ -32,6 +33,7 @@ const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback, abortJ
 const { addRagJob, getRagJobStatus, getRagQueueStats, registerRagStreamCallback, abortRagJob } = require('../services/ragQueueService');
 const { writeSseEvent } = require('../services/sseUtils');
 const { executeMcpTool, isReplayableTool } = require('../services/mcp/mcpExecutor');
+const { register: registerSessionStream, unregister: unregisterSessionStream, pushToSession } = require('../services/sessionStreamRegistry');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -247,7 +249,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             workspace_items = null,
             selected_jobs = null,
             selected_workflows = null,
-            images = null
+            images = null,
+            files = null,
+            auto_submit_preference = null
         } = req.body;
 
         // Validate and resolve user identity from the authenticated token
@@ -257,6 +261,27 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
 
         // Use the token from the validated Authorization header, not from the request body
         const auth_token = req.authToken || null;
+
+        // Validate attached files
+        let validatedFiles = null;
+        if (Array.isArray(files) && files.length > 0) {
+            const maxFiles = 3;
+            const maxFileSize = 100 * 1024; // 100 KB
+            validatedFiles = files.slice(0, maxFiles).filter(f => {
+                if (!f || typeof f.content !== 'string') return false;
+                if (f.content.length > maxFileSize) {
+                    logger.warn(`File "${f.name}" exceeds 100KB limit, skipping`);
+                    return false;
+                }
+                return true;
+            }).map(f => ({
+                name: f.name || 'unnamed_file',
+                content: f.content,
+                mime_type: f.mime_type || 'text/plain',
+                size: f.size || f.content.length
+            }));
+            if (validatedFiles.length === 0) validatedFiles = null;
+        }
 
         // Validate required fields
         if (!query || !model) {
@@ -287,7 +312,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             has_selected_workflows: !!selected_workflows,
             selected_workflows_count: Array.isArray(selected_workflows) ? selected_workflows.length : 0,
             has_images: Array.isArray(images) && images.length > 0,
-            images_count: Array.isArray(images) ? images.length : 0
+            images_count: Array.isArray(images) ? images.length : 0,
+            has_files: !!(validatedFiles && validatedFiles.length > 0),
+            files_count: validatedFiles ? validatedFiles.length : 0
         });
 
         // Log workspace items if present
@@ -330,10 +357,15 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             let heartbeatInterval = null;
             console.log('[ROUTE DEBUG] Initial state - res.writableEnded:', res.writableEnded, 'res.destroyed:', res.destroyed);
 
+            // Register this SSE stream so out-of-band events (e.g.
+            // workflow completion webhooks) can push to this session.
+            registerSessionStream(session_id, res);
+
             // Handle client disconnect (for cleanup only)
             req.on('close', () => {
                 console.log('[ROUTE DEBUG] req.on(close) fired. Content chunks sent:', contentChunkCount, 'callback invocations:', callbackInvocations);
                 logger.info('Client disconnected from stream', { session_id });
+                unregisterSessionStream(session_id, res);
                 if (heartbeatInterval) {
                     clearInterval(heartbeatInterval);
                     heartbeatInterval = null;
@@ -399,7 +431,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 workspace_items,
                 selected_jobs,
                 selected_workflows,
-                images
+                images,
+                files: validatedFiles,
+                auto_submit_preference
             }, {
                 streamCallback
             });
@@ -450,7 +484,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 workspace_items,
                 selected_jobs,
                 selected_workflows,
-                images
+                images,
+                files: validatedFiles,
+                auto_submit_preference
             });
 
             logger.info('Agent job queued successfully', {
@@ -1669,6 +1705,46 @@ router.get('/get-user-workflows', requireAuth, async (req, res) => {
         const statusFilter = req.query.status ? String(req.query.status).toLowerCase().trim() : '';
 
         const authHeader = req.headers ? req.headers.authorization : '';
+        const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
+
+        // Primary: query the Workflow Engine's list-by-user endpoint directly.
+        // This returns all workflows owned by the user (matched via auth_token
+        // ``un=`` field or the explicit ``owner`` field on the document).
+        try {
+            const engineUrl = `${workflowBaseUrl}/workflows`;
+            const params = { owner: user_id, limit, skip: offset };
+            if (statusFilter) params.status = statusFilter;
+
+            const engineResponse = await axios.get(engineUrl, {
+                params,
+                headers: {
+                    Accept: 'application/json',
+                    ...(authHeader ? { Authorization: authHeader } : {})
+                },
+                timeout: 15000
+            });
+
+            if (engineResponse.data && Array.isArray(engineResponse.data.workflows)) {
+                return res.status(200).json({
+                    user_id,
+                    workflows: engineResponse.data.workflows,
+                    total: engineResponse.data.total || engineResponse.data.workflows.length,
+                    limit,
+                    offset,
+                    has_more: engineResponse.data.has_more || false
+                });
+            }
+        } catch (engineError) {
+            // Workflow Engine list endpoint unavailable — fall back to
+            // session-based workflow discovery below.
+            console.warn(
+                '[get-user-workflows] Workflow Engine list endpoint unavailable, ' +
+                'falling back to session-based lookup:',
+                engineError.message
+            );
+        }
+
+        // Fallback: legacy session-based workflow discovery via chat_sessions.workflow_ids
         const allWorkflows = await getUserWorkflowsWithDetail(user_id, authHeader);
         const filtered = statusFilter
             ? allWorkflows.filter((workflow) => String(workflow.status).toLowerCase() === statusFilter)
@@ -1696,7 +1772,36 @@ router.get('/get-user-workflow-summary', requireAuth, async (req, res) => {
         const user_id = resolved.userId;
 
         const authHeader = req.headers ? req.headers.authorization : '';
-        const workflows = await getUserWorkflowsWithDetail(user_id, authHeader);
+        const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
+
+        let workflows;
+
+        // Primary: use Workflow Engine list-by-user endpoint
+        try {
+            const engineResponse = await axios.get(`${workflowBaseUrl}/workflows`, {
+                params: { owner: user_id, limit: 1000 },
+                headers: {
+                    Accept: 'application/json',
+                    ...(authHeader ? { Authorization: authHeader } : {})
+                },
+                timeout: 15000
+            });
+
+            if (engineResponse.data && Array.isArray(engineResponse.data.workflows)) {
+                workflows = engineResponse.data.workflows;
+            }
+        } catch (engineError) {
+            console.warn(
+                '[get-user-workflow-summary] Workflow Engine list endpoint unavailable, ' +
+                'falling back to session-based lookup:',
+                engineError.message
+            );
+        }
+
+        // Fallback: legacy session-based workflow discovery
+        if (!workflows) {
+            workflows = await getUserWorkflowsWithDetail(user_id, authHeader);
+        }
 
         const summary = {
             pending: 0,
@@ -1706,8 +1811,19 @@ router.get('/get-user-workflow-summary', requireAuth, async (req, res) => {
         };
 
         workflows.forEach((workflow) => {
-            const key = workflow.status;
-            if (Object.prototype.hasOwnProperty.call(summary, key)) {
+            // Normalize status to match the summary buckets
+            const rawStatus = (workflow.status || '').toLowerCase();
+            let key;
+            if (['planned', 'queued', 'init', 'pending'].includes(rawStatus)) {
+                key = 'pending';
+            } else if (['in-progress', 'running'].includes(rawStatus)) {
+                key = 'running';
+            } else if (['completed', 'complete', 'success', 'succeeded'].includes(rawStatus)) {
+                key = 'completed';
+            } else if (['failed', 'error', 'cancelled', 'canceled'].includes(rawStatus)) {
+                key = 'failed';
+            }
+            if (key && Object.prototype.hasOwnProperty.call(summary, key)) {
                 summary[key] += 1;
             }
         });
@@ -1787,14 +1903,17 @@ router.post('/generate-title-from-messages', requireAuth, async (req, res) => {
         const queryType = modelData['queryType'];
         let response;
 
+        // Skip title generation for Argo models (endpoint not reachable from this host)
+        if (queryType === 'argo') {
+            return res.status(200).json({ message: 'skipped', response: 'New Chat' });
+        }
+
         if (queryType === 'client') {
             const openai_client = ChatService.getOpenaiClient(modelData);
             const queryMsg = [{ role: 'user', content: query }];
             response = await ChatService.queryModel(openai_client, model, queryMsg);
         } else if (queryType === 'request') {
             response = await ChatService.queryRequest(modelData.endpoint, model, '', query);
-        } else if (queryType === 'argo') {
-            response = await ChatService.queryRequestArgo(modelData.endpoint, model, '', query);
         } else {
             return res.status(500).json({ message: 'Invalid query type', queryType });
         }
@@ -1972,6 +2091,162 @@ router.post('/get-path-state', requireAuth, async (req, res) => {
     } catch (error) {
         console.error('Error:', error);
         res.status(500).json({ message: 'Internal server error', error });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Workflow completion webhook -- called by the workflow engine when a
+// workflow finishes (succeeded, failed, or cancelled).  Writes a
+// completion summary message into the chat session so the user sees it
+// on the next page load.
+// ---------------------------------------------------------------------------
+router.post('/workflow-complete', async (req, res) => {
+    const webhookLogger = createLogger('workflow-webhook');
+    try {
+        const payload = req.body;
+
+        // --- Validate required fields ---
+        if (!payload.workflow_id || !payload.session_id) {
+            webhookLogger.warn('Webhook rejected: missing workflow_id or session_id');
+            return res.status(400).json({
+                error: 'workflow_id and session_id are required'
+            });
+        }
+
+        const {
+            workflow_id,
+            workflow_name,
+            status,
+            session_id,
+            owner,
+            completed_at,
+            steps,
+            output_paths
+            // auth_token intentionally not destructured / not logged
+        } = payload;
+
+        webhookLogger.info(`Workflow completion webhook received: workflow_id=${workflow_id}, status=${status}, session_id=${session_id}`);
+
+        // --- Verify session exists ---
+        const session = await getChatSession(session_id);
+        if (!session) {
+            webhookLogger.warn(`Webhook rejected: session ${session_id} not found`);
+            return res.status(404).json({
+                error: `Session ${session_id} not found`
+            });
+        }
+
+        // --- Build completion message text ---
+        let completionMessage;
+
+        if (status === 'succeeded') {
+            const stepSummaries = (steps || [])
+                .filter(s => s.status === 'succeeded')
+                .map(s => {
+                    const elapsed = s.elapsed_time ? ` (${s.elapsed_time})` : '';
+                    return `${s.step_name} [${s.app}]${elapsed}`;
+                })
+                .join(', ');
+
+            const pathList = (output_paths || []).length > 0
+                ? output_paths.join(', ')
+                : 'your workspace';
+
+            completionMessage =
+                `Your workflow **${workflow_name || workflow_id}** has completed successfully. ` +
+                `Steps completed: ${stepSummaries || 'none'}. ` +
+                `Results are available in your workspace at ${pathList}.`;
+
+        } else if (status === 'failed') {
+            const failedStep = (steps || []).find(s => s.status === 'failed');
+            const failedName = failedStep ? failedStep.step_name : 'unknown step';
+            const errorMsg = failedStep && failedStep.error_message
+                ? failedStep.error_message
+                : 'unknown error';
+
+            const completedSteps = (steps || [])
+                .filter(s => s.status === 'succeeded')
+                .map(s => {
+                    const elapsed = s.elapsed_time ? ` (${s.elapsed_time})` : '';
+                    return `${s.step_name} [${s.app}]${elapsed}`;
+                })
+                .join(', ');
+
+            completionMessage =
+                `Your workflow **${workflow_name || workflow_id}** has failed. ` +
+                `${failedName} encountered an error: ${errorMsg}.` +
+                (completedSteps
+                    ? ` Successfully completed steps: ${completedSteps}.`
+                    : '');
+
+        } else if (status === 'cancelled') {
+            completionMessage =
+                `Your workflow **${workflow_name || workflow_id}** was cancelled.`;
+
+        } else {
+            completionMessage =
+                `Your workflow **${workflow_name || workflow_id}** finished with status: ${status}.`;
+        }
+
+        // --- Build message document ---
+        const message = {
+            message_id: uuidv4(),
+            role: 'assistant',
+            content: completionMessage,
+            timestamp: new Date(),
+            agent_metadata: {
+                system_initiated: true,
+                trigger: 'workflow_complete',
+                workflow_id: workflow_id
+            },
+            workflow: {
+                workflow_id: workflow_id,
+                workflow_name: workflow_name || null,
+                status: status,
+                output_paths: output_paths || [],
+                completed_at: completed_at || new Date().toISOString(),
+                steps: (steps || []).map(s => ({
+                    step_name: s.step_name,
+                    app_name: s.app || s.app_name || null,
+                    status: s.status,
+                    task_id: s.task_id || null,
+                    elapsed_time: s.elapsed_time || null,
+                    error_message: s.error_message || s.error || null
+                })),
+                step_count: (steps || []).length,
+                succeeded_steps: (steps || []).filter(s => s.status === 'succeeded').length,
+                failed_steps: (steps || []).filter(s => s.status === 'failed').length
+            }
+        };
+        // Alias as workflowData for frontend consistency
+        message.workflowData = message.workflow;
+
+        // --- Write to MongoDB ---
+        await addMessagesToSession(session_id, [message]);
+
+        webhookLogger.info(`Completion message written to session ${session_id} for workflow ${workflow_id}`);
+
+        // --- Push SSE event to active streams (if any) ---
+        const pushed = pushToSession(session_id, 'workflow_complete', {
+            workflow_id: workflow_id,
+            workflow_name: workflow_name || null,
+            status: status,
+            output_paths: output_paths || [],
+            steps: message.workflow.steps,
+            message_id: message.message_id,
+            timestamp: message.timestamp
+        });
+        if (pushed > 0) {
+            webhookLogger.info(`Pushed workflow_complete SSE event to ${pushed} active stream(s) for session ${session_id}`);
+        }
+
+        return res.status(200).json({ ok: true });
+
+    } catch (error) {
+        webhookLogger.error(`Workflow completion webhook error: ${error.message}`, error);
+        return res.status(500).json({
+            error: 'Internal server error processing workflow completion'
+        });
     }
 });
 

@@ -5,6 +5,8 @@ var conf = require('../config.json');
 const { discoverTools } = require('../services/mcp/toolDiscovery');
 const { connectToDatabase } = require('../services/database');
 
+const useOrchestrator = conf.orchestrator?.enabled === true;
+
 app.set('port', conf.http_port || 7032);
 
 // Initialize server components on startup
@@ -19,14 +21,36 @@ async function initializeServer() {
     console.warn('[Startup] Continuing without MongoDB - database features will be unavailable');
   }
   
-  // Initialize MCP tools
-  console.log('[Startup] Initializing MCP tool discovery...');
-  try {
-    await discoverTools();
-    console.log('[Startup] MCP tools discovered successfully');
-  } catch (error) {
-    console.error('[Startup] Failed to discover MCP tools:', error.message);
-    console.warn('[Startup] Continuing without MCP tools - agent features will be limited');
+  // Initialize MCP tools (skip when orchestrator handles agent communication)
+  if (useOrchestrator) {
+    console.log('[Startup] Orchestrator enabled — skipping legacy MCP tool discovery');
+    console.log(`[Startup] Orchestrator URL: ${conf.orchestrator.url}`);
+    console.log(`[Startup] Fallback to legacy: ${conf.orchestrator.fallback_to_legacy}`);
+
+    // Optional: check orchestrator health at startup
+    try {
+      const { checkOrchestratorHealth } = require('../services/orchestratorClient');
+      const health = await checkOrchestratorHealth();
+      if (health.healthy) {
+        console.log(`[Startup] Orchestrator is healthy (${health.agents?.healthy || 0}/${health.agents?.total || 0} agents)`);
+      } else {
+        console.warn(`[Startup] Orchestrator is not healthy: ${health.error || health.status}`);
+        if (conf.orchestrator.fallback_to_legacy) {
+          console.warn('[Startup] Will fall back to legacy agent loop on failures');
+        }
+      }
+    } catch (err) {
+      console.warn(`[Startup] Could not reach orchestrator: ${err.message}`);
+    }
+  } else {
+    console.log('[Startup] Initializing MCP tool discovery...');
+    try {
+      await discoverTools();
+      console.log('[Startup] MCP tools discovered successfully');
+    } catch (error) {
+      console.error('[Startup] Failed to discover MCP tools:', error.message);
+      console.warn('[Startup] Continuing without MCP tools - agent features will be limited');
+    }
   }
   
   // Start the server
@@ -41,6 +65,7 @@ async function initializeServer() {
     console.log('[Startup]   - /copilot-api/health/live (liveness)');
     console.log('[Startup]   - /copilot-api/health/ready (readiness)');
     console.log('[Startup]   - /copilot-api/health/mongodb (MongoDB-specific)');
+    console.log('[Startup]   - /copilot-api/health/orchestrator (orchestrator)');
   });
 }
 

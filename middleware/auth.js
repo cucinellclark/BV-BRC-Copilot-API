@@ -31,19 +31,21 @@ function requireAuth(req, res, next) {
   }
 
   ValidateToken(authHeader, signingSubjectURL)
-    .then((valid) => {
-      if (valid && valid.id) {
-        req.user = valid.id
-        req.authToken = authHeader
-        next()
-      } else {
-        return res.status(401).json({ message: 'Invalid or expired authentication token.' })
+    .then(
+      (valid) => {
+        if (valid && valid.id) {
+          req.user = valid.id
+          req.authToken = authHeader
+          next()
+        } else {
+          return res.status(401).json({ message: 'Invalid or expired authentication token.' })
+        }
+      },
+      (err) => {
+        console.error('Token validation error:', err.message || err)
+        return res.status(401).json({ message: 'Authentication token validation failed.' })
       }
-    })
-    .catch((err) => {
-      console.error('Token validation error:', err.message || err)
-      return res.status(401).json({ message: 'Authentication token validation failed.' })
-    })
+    )
 }
 
 /**
@@ -70,17 +72,19 @@ function optionalAuth(req, res, next) {
   }
 
   ValidateToken(authHeader, signingSubjectURL)
-    .then((valid) => {
-      if (valid && valid.id) {
-        req.user = valid.id
-        req.authToken = authHeader
+    .then(
+      (valid) => {
+        if (valid && valid.id) {
+          req.user = valid.id
+          req.authToken = authHeader
+        }
+        next()
+      },
+      (err) => {
+        console.error('Optional token validation failed:', err.message || err)
+        next()
       }
-      next()
-    })
-    .catch((err) => {
-      console.error('Optional token validation failed:', err.message || err)
-      next()
-    })
+    )
 }
 
 /**
@@ -106,10 +110,21 @@ function resolveUserId(req, suppliedUserId) {
 
   if (suppliedUserId && typeof suppliedUserId === 'string') {
     const trimmed = suppliedUserId.trim()
-    if (trimmed && trimmed !== authenticatedUser) {
-      return {
-        error: 'Forbidden: supplied user_id does not match the authenticated user.',
-        status: 403
+    if (trimmed) {
+      // The token identity includes the realm (e.g. "user@patricbrc.org") while
+      // the front end may send just the bare username (l_id, e.g. "user").
+      // Normalise both sides to lowercase for a case-insensitive comparison,
+      // and accept a match when the supplied value equals either the full
+      // token identity or its username portion (before the '@').
+      const authLower = authenticatedUser.toLowerCase()
+      const suppliedLower = trimmed.toLowerCase()
+      const authUsername = authLower.split('@')[0]
+
+      if (suppliedLower !== authLower && suppliedLower !== authUsername) {
+        return {
+          error: 'Forbidden: supplied user_id does not match the authenticated user.',
+          status: 403
+        }
       }
     }
   }

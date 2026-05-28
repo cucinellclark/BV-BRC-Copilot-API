@@ -134,11 +134,16 @@ async function queryRequestChat(url, model, system_prompt, query) {
         if (!url || !model || !query) {
             throw new LLMServiceError('Missing required parameters for queryRequestChat');
         }
+        // Ensure the URL ends with /chat/completions
+        let chatUrl = url.replace(/\/+$/, '');
+        if (!chatUrl.endsWith('/chat/completions')) {
+            chatUrl += '/chat/completions';
+        }
         var payload = {
             model, temperature: 1.0,
             messages: [{ role: 'system', content: system_prompt }, { role: 'user', content: query }]
         }
-        const res = await postJson(url, payload);
+        const res = await postJson(chatUrl, payload);
         if (!res?.choices?.[0]?.message?.content) {
             throw new LLMServiceError('Invalid response format from chat API');
         }

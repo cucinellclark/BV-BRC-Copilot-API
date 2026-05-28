@@ -1,3 +1,4 @@
+const axios = require('axios');
 const config = require('../../config.json');
 const mcpConfig = require('../mcp/config.json');
 const { getChatSession, getSummaryBySessionId } = require('../dbUtils');
@@ -297,9 +298,127 @@ async function buildConversationContext(opts = {}) {
   }
 }
 
+/**
+ * Build workflow-aware conversation history with live status from the engine.
+ *
+ * Two-pass approach:
+ *   Pass 1: Strip messages to {role, content, workflow?}, collect workflow IDs.
+ *   Batch query: Fetch live status for all collected workflow IDs.
+ *   Pass 2: Merge live status inline after each workflow message.
+ *
+ * @param {Array} messages - Raw messages from the chat session
+ * @param {string} [engineBaseUrl] - Workflow engine base URL (optional, from env/config)
+ * @param {number} [timeout=3000] - HTTP timeout in ms for the batch status call
+ * @returns {Promise<string>} Formatted history text with inline workflow metadata
+ */
+async function buildWorkflowAwareHistory(messages, engineBaseUrl, timeout = 3000) {
+  if (!messages || messages.length === 0) {
+    return '';
+  }
+
+  const baseUrl = engineBaseUrl
+    || process.env.WORKFLOW_URL
+    || config.workflow_url
+    || 'https://dev-7.bv-brc.org/api/v1';
+
+  // -- Pass 1: Strip and collect workflow entries --
+  const strippedMessages = [];
+  const workflowEntries = []; // { index, workflow_id, workflow }
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg || !msg.role) continue;
+    // Skip system messages and trace messages
+    if (msg.role === 'system') continue;
+    if (msg.agent_trace || msg.tool_results_summary || msg.documents) continue;
+
+    const stripped = {
+      role: msg.role,
+      content: normalizeContent(msg.content),
+    };
+
+    if (msg.workflow && msg.workflow.workflow_id) {
+      stripped.workflow = msg.workflow;
+      workflowEntries.push({
+        index: strippedMessages.length,
+        workflow_id: msg.workflow.workflow_id,
+        workflow: msg.workflow,
+      });
+    }
+
+    strippedMessages.push(stripped);
+  }
+
+  // -- Batch query --
+  let statusMap = {};
+  let statusUnavailable = false;
+
+  if (workflowEntries.length > 0) {
+    const uniqueIds = [...new Set(workflowEntries.map(e => e.workflow_id))];
+    try {
+      const response = await axios.post(
+        `${baseUrl}/workflows/batch-status`,
+        { workflow_ids: uniqueIds },
+        {
+          timeout,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+      if (response.data && response.data.statuses) {
+        statusMap = response.data.statuses;
+      }
+    } catch (err) {
+      statusUnavailable = true;
+      logger.warn('Workflow batch-status query failed', {
+        error: err.message,
+        code: err.code,
+        statusCode: err.response?.status,
+      });
+    }
+  }
+
+  // -- Pass 2: Merge status into messages --
+  const workflowIndicesSet = new Set(workflowEntries.map(e => e.index));
+  const workflowByIndex = {};
+  for (const entry of workflowEntries) {
+    workflowByIndex[entry.index] = entry;
+  }
+
+  const lines = [];
+  for (let i = 0; i < strippedMessages.length; i++) {
+    const msg = strippedMessages[i];
+    lines.push(`${msg.role}: ${msg.content}`);
+
+    if (workflowIndicesSet.has(i)) {
+      const entry = workflowByIndex[i];
+      const wfId = entry.workflow_id;
+      const storedWf = entry.workflow;
+
+      // Determine the status line
+      const wfName = storedWf.workflow_name || 'Unknown';
+      const liveStatus = statusMap[wfId];
+
+      if (statusUnavailable) {
+        lines.push(`[workflow: ${wfId} | name: ${wfName} | status: unknown (engine unreachable)]`);
+      } else if (liveStatus) {
+        // Build step completion summary
+        const steps = liveStatus.steps || [];
+        const completedCount = steps.filter(s => s.status === 'succeeded').length;
+        const stepSummary = steps.length > 0 ? ` | steps: ${completedCount}/${steps.length} completed` : '';
+        lines.push(`[workflow: ${wfId} | name: ${liveStatus.workflow_name || wfName} | status: ${liveStatus.status}${stepSummary}]`);
+      } else {
+        lines.push(`[workflow: ${wfId} | name: ${wfName} | status: unknown (not found in engine)]`);
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
 module.exports = {
   buildConversationContext,
   buildHistoryText,
+  buildWorkflowAwareHistory,
   selectRecentMessages
 };
 
