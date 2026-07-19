@@ -944,6 +944,48 @@ async function getUserWorkflowIds(userId) {
   }
 }
 
+/**
+ * Update a plan stored inside a session message.
+ * Finds the most recent message whose plan.plan_id matches and replaces
+ * the plan object while preserving the rest of the message.
+ * @param {string} sessionId - The session ID
+ * @param {string} planId - The plan_id to match
+ * @param {object} updatedPlan - The new plan object
+ * @returns {Object} Update result
+ */
+async function updatePlanInSession(sessionId, planId, updatedPlan) {
+  try {
+    if (!sessionId || !planId || !updatedPlan) {
+      throw new LLMServiceError('sessionId, planId, and updatedPlan are required');
+    }
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+
+    const result = await chatCollection.updateOne(
+      {
+        session_id: sessionId,
+        'messages.plan.plan_id': planId
+      },
+      {
+        $set: {
+          'messages.$[elem].plan': updatedPlan,
+          last_modified: new Date()
+        }
+      },
+      {
+        arrayFilters: [{ 'elem.plan.plan_id': planId }]
+      }
+    );
+
+    return result;
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to update plan in session', error);
+  }
+}
+
 module.exports = {
   getModelData,
   getActiveModels,
@@ -978,5 +1020,6 @@ module.exports = {
   getSessionFilesPaginated,
   deleteFileMetadata,
   getSessionStorageSize,
-  getUserWorkflowIds
+  getUserWorkflowIds,
+  updatePlanInSession
 };

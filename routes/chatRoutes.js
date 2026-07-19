@@ -251,7 +251,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             selected_workflows = null,
             images = null,
             files = null,
-            auto_submit_preference = null
+            auto_submit_preference = null,
+            target_agent = null,
+            workflow_context = null
         } = req.body;
 
         // Validate and resolve user identity from the authenticated token
@@ -295,7 +297,11 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             });
         }
 
-        const max_iterations = config.agent?.max_iterations || 3;
+        // Treat 0 (or negative) as unlimited.
+        const configuredMaxIterations = config.agent?.max_iterations;
+        const max_iterations = (typeof configuredMaxIterations === 'number' && configuredMaxIterations <= 0)
+            ? Number.POSITIVE_INFINITY
+            : (configuredMaxIterations || 3);
 
         logger.info('Agent request received', {
             query_preview: query.substring(0, 100),
@@ -433,7 +439,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 selected_workflows,
                 images,
                 files: validatedFiles,
-                auto_submit_preference
+                auto_submit_preference,
+                target_agent,
+                workflow_context
             }, {
                 streamCallback
             });
@@ -486,7 +494,9 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 selected_workflows,
                 images,
                 files: validatedFiles,
-                auto_submit_preference
+                auto_submit_preference,
+                target_agent,
+                workflow_context
             });
 
             logger.info('Agent job queued successfully', {
@@ -1889,6 +1899,426 @@ router.post('/submit-workflow/:workflowId', requireAuth, async (req, res) => {
             error: error.message,
             workflow_id: req.params.workflowId
         });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Planning Agent endpoints
+// ---------------------------------------------------------------------------
+
+/**
+ * Answer clarification questions from the planning agent.
+ * No planId required — the plan doesn't exist yet at this point.
+ */
+router.post('/answer-questions', requireAuth, async (req, res) => {
+    const logger = createLogger('AnswerQuestions', req.body.session_id);
+    try {
+        const {
+            answers,
+            original_query,
+            session_id,
+            model = null
+        } = req.body;
+
+        if (!answers || !Array.isArray(answers) || answers.length === 0) {
+            return res.status(400).json({ message: 'answers array is required' });
+        }
+        if (!original_query) {
+            return res.status(400).json({ message: 'original_query is required' });
+        }
+
+        const auth_token = req.authToken || null;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        // Set SSE headers
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        let heartbeatInterval = null;
+        req.on('close', () => {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        });
+
+        const streamCallback = (eventType, data) => {
+            if (res.writableEnded || res.destroyed) return;
+            try {
+                writeSseEvent(res, eventType, data);
+                if (eventType === 'done' || eventType === 'error') {
+                    res.end();
+                }
+            } catch (err) {
+                logger.error('Failed to write SSE event', { error: err.message });
+            }
+        };
+
+        res.write(': connected\n\n');
+        if (typeof res.flush === 'function') res.flush();
+
+        const job = await addAgentJob({
+            query: original_query,
+            model,
+            session_id,
+            user_id,
+            save_chat: true,
+            include_history: true,
+            auth_token,
+            target_agent: 'planning',
+            workflow_context: {
+                plan_action: 'answer_questions',
+                clarification_answers: answers
+            }
+        }, { streamCallback });
+
+        heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            res.write(': heartbeat\n\n');
+            if (typeof res.flush === 'function') res.flush();
+        }, 15000);
+
+        logger.info('Answer-questions job queued', { jobId: job.id, session_id });
+
+    } catch (error) {
+        logger.error('Error in answer-questions', { error: error.message });
+        if (!res.headersSent) {
+            return res.status(500).json({ message: 'Internal server error', error: error.message });
+        }
+    }
+});
+
+/**
+ * Approve a plan and start executing the first step.
+ */
+router.post('/plan/:planId/approve', requireAuth, async (req, res) => {
+    const logger = createLogger('ApprovePlan', req.body.session_id);
+    try {
+        const { planId } = req.params;
+        const { plan, session_id, model = null } = req.body;
+
+        if (!plan || !plan.steps || plan.steps.length === 0) {
+            return res.status(400).json({ message: 'plan with steps is required' });
+        }
+
+        const auth_token = req.authToken || null;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        // Set SSE headers
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        let heartbeatInterval = null;
+        req.on('close', () => {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        });
+
+        const streamCallback = (eventType, data) => {
+            if (res.writableEnded || res.destroyed) return;
+            try {
+                writeSseEvent(res, eventType, data);
+                if (eventType === 'done' || eventType === 'error') {
+                    res.end();
+                }
+            } catch (err) {
+                logger.error('Failed to write SSE event', { error: err.message });
+            }
+        };
+
+        res.write(': connected\n\n');
+        if (typeof res.flush === 'function') res.flush();
+
+        const job = await addAgentJob({
+            query: `Execute step 1 of approved plan: ${plan.title}`,
+            model,
+            session_id,
+            user_id,
+            save_chat: true,
+            include_history: true,
+            auth_token,
+            target_agent: 'planning',
+            workflow_context: {
+                plan: plan,
+                plan_action: 'execute_next',
+                current_step_index: 0,
+                completed_step_results: {}
+            }
+        }, { streamCallback });
+
+        heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            res.write(': heartbeat\n\n');
+            if (typeof res.flush === 'function') res.flush();
+        }, 15000);
+
+        logger.info('Plan approval job queued', { jobId: job.id, planId, session_id });
+
+    } catch (error) {
+        logger.error('Error in plan approve', { error: error.message });
+        if (!res.headersSent) {
+            return res.status(500).json({ message: 'Internal server error', error: error.message });
+        }
+    }
+});
+
+/**
+ * Execute the next step in a plan.
+ */
+router.post('/plan/:planId/execute-next', requireAuth, async (req, res) => {
+    const logger = createLogger('ExecuteNextStep', req.body.session_id);
+    try {
+        const { planId } = req.params;
+        const {
+            plan,
+            session_id,
+            current_step_index,
+            completed_step_results = {},
+            model = null
+        } = req.body;
+
+        if (!plan || current_step_index === undefined) {
+            return res.status(400).json({ message: 'plan and current_step_index are required' });
+        }
+
+        const auth_token = req.authToken || null;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        // Set SSE headers
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        let heartbeatInterval = null;
+        req.on('close', () => {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        });
+
+        const streamCallback = (eventType, data) => {
+            if (res.writableEnded || res.destroyed) return;
+            try {
+                writeSseEvent(res, eventType, data);
+                if (eventType === 'done' || eventType === 'error') {
+                    res.end();
+                }
+            } catch (err) {
+                logger.error('Failed to write SSE event', { error: err.message });
+            }
+        };
+
+        res.write(': connected\n\n');
+        if (typeof res.flush === 'function') res.flush();
+
+        const job = await addAgentJob({
+            query: `Execute step ${current_step_index + 1} of plan: ${plan.title}`,
+            model,
+            session_id,
+            user_id,
+            save_chat: true,
+            include_history: true,
+            auth_token,
+            target_agent: 'planning',
+            workflow_context: {
+                plan: plan,
+                plan_action: 'execute_next',
+                current_step_index: current_step_index,
+                completed_step_results: completed_step_results
+            }
+        }, { streamCallback });
+
+        heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            res.write(': heartbeat\n\n');
+            if (typeof res.flush === 'function') res.flush();
+        }, 15000);
+
+        logger.info('Execute-next job queued', { jobId: job.id, planId, session_id, step: current_step_index });
+
+    } catch (error) {
+        logger.error('Error in execute-next', { error: error.message });
+        if (!res.headersSent) {
+            return res.status(500).json({ message: 'Internal server error', error: error.message });
+        }
+    }
+});
+
+/**
+ * Skip a step during plan execution.
+ */
+router.post('/plan/:planId/skip-step/:stepId', requireAuth, async (req, res) => {
+    const logger = createLogger('SkipStep', req.body.session_id);
+    try {
+        const { planId, stepId } = req.params;
+        const {
+            plan,
+            session_id,
+            current_step_index,
+            completed_step_results = {},
+            model = null
+        } = req.body;
+
+        if (!plan) {
+            return res.status(400).json({ message: 'plan is required' });
+        }
+
+        const auth_token = req.authToken || null;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        // Mark the step as skipped
+        const updatedPlan = JSON.parse(JSON.stringify(plan));
+        const stepToSkip = updatedPlan.steps.find(s => s.step_id === stepId);
+        if (stepToSkip) {
+            stepToSkip.status = 'skipped';
+        }
+
+        // Find next non-skipped pending step
+        let nextIndex = current_step_index;
+        while (nextIndex < updatedPlan.steps.length &&
+               updatedPlan.steps[nextIndex].status !== 'pending') {
+            nextIndex++;
+        }
+
+        if (nextIndex >= updatedPlan.steps.length) {
+            // All remaining steps skipped — plan complete
+            updatedPlan.status = 'completed';
+            return res.json({ status: 'plan_completed', plan: updatedPlan });
+        }
+
+        // Set SSE headers
+        res.set({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        });
+        if (typeof res.flushHeaders === 'function') {
+            res.flushHeaders();
+        }
+
+        let heartbeatInterval = null;
+        req.on('close', () => {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        });
+
+        const streamCallback = (eventType, data) => {
+            if (res.writableEnded || res.destroyed) return;
+            try {
+                writeSseEvent(res, eventType, data);
+                if (eventType === 'done' || eventType === 'error') {
+                    res.end();
+                }
+            } catch (err) {
+                logger.error('Failed to write SSE event', { error: err.message });
+            }
+        };
+
+        res.write(': connected\n\n');
+        if (typeof res.flush === 'function') res.flush();
+
+        const job = await addAgentJob({
+            query: `Execute next step of plan: ${updatedPlan.title}`,
+            model,
+            session_id,
+            user_id,
+            save_chat: true,
+            include_history: true,
+            auth_token,
+            target_agent: 'planning',
+            workflow_context: {
+                plan: updatedPlan,
+                plan_action: 'execute_next',
+                current_step_index: nextIndex,
+                completed_step_results: completed_step_results
+            }
+        }, { streamCallback });
+
+        heartbeatInterval = setInterval(() => {
+            if (res.writableEnded || res.destroyed) {
+                clearInterval(heartbeatInterval);
+                return;
+            }
+            res.write(': heartbeat\n\n');
+            if (typeof res.flush === 'function') res.flush();
+        }, 15000);
+
+        logger.info('Skip-step job queued', { jobId: job.id, planId, stepId, session_id });
+
+    } catch (error) {
+        logger.error('Error in skip-step', { error: error.message });
+        if (!res.headersSent) {
+            return res.status(500).json({ message: 'Internal server error', error: error.message });
+        }
+    }
+});
+
+/**
+ * Edit remaining steps of a plan (non-streaming, just updates state).
+ */
+router.post('/plan/:planId/edit', requireAuth, async (req, res) => {
+    try {
+        const { planId } = req.params;
+        const { plan, session_id } = req.body;
+
+        if (!plan) {
+            return res.status(400).json({ message: 'plan is required' });
+        }
+
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+
+        if (session_id) {
+            const { updatePlanInSession } = require('../services/dbUtils');
+            await updatePlanInSession(session_id, planId, plan);
+        }
+
+        res.json({ status: 'updated', plan });
+    } catch (error) {
+        return res.status(500).json({ message: 'Internal server error', error: error.message });
     }
 });
 
