@@ -115,7 +115,9 @@ if (config.queue.enabled !== false) {
         jobProgress.set(job.id, {
             status: 'active',
             currentIteration: 0,
-            maxIterations: job.data.max_iterations || 3,
+            maxIterations: (typeof job.data.max_iterations === 'number' && job.data.max_iterations <= 0)
+                ? null
+                : (job.data.max_iterations || 3),
             currentTool: null,
             error: null,
             startedAt: new Date(),
@@ -151,7 +153,10 @@ if (config.queue.enabled !== false) {
             }
 
             // Stream progress event
-            const percentage = Math.min(90, 10 + (iteration / job.data.max_iterations) * 80);
+            const maxIters = job.data.max_iterations;
+            const percentage = (typeof maxIters === 'number' && maxIters > 0)
+                ? Math.min(90, 10 + (iteration / maxIters) * 80)
+                : 10;
             safeStreamEmit(jobId, 'progress', {
                 iteration,
                 max_iterations: job.data.max_iterations,
@@ -226,6 +231,8 @@ if (config.queue.enabled !== false) {
             images: job.data.images,
             files: job.data.files || null,
             auto_submit_preference: job.data.auto_submit_preference || null,
+            target_agent: job.data.target_agent || null,
+            workflow_context: job.data.workflow_context || null,
             stream: !!streamCallback,
             responseStream: responseStream,
             progressCallback: progressCallback,
@@ -460,7 +467,9 @@ async function addAgentJob(jobData, options = {}) {
     jobProgress.set(job.id, {
         status: 'waiting',
         currentIteration: 0,
-        maxIterations: jobData.max_iterations || 3,
+        maxIterations: (typeof jobData.max_iterations === 'number' && jobData.max_iterations <= 0)
+            ? null
+            : (jobData.max_iterations || 3),
         currentTool: null,
         error: null,
         startedAt: new Date(),

@@ -345,6 +345,69 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       });
       break;
 
+    // -- Planning agent events --
+    case 'ask_questions':
+      emitSSE(responseStream, 'ask_questions', {
+        questions: eventData.questions || [],
+        agent: eventData.agent || 'planning',
+        timestamp: new Date().toISOString()
+      });
+      break;
+
+    case 'plan_created':
+      emitSSE(responseStream, 'plan_created', {
+        plan: eventData.plan || {},
+        agent: eventData.agent || 'planning',
+        timestamp: new Date().toISOString()
+      });
+      // Store plan on state for message persistence
+      state.plan = eventData.plan || null;
+      break;
+
+    case 'plan_step_started':
+      emitSSE(responseStream, 'plan_step_started', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        agent: eventData.agent,
+        timestamp: new Date().toISOString()
+      });
+      break;
+
+    case 'plan_step_completed':
+      emitSSE(responseStream, 'plan_step_completed', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        result_summary: eventData.result_summary,
+        agent_result: eventData.agent_result,
+        structured_data: eventData.structured_data || null,
+        timestamp: new Date().toISOString()
+      });
+      break;
+
+    case 'plan_step_failed':
+      emitSSE(responseStream, 'plan_step_failed', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        error: eventData.error,
+        timestamp: new Date().toISOString()
+      });
+      break;
+
+    case 'plan_review_ready':
+      emitSSE(responseStream, 'plan_review_ready', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        review_config: eventData.review_config || {},
+        source_data: eventData.source_data || {},
+        prompt: eventData.prompt || 'Review the results before continuing.',
+        timestamp: new Date().toISOString()
+      });
+      break;
+
     default:
       // Unknown event type — log but don't crash
       logger.debug('Unhandled orchestrator event type', { eventType, eventData });
@@ -381,7 +444,8 @@ async function streamFromOrchestrator(orchestratorRequest, responseStream, shoul
     lastResultForUi: null,
     sentResultForUi: false,
     autoSubmitted: false,
-    error: null
+    error: null,
+    plan: null
   };
 
   return new Promise((resolve, reject) => {
@@ -556,6 +620,8 @@ async function executeOrchestratorLoop(opts) {
     images = null,
     files = null,
     auto_submit_preference = null,
+    target_agent = null,
+    workflow_context = null,
     stream = false,
     responseStream = null,
     progressCallback = null,
@@ -653,6 +719,17 @@ async function executeOrchestratorLoop(opts) {
     content: query,
     timestamp: new Date().toISOString()
   };
+
+  // If this request is answering planning clarification questions, persist it
+  // as a special message so the frontend can render an "Answered Questions" card.
+  // This also avoids mixing it in with normal user chat text.
+  if (workflow_context && workflow_context.plan_action === 'answer_questions') {
+    userMessage.role = 'user_clarification';
+
+    if (Array.isArray(workflow_context.clarification_answers)) {
+      userMessage.clarificationAnswers = workflow_context.clarification_answers;
+    }
+  }
 
   const userAttachments = [];
   if (images && images.length > 0) {
@@ -755,8 +832,12 @@ async function executeOrchestratorLoop(opts) {
         ...item
       }))
     ],
-    target_agent: null,
-    max_steps: config.agent?.max_iterations || 5,
+    target_agent: target_agent || null,
+    // Treat 0 (or negative) as unlimited.
+    max_steps: (typeof config.agent?.max_iterations === 'number' && config.agent.max_iterations <= 0)
+      ? null
+      : (config.agent?.max_iterations || 5),
+    ...(workflow_context ? { workflow_context } : {}),
     ...(llmOverride ? { llm_override: llmOverride } : {}),
     ...(auto_submit_preference ? { auto_submit_preference } : {}),
     // Structured file attachments for programmatic use by agents
@@ -874,6 +955,31 @@ async function executeOrchestratorLoop(opts) {
     }
   };
 
+  // If the planner is just asking clarification questions, don't persist an empty
+  // assistant message. The UI will render the clarification chips based on the
+  // ask_questions SSE event, and the user's eventual answers are persisted as
+  // user_clarification.
+  const assistantContentEmpty = !assistantMessage.content || String(assistantMessage.content).trim() === '';
+  const assistantToolName = String(assistantMessage.ui_source_tool || assistantMessage.source_tool || '');
+
+  const isPlanningAskQuestions =
+    workflow_context &&
+    workflow_context.plan_action === 'ask_questions' &&
+    assistantContentEmpty;
+
+  const isPlanningAnswerQuestions =
+    workflow_context &&
+    workflow_context.plan_action === 'answer_questions' &&
+    assistantContentEmpty;
+
+  const isAskClarificationTool =
+    assistantContentEmpty &&
+    (assistantToolName.indexOf('ask_clarification') !== -1 || assistantToolName.indexOf('bvbrc_server.ask_clarification') !== -1);
+
+  if (isPlanningAskQuestions || isPlanningAnswerQuestions || isAskClarificationTool) {
+    assistantMessage._skip_persist = true;
+  }
+
   // Attach resolved tool name for frontend routing
   if (state.lastToolName) {
     assistantMessage.source_tool = state.lastToolName;
@@ -886,6 +992,16 @@ async function executeOrchestratorLoop(opts) {
     assistantMessage.ui_tool_call = callEnvelope;
     // Also store the full result for rich rendering metadata
     assistantMessage.result_for_ui = state.resultForUi;
+  }
+
+  // ------------------------------------------------------------------
+  // Attach plan metadata from the Planning Agent.
+  // ------------------------------------------------------------------
+  if (state.plan) {
+    assistantMessage.plan = state.plan;
+    assistantMessage.isPlan = true;
+    assistantMessage.source_tool = 'planning_agent';
+    assistantMessage.ui_source_tool = 'planning_agent';
   }
 
   // ------------------------------------------------------------------
@@ -984,11 +1100,16 @@ async function executeOrchestratorLoop(opts) {
         await createChatSession(session_id, user_id);
       }
 
-      const messagesToSave = userMessagePersisted
+      let messagesToSave = userMessagePersisted
         ? [assistantMessage]
         : [userMessage, assistantMessage];
 
-      await addMessagesToSession(session_id, messagesToSave);
+      // See assistantMessage._skip_persist above.
+      messagesToSave = messagesToSave.filter(m => !(m && m._skip_persist === true));
+
+      if (messagesToSave.length > 0) {
+        await addMessagesToSession(session_id, messagesToSave);
+      }
       sessionLogger.info('Saved messages to session', {
         count: messagesToSave.length,
         session_id
@@ -1020,7 +1141,9 @@ async function executeOrchestratorLoop(opts) {
 
     // If no synthesis_chunk events were emitted (e.g. direct response),
     // send the full response as a single final_response event
-    if (!state.streamedResponse && state.responseText) {
+    // Skip if responseText is empty or whitespace only
+    const hasValidResponseText = state.responseText && state.responseText.trim() !== '';
+    if (!state.streamedResponse && hasValidResponseText) {
       const payload = {
         chunk: state.responseText,
         tool: state.lastToolName || state.agentsUsed?.[0] || null,

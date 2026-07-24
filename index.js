@@ -11,6 +11,9 @@ const dbRoutes = require('./routes/dbRoutes');
 const healthRoutes = require('./routes/healthRoutes'); // health check routes
 const ragRoutes = require('./routes/ragRoutes'); // RAG retrieval routes
 
+// Initialize workflow monitor (Bull queue poller for GoWe submissions)
+require('./services/workflowMonitorService');
+
 const app = express();
 
 // Middleware setup
