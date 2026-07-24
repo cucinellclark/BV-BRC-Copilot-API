@@ -10,6 +10,9 @@ const chatRoutes = require('./routes/chatRoutes'); // chat-related routes
 const dbRoutes = require('./routes/dbRoutes');
 const healthRoutes = require('./routes/healthRoutes'); // health check routes
 
+// Initialize workflow monitor (Bull queue poller for GoWe submissions)
+require('./services/workflowMonitorService');
+
 const app = express();
 
 // Middleware setup

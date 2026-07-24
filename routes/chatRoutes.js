@@ -2525,6 +2525,46 @@ router.post('/get-path-state', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Workflow watch status -- lightweight polling endpoint for the frontend
+// PlanCard to check whether a watched workflow has completed.
+// ---------------------------------------------------------------------------
+router.get('/workflow-watch/:submissionId/status', requireAuth, async (req, res) => {
+    const logger = createLogger('WorkflowWatchStatus');
+    try {
+        const { submissionId } = req.params;
+        if (!submissionId) {
+            return res.status(400).json({ error: 'submissionId is required' });
+        }
+
+        const db = await connectToDatabase();
+        const watch = await db.collection('workflow_watches').findOne({
+            submission_id: submissionId
+        });
+
+        if (!watch) {
+            return res.status(404).json({ error: 'No watch found for this submission' });
+        }
+
+        // Return a lightweight status response
+        return res.json({
+            submission_id: watch.submission_id,
+            workflow_id: watch.workflow_id,
+            status: watch.status,           // "active" | "completed" | "failed"
+            gowe_state: watch.gowe_state,   // "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"
+            plan_id: watch.plan_id || null,
+            step_id: watch.step_id || null,
+            step_index: watch.step_index,
+            last_checked: watch.last_checked,
+            completed_at: watch.completed_at
+        });
+
+    } catch (error) {
+        logger.error('Error checking workflow watch status', { error: error.message });
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ---------------------------------------------------------------------------
 // Workflow completion webhook -- called by the workflow engine when a
 // workflow finishes (succeeded, failed, or cancelled).  Writes a
 // completion summary message into the chat session so the user sees it
