@@ -2400,6 +2400,12 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
 
     // Handle request-based models
     if (modelData.queryType === 'request') {
+      // Ensure the URL ends with /chat/completions (matching non-streaming behavior)
+      let streamUrl = modelData.endpoint.replace(/\/+$/, '');
+      if (!streamUrl.endsWith('/chat/completions')) {
+        streamUrl += '/chat/completions';
+      }
+
       const payload = {
         model: model,
         temperature: 1.0,
@@ -2416,7 +2422,7 @@ async function streamFinalResponse(prompt, model, modelData, responseStream, log
         emitSSE(responseStream, 'final_response', { chunk: text, tool: sourceTool || null });
       };
 
-      await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
+      await postJsonStream(streamUrl, payload, onChunk, modelData.apiKey);
 
       // Log the complete streamed response
       log.logResponse('Streaming Final Response', fullResponse, model);

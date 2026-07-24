@@ -4,7 +4,7 @@
       "name": "BV-BRC MCP Server",
       "url": "http://140.221.78.15:8053",
       "type": "mcp",
-      "auth": null,
+      "auth": "",
       "timeout": 30000,
       "description": "Provides access to BV-BRC services, workspace and data",
       "disabled": false
