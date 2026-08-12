@@ -17,27 +17,13 @@ const promptManager = require('../prompts');
 const { buildConversationContext } = require('./memory/conversationContextService');
 
 // Lightweight replica of chatService.createQueryFromMessages to avoid a circular
-// dependency.  Falls back to a simple concatenation if the helper microservice
-// is unavailable.
+// dependency.
 function createQueryFromMessages(query, messages, system_prompt, max_tokens = 40000) {
-  return new Promise(async (resolve) => {
-    try {
-      const data = await postJson('http://0.0.0.0:5000/get_prompt_query', {
-        query: query || '',
-        messages: messages || [],
-        system_prompt: system_prompt || '',
-        max_tokens
-      });
-      return resolve(data.prompt_query);
-    } catch (_) {
-      // Fallback formatting
-      const parts = [];
-      if (system_prompt) parts.push(`System: ${system_prompt}`);
-      (messages || []).forEach((m) => parts.push(`${m.role}: ${m.content}`));
-      parts.push(`Current User Query: ${query}`);
-      return resolve(parts.join('\n\n'));
-    }
-  });
+  const parts = [];
+  if (system_prompt) parts.push(`System: ${system_prompt}`);
+  (messages || []).forEach((m) => parts.push(`${m.role}: ${m.content}`));
+  parts.push(`Current User Query: ${query}`);
+  return Promise.resolve(parts.join('\n\n'));
 }
 
 // Small helper – duplicated from chatService so we avoid a circular dependency for now.

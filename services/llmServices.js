@@ -72,19 +72,14 @@ function toPreview(value, maxLen = 800) {
     }
 }
 
+// Rough token count estimation (4 chars ≈ 1 token).
+// Previously called the Flask utilities server; now inline.
 async function count_tokens(query) {
-    try {
-        if (!query) {
-            throw new LLMServiceError('Missing query parameter for count_tokens');
-        }
-        const response = await postJson('http://0.0.0.0:5000/count_tokens', { query });
-        if (typeof response?.token_count !== 'number') {
-            throw new LLMServiceError('Invalid response format from token counting API');
-        }
-        return response.token_count;
-    } catch (error) {
-        throw new LLMServiceError('Failed to count tokens', error);
+    if (!query) {
+        throw new LLMServiceError('Missing query parameter for count_tokens');
     }
+    const text = typeof query === 'string' ? query : JSON.stringify(query);
+    return Math.ceil(text.length / 4);
 }
 
 async function safe_count_tokens(query) {

@@ -159,8 +159,8 @@ async function runModelStream(ctx, modelData, onChunk) {
 
 async function getPathState(path) {
   try {
-    const response = await postJson('http://0.0.0.0:5000/get_path_state', { path: path });
-    return response;
+    const { getPathState: resolvePathState } = require('../pathStateService');
+    return await resolvePathState(path);
   } catch (error) {
     if (error instanceof LLMServiceError) {
       throw error;

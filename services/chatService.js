@@ -558,52 +558,35 @@ async function handleChatQuery({ query, model, system_prompt = '' }) {
 }
 
 function createQueryFromMessages(query, messages, system_prompt, max_tokens) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const data = await postJson('http://0.0.0.0:5000/get_prompt_query', {
-        query: query || '',
-        messages: messages || [],
-        system_prompt: system_prompt || '',
-        max_tokens: 40000
-      });
+  return new Promise(async (resolve) => {
+    // Format messages according to their roles
+    const formattedMessages = [];
 
-      resolve(data.prompt_query);
-    } catch (error) {
-      console.error('Error in createQueryFromMessages:', error);
-
-      // Fallback: format messages according to their roles
-      let formattedMessages = [];
-
-      // Add system prompt if provided
-      if (system_prompt && system_prompt.trim() !== '') {
-        formattedMessages.push(`System: ${system_prompt}`);
-      }
-
-      // Format existing messages according to their roles
-      if (messages && messages.length > 0) {
-        messages.forEach(msg => {
-          if (msg.role && msg.content) {
-            const roleLabel = msg.role.charAt(0).toUpperCase() + msg.role.slice(1);
-            formattedMessages.push(`${roleLabel}: ${msg.content}`);
-          }
-        });
-      }
-
-      // Add the current query as the final message
-      if (query && query.trim() !== '') {
-        formattedMessages.push(`Current User Query: ${query}`);
-      }
-
-      const fallbackResponse = formattedMessages.join('\n\n');
-      resolve(fallbackResponse);
+    if (system_prompt && system_prompt.trim() !== '') {
+      formattedMessages.push(`System: ${system_prompt}`);
     }
+
+    if (messages && messages.length > 0) {
+      messages.forEach(msg => {
+        if (msg.role && msg.content) {
+          const roleLabel = msg.role.charAt(0).toUpperCase() + msg.role.slice(1);
+          formattedMessages.push(`${roleLabel}: ${msg.content}`);
+        }
+      });
+    }
+
+    if (query && query.trim() !== '') {
+      formattedMessages.push(`Current User Query: ${query}`);
+    }
+
+    resolve(formattedMessages.join('\n\n'));
   });
 }
 
 async function getPathState(path) {
   try {
-    const response = await postJson('http://0.0.0.0:5000/get_path_state', { path: path });
-    return response;
+    const { getPathState: resolvePathState } = require('./pathStateService');
+    return await resolvePathState(path);
   } catch (error) {
     if (error instanceof LLMServiceError) {
       throw error;
