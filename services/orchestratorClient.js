@@ -26,6 +26,7 @@ const {
   getModelData
 } = require('./dbUtils');
 const { buildConversationContext, buildWorkflowAwareHistory } = require('./memory/conversationContextService');
+const { registerWorkflowWatch } = require('./workflowMonitorService');
 const { getSessionMemory } = require('./memory/sessionMemoryService');
 const { maybeQueueSummary } = require('./summaryQueueService');
 
@@ -404,6 +405,19 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
         review_config: eventData.review_config || {},
         source_data: eventData.source_data || {},
         prompt: eventData.prompt || 'Review the results before continuing.',
+        timestamp: new Date().toISOString()
+      });
+      break;
+
+    case 'plan_workflow_submitted':
+      emitSSE(responseStream, 'plan_workflow_submitted', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        workflow_id: eventData.workflow_id,
+        submission_id: eventData.submission_id,
+        submission_ids: eventData.submission_ids || [],
+        result_summary: eventData.result_summary || '',
         timestamp: new Date().toISOString()
       });
       break;
@@ -1026,6 +1040,9 @@ async function executeOrchestratorLoop(opts) {
   const wasAutoSubmitted = !!state.autoSubmitted;
   const workflowStatus = wasAutoSubmitted ? 'pending' : 'planned';
 
+  // Collect all submission IDs (batch support)
+  const submissionIds = rui.submission_ids || (rui.submission_id ? [rui.submission_id] : []);
+
   if (workflowId && workflowPersisted) {
     assistantMessage.workflow = {
       workflow_id: workflowId,
@@ -1033,6 +1050,7 @@ async function executeOrchestratorLoop(opts) {
       status: workflowStatus,
       persisted: true,
       auto_submitted: wasAutoSubmitted,
+      submission_ids: submissionIds,
       steps,
       step_count: steps.length,
       execution_metadata: {
@@ -1060,6 +1078,32 @@ async function executeOrchestratorLoop(opts) {
       });
     }
 
+    // Register workflow watches so the Bull queue poller monitors completion.
+    // Handles both single (submission_id) and batch (submission_ids) submissions.
+    if (wasAutoSubmitted && session_id) {
+      const submissionIds = rui.submission_ids || (rui.submission_id ? [rui.submission_id] : []);
+      for (const subId of submissionIds) {
+        registerWorkflowWatch({
+          submission_id: subId,
+          workflow_id: workflowId || '',
+          session_id,
+          user_id: user_id || '',
+          auth_token: auth_token || null,
+        }).catch(err => {
+          sessionLogger.warn('Failed to register workflow watch', {
+            submission_id: subId,
+            error: err.message
+          });
+        });
+        // Also track each submission_id on the session
+        addWorkflowIdToSession(session_id, subId).catch(() => {});
+      }
+      sessionLogger.info('Registered workflow watches', {
+        count: submissionIds.length,
+        submission_ids: submissionIds
+      });
+    }
+
     sessionLogger.info('Workflow metadata attached to message', {
       workflow_id: workflowId,
       status: workflowStatus,
@@ -1073,6 +1117,7 @@ async function executeOrchestratorLoop(opts) {
       status: workflowStatus,
       persisted: false,
       auto_submitted: wasAutoSubmitted,
+      submission_ids: submissionIds,
       steps,
       step_count: steps.length,
       execution_metadata: {
