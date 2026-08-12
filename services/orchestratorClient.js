@@ -832,6 +832,7 @@ async function executeOrchestratorLoop(opts) {
     conversation_summary: conversationSummary || null,
     recent_messages: recentMessages,
     workspace_path: _workspacePathFromToken(auth_token),
+    page_context: system_prompt || null,
     selected_items: [
       ...(workspace_items || []).map(item => ({
         type: 'workspace_item',
@@ -990,7 +991,14 @@ async function executeOrchestratorLoop(opts) {
     assistantContentEmpty &&
     (assistantToolName.indexOf('ask_clarification') !== -1 || assistantToolName.indexOf('bvbrc_server.ask_clarification') !== -1);
 
-  if (isPlanningAskQuestions || isPlanningAnswerQuestions || isAskClarificationTool) {
+  // Review steps and continue_review actions produce empty response_text
+  // because the PlanCard renders the interactive review panel directly.
+  const isPlanReviewStep =
+    assistantContentEmpty &&
+    workflow_context &&
+    (workflow_context.plan_action === 'execute_next' || workflow_context.plan_action === 'continue_review');
+
+  if (isPlanningAskQuestions || isPlanningAnswerQuestions || isAskClarificationTool || isPlanReviewStep) {
     assistantMessage._skip_persist = true;
   }
 
