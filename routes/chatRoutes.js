@@ -2516,7 +2516,8 @@ router.post('/demo', requireAuth, async (req, res) => {
 router.post('/get-path-state', requireAuth, async (req, res) => {
     try {
         const { path } = req.body;
-        const pathState = await ChatService.getPathState(path);
+        const { getPathState } = require('../services/pathStateService');
+        const pathState = await getPathState(path);
         res.status(200).json({ message: 'success', pathState });
     } catch (error) {
         console.error('Error:', error);
