@@ -229,6 +229,7 @@ if (config.queue.enabled !== false) {
             selected_jobs: job.data.selected_jobs,
             selected_workflows: job.data.selected_workflows,
             images: job.data.images,
+            image_attachments: job.data.image_attachments || null,
             files: job.data.files || null,
             auto_submit_preference: job.data.auto_submit_preference || null,
             target_agent: job.data.target_agent || null,

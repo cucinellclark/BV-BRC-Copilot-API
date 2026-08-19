@@ -632,6 +632,7 @@ async function executeOrchestratorLoop(opts) {
     selected_jobs = null,
     selected_workflows = null,
     images = null,
+    image_attachments = null,
     files = null,
     auto_submit_preference = null,
     target_agent = null,
@@ -747,12 +748,22 @@ async function executeOrchestratorLoop(opts) {
 
   const userAttachments = [];
   if (images && images.length > 0) {
+    const metaArray = Array.isArray(image_attachments) ? image_attachments : [];
     images.slice(0, 10).forEach((img, i) => {
-      userAttachments.push({
-        type: 'image',
-        source: 'upload',
-        label: `Image ${i + 1}`
-      });
+      const meta = metaArray[i];
+      if (meta && meta.source === 'screenshot') {
+        userAttachments.push({
+          type: 'image',
+          source: 'screenshot',
+          name: meta.name || 'Page screenshot'
+        });
+      } else {
+        userAttachments.push({
+          type: 'image',
+          source: 'upload',
+          name: (meta && meta.name) || `Image ${i + 1}`
+        });
+      }
     });
   }
   if (files && files.length > 0) {
@@ -794,11 +805,15 @@ async function executeOrchestratorLoop(opts) {
         llmOverride = {
           base_url: modelData.endpoint || null,
           api_key: modelData.apiKey || null,
-          model: modelData.model || model
+          model: modelData.model || model,
+          // Forward max_tokens so agents use the per-model limit
+          // (e.g. thinking models need higher limits for reasoning)
+          ...(modelData.max_tokens ? { max_tokens: modelData.max_tokens } : {})
         };
         sessionLogger.info('Resolved model config from MongoDB', {
           model: llmOverride.model,
           base_url: llmOverride.base_url,
+          max_tokens: llmOverride.max_tokens || '(default)',
           query_type: modelData.queryType
         });
       }
@@ -861,7 +876,9 @@ async function executeOrchestratorLoop(opts) {
       content: f.content,
       mime_type: f.mime_type || 'text/plain',
       size: f.size || 0
-    })) } : {})
+    })) } : {}),
+    // Forward images as base64 data URIs for multimodal LLM processing
+    ...(images && images.length > 0 ? { images: images.slice(0, 10) } : {})
   };
 
   // ------------------------------------------------------------------
