@@ -250,6 +250,7 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             selected_jobs = null,
             selected_workflows = null,
             images = null,
+            image_attachments = null,
             files = null,
             auto_submit_preference = null,
             target_agent = null,
@@ -438,6 +439,7 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 selected_jobs,
                 selected_workflows,
                 images,
+                image_attachments,
                 files: validatedFiles,
                 auto_submit_preference,
                 target_agent,
@@ -493,6 +495,7 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 selected_jobs,
                 selected_workflows,
                 images,
+                image_attachments,
                 files: validatedFiles,
                 auto_submit_preference,
                 target_agent,
@@ -932,6 +935,7 @@ router.get('/rag/queue/stats', requireAuth, async (req, res) => {
     }
 });
 
+// DEPRECATED: Part of the RAG pipeline which is no longer used by the frontend.
 router.post('/rag/job/:jobId/abort', requireAuth, async (req, res) => {
     const logger = createLogger('RagJobAbort');
     try {
@@ -1173,7 +1177,9 @@ router.post('/copilot-stream', requireAuth, async (req, res) => {
 });
 
 // ========== RAG (RETRIEVAL AUGMENTED GENERATION) ENDPOINTS ==========
-// Document retrieval and enhanced chat with external knowledge
+// DEPRECATED: Frontend no longer calls these endpoints. All submissions
+// now go through /copilot-agent. These routes are kept temporarily for
+// backward compatibility and can be removed in a follow-up cleanup.
 
 router.post('/rag', requireAuth, async (req, res) => {
     const logger = createLogger('RagRoute', req.body.session_id);
@@ -1355,6 +1361,8 @@ router.post('/rag/stream', requireAuth, async (req, res) => {
     }
 });
 
+// DEPRECATED: Images are now sent through /copilot-agent via the images[] field.
+// This route is kept temporarily for backward compatibility.
 router.post('/chat-image', requireAuth, async (req, res) => {
     try {
         const { query, model, session_id, system_prompt, save_chat = true, image } = req.body;
