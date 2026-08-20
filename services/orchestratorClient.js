@@ -143,6 +143,16 @@ function _buildCallEnvelope(toolName, resultForUi) {
 }
 
 // ---------------------------------------------------------------------------
+// Card classification is now limited to interactive cards only (workflow,
+// plan, clarification).  Data query, workspace browse, jobs browse, and
+// file metadata cards have been removed — agents now include actionable
+// markdown links directly in their text responses.
+//
+// Interactive cards (workflow, plan, clarification) are built inline in
+// their respective event handlers below, not via a classifier function.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Event mapping: orchestrator event types → gateway SSE event types
 // ---------------------------------------------------------------------------
 //
@@ -347,23 +357,40 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       break;
 
     // -- Planning agent events --
-    case 'ask_questions':
+    case 'ask_questions': {
+      const clarificationCard = {
+        card_type: 'clarification',
+        card_payload: {
+          questions: eventData.questions || [],
+          agent: eventData.agent || 'planning',
+        }
+      };
       emitSSE(responseStream, 'ask_questions', {
         questions: eventData.questions || [],
         agent: eventData.agent || 'planning',
+        card: clarificationCard,
         timestamp: new Date().toISOString()
       });
+      state.card = clarificationCard;
       break;
+    }
 
-    case 'plan_created':
+    case 'plan_created': {
+      const planCard = {
+        card_type: 'plan',
+        card_payload: eventData.plan || {},
+      };
       emitSSE(responseStream, 'plan_created', {
         plan: eventData.plan || {},
         agent: eventData.agent || 'planning',
+        card: planCard,
         timestamp: new Date().toISOString()
       });
       // Store plan on state for message persistence
       state.plan = eventData.plan || null;
+      state.card = planCard;
       break;
+    }
 
     case 'plan_step_started':
       emitSSE(responseStream, 'plan_step_started', {
@@ -1163,6 +1190,33 @@ async function executeOrchestratorLoop(opts) {
     });
   }
 
+  // ------------------------------------------------------------------
+  // Attach card object for frontend card rendering.
+  //
+  // The card may have been set during SSE streaming (synthesis_chunk,
+  // plan_created, ask_questions), or we build it here for workflows
+  // and non-streamed responses.
+  // ------------------------------------------------------------------
+  if (workflowId) {
+    // Build workflow card from the workflow metadata we just attached
+    const wfCard = {
+      card_type: assistantMessage.workflow?.persisted === false ? 'workflow_error' : 'workflow',
+      card_payload: {
+        workflow_id: workflowId,
+        workflow_name: workflowName || 'Workflow',
+        status: workflowStatus,
+        persisted: !!workflowPersisted,
+        auto_submitted: wasAutoSubmitted,
+        submission_ids: submissionIds,
+        step_count: steps.length,
+      }
+    };
+    assistantMessage.card = wfCard;
+  } else if (state.card) {
+    // Card was set during streaming (plan_created, ask_questions)
+    assistantMessage.card = state.card;
+  }
+
   // Save to database
   if (save_chat && session_id) {
     try {
@@ -1220,6 +1274,9 @@ async function executeOrchestratorLoop(opts) {
       };
       if (state.lastResultForUi) {
         payload.call = _buildCallEnvelope(state.lastToolName, state.lastResultForUi);
+        if (state.card) {
+          payload.card = state.card;
+        }
       }
       emitSSE(responseStream, 'final_response', payload);
     }

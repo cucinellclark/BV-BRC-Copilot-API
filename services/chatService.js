@@ -709,12 +709,6 @@ async function runModelStream(ctx, modelData, onChunk) {
 
   // ---------------------- request-based models ----------------------
   if (modelData.queryType === 'request') {
-    // Ensure the URL ends with /chat/completions (matching non-streaming behavior)
-    let streamUrl = modelData.endpoint.replace(/\/+$/, '');
-    if (!streamUrl.endsWith('/chat/completions')) {
-      streamUrl += '/chat/completions';
-    }
-
     // Build the same payload used in runModel
     const payload = {
       model: ctx.model,
@@ -727,7 +721,7 @@ async function runModelStream(ctx, modelData, onChunk) {
     };
 
     // Utilize streaming POST helper
-    await postJsonStream(streamUrl, payload, onChunk, modelData.apiKey);
+    await postJsonStream(modelData.endpoint, payload, onChunk, modelData.apiKey);
     return;
   }
 
