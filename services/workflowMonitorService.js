@@ -185,6 +185,27 @@ async function checkAndHandleWorkflow(watch, collection) {
   }
 
   // ----- Terminal state reached -----
+  // Atomically mark the watch as completed.  If another path (e.g. the
+  // /workflow-complete webhook) already marked it, the update matches
+  // zero documents and we skip writing a duplicate completion message.
+  const markResult = await collection.updateOne(
+    { _id: watch._id, status: 'active' },
+    {
+      $set: {
+        status: state === 'FAILED' ? 'failed' : 'completed',
+        gowe_state: state,
+        completed_at: new Date()
+      }
+    }
+  );
+  if (markResult.matchedCount === 0) {
+    logger.info('Watch already handled (likely by webhook), skipping', {
+      submission_id,
+      state
+    });
+    return true;  // Terminal but already processed
+  }
+
   logger.info('Workflow reached terminal state', {
     submission_id,
     workflow_id: watch.workflow_id,
@@ -196,18 +217,35 @@ async function checkAndHandleWorkflow(watch, collection) {
   const status = state.toLowerCase();  // "completed", "failed", "cancelled"
   const workflowName = submission.workflow_name || submission.workflow_id || watch.workflow_id || submission_id;
 
-  // Map GoWe step instances to the format expected by the webhook handler
-  const steps = (submission.step_instances || []).map(si => ({
-    step_name: si.step_id || si.name || 'unknown',
-    app: si.cwl_step || '',
-    status: (si.state || '').toLowerCase() === 'completed' ? 'succeeded'
-          : (si.state || '').toLowerCase() === 'failed' ? 'failed'
-          : (si.state || '').toLowerCase(),
-    elapsed_time: si.elapsed_time || null,
-    error_message: si.error || null
-  }));
+  // Map GoWe step instances to the format expected by the webhook handler.
+  // GoWe reports step states as uppercase (COMPLETED, FAILED) — normalize
+  // to lowercase and map 'completed' to 'succeeded' for consistency with
+  // the BV-BRC convention used by the webhook handler.
+  const steps = (submission.step_instances || []).map(si => {
+    const rawState = (si.state || '').toLowerCase();
+    let stepStatus;
+    if (rawState === 'completed' || rawState === 'succeeded') {
+      stepStatus = 'succeeded';
+    } else if (rawState === 'failed') {
+      stepStatus = 'failed';
+    } else {
+      stepStatus = rawState;
+    }
+    return {
+      step_name: si.step_id || si.name || 'unknown',
+      app: si.cwl_step || '',
+      status: stepStatus,
+      elapsed_time: si.elapsed_time || null,
+      error_message: si.error || null
+    };
+  });
 
-  const outputPaths = submission.output_paths || [];
+  // Use output_paths from GoWe response.  Fall back to the submission's
+  // configured output_path (from the original job submission inputs).
+  let outputPaths = submission.output_paths || [];
+  if (outputPaths.length === 0 && submission.output_path) {
+    outputPaths = [submission.output_path];
+  }
 
   // Build the chat completion message (same logic as the /workflow-complete webhook)
   const completionMessage = buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds);
@@ -284,17 +322,9 @@ async function checkAndHandleWorkflow(watch, collection) {
     logger.info(`Pushed workflow_complete SSE to ${pushed} active stream(s)`, { session_id });
   }
 
-  // Mark watch as completed
-  await collection.updateOne(
-    { _id: watch._id },
-    {
-      $set: {
-        status: state === 'FAILED' ? 'failed' : 'completed',
-        gowe_state: state,
-        completed_at: new Date()
-      }
-    }
-  );
+  // Watch was already marked completed atomically at the top of this
+  // function (the atomic update prevents duplicate messages from both
+  // the webhook and poller).
 
   return true;
 }
@@ -365,10 +395,10 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
 
   if (status === 'completed' || status === 'succeeded') {
     const stepSummaries = steps
-      .filter(s => s.status === 'succeeded')
+      .filter(s => s.status === 'succeeded' || s.status === 'completed')
       .map(s => {
         const elapsed = s.elapsed_time ? ` (${s.elapsed_time})` : '';
-        return `${s.step_name} [${s.app}]${elapsed}`;
+        return `${s.step_name}${s.app ? ' [' + s.app + ']' : ''}${elapsed}`;
       })
       .join(', ');
 
@@ -376,9 +406,9 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
       ? outputPaths.join(', ')
       : 'your workspace';
 
-    return `Your **${workflowName}** job has completed successfully.${jobIdSuffix} ` +
-      `Steps completed: ${stepSummaries || 'none'}. ` +
-      `Results are available in your workspace at ${pathList}.`;
+    return `Your **${workflowName}** job has completed successfully.${jobIdSuffix}` +
+      (stepSummaries ? ` Steps completed: ${stepSummaries}.` : '') +
+      ` Results are available in your workspace at ${pathList}.`;
 
   } else if (status === 'failed') {
     const failedStep = steps.find(s => s.status === 'failed');
@@ -386,7 +416,7 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
     const errorMsg = failedStep?.error_message || 'unknown error';
 
     const completedSteps = steps
-      .filter(s => s.status === 'succeeded')
+      .filter(s => s.status === 'succeeded' || s.status === 'completed')
       .map(s => {
         const elapsed = s.elapsed_time ? ` (${s.elapsed_time})` : '';
         return `${s.step_name} [${s.app}]${elapsed}`;
