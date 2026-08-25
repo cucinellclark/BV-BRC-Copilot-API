@@ -2560,6 +2560,7 @@ router.get('/workflow-watch/:submissionId/status', requireAuth, async (req, res)
             workflow_id: watch.workflow_id,
             status: watch.status,           // "active" | "completed" | "failed"
             gowe_state: watch.gowe_state,   // "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"
+            external_ids: watch.external_ids || [],
             plan_id: watch.plan_id || null,
             step_id: watch.step_id || null,
             step_index: watch.step_index,
@@ -2569,6 +2570,42 @@ router.get('/workflow-watch/:submissionId/status', requireAuth, async (req, res)
 
     } catch (error) {
         logger.error('Error checking workflow watch status', { error: error.message });
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Session workflow watches -- returns all workflow watches for a given
+// chat session, including external_ids (BV-BRC job IDs).
+// ---------------------------------------------------------------------------
+router.get('/session/:sessionId/workflow-watches', requireAuth, async (req, res) => {
+    const logger = createLogger('SessionWorkflowWatches');
+    try {
+        const { sessionId } = req.params;
+        if (!sessionId) {
+            return res.status(400).json({ error: 'sessionId is required' });
+        }
+
+        const db = await connectToDatabase();
+        const watches = await db.collection('workflow_watches').find({
+            session_id: sessionId
+        }).sort({ created_at: -1 }).toArray();
+
+        const results = watches.map(w => ({
+            submission_id: w.submission_id,
+            workflow_id: w.workflow_id,
+            status: w.status,
+            gowe_state: w.gowe_state,
+            external_ids: w.external_ids || [],
+            created_at: w.created_at,
+            completed_at: w.completed_at,
+            last_checked: w.last_checked
+        }));
+
+        return res.json({ watches: results, count: results.length });
+
+    } catch (error) {
+        logger.error('Error fetching session workflow watches', { error: error.message });
         return res.status(500).json({ error: 'Internal server error' });
     }
 });
