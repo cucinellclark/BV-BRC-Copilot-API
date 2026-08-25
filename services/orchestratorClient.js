@@ -414,6 +414,17 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       });
       break;
 
+    case 'plan_step_needs_input':
+      emitSSE(responseStream, 'plan_step_needs_input', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        question: eventData.question,
+        agent: eventData.agent,
+        timestamp: new Date().toISOString()
+      });
+      break;
+
     case 'plan_step_failed':
       emitSSE(responseStream, 'plan_step_failed', {
         plan_id: eventData.plan_id,
@@ -424,30 +435,33 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       });
       break;
 
-    case 'plan_review_ready':
-      emitSSE(responseStream, 'plan_review_ready', {
-        plan_id: eventData.plan_id,
-        step_id: eventData.step_id,
-        step_index: eventData.step_index,
-        review_config: eventData.review_config || {},
-        source_data: eventData.source_data || {},
-        prompt: eventData.prompt || 'Review the results before continuing.',
-        timestamp: new Date().toISOString()
-      });
-      break;
+    // plan_review_ready is no longer emitted — review steps have been removed.
 
-    case 'plan_workflow_submitted':
+    case 'plan_workflow_submitted': {
+      const planSubIds = (Array.isArray(eventData.submission_ids) && eventData.submission_ids.length > 0)
+        ? eventData.submission_ids
+        : (eventData.submission_id ? [eventData.submission_id] : []);
       emitSSE(responseStream, 'plan_workflow_submitted', {
         plan_id: eventData.plan_id,
         step_id: eventData.step_id,
         step_index: eventData.step_index,
         workflow_id: eventData.workflow_id,
         submission_id: eventData.submission_id,
-        submission_ids: eventData.submission_ids || [],
+        submission_ids: planSubIds,
         result_summary: eventData.result_summary || '',
         timestamp: new Date().toISOString()
       });
+      // Store on state so the post-stream workflow tracking block
+      // can register watches and add IDs to the session.
+      state.planWorkflowSubmissions = state.planWorkflowSubmissions || [];
+      for (const sid of planSubIds) {
+        state.planWorkflowSubmissions.push({
+          submission_id: sid,
+          workflow_id: eventData.workflow_id || '',
+        });
+      }
       break;
+    }
 
     default:
       // Unknown event type — log but don't crash
@@ -1035,14 +1049,14 @@ async function executeOrchestratorLoop(opts) {
     assistantContentEmpty &&
     (assistantToolName.indexOf('ask_clarification') !== -1 || assistantToolName.indexOf('bvbrc_server.ask_clarification') !== -1);
 
-  // Review steps and continue_review actions produce empty response_text
-  // because the PlanCard renders the interactive review panel directly.
-  const isPlanReviewStep =
+  // Plan step execution actions (execute_next) produce empty response_text
+  // because the PlanCard handles step status updates directly.
+  const isPlanStepAction =
     assistantContentEmpty &&
     workflow_context &&
-    (workflow_context.plan_action === 'execute_next' || workflow_context.plan_action === 'continue_review');
+    workflow_context.plan_action === 'execute_next';
 
-  if (isPlanningAskQuestions || isPlanningAnswerQuestions || isAskClarificationTool || isPlanReviewStep) {
+  if (isPlanningAskQuestions || isPlanningAnswerQuestions || isAskClarificationTool || isPlanStepAction) {
     assistantMessage._skip_persist = true;
   }
 
@@ -1093,7 +1107,9 @@ async function executeOrchestratorLoop(opts) {
   const workflowStatus = wasAutoSubmitted ? 'pending' : 'planned';
 
   // Collect all submission IDs (batch support)
-  const submissionIds = rui.submission_ids || (rui.submission_id ? [rui.submission_id] : []);
+  const submissionIds = (Array.isArray(rui.submission_ids) && rui.submission_ids.length > 0)
+    ? rui.submission_ids
+    : (rui.submission_id ? [rui.submission_id] : []);
 
   if (workflowId && workflowPersisted) {
     assistantMessage.workflow = {
@@ -1133,7 +1149,9 @@ async function executeOrchestratorLoop(opts) {
     // Register workflow watches so the Bull queue poller monitors completion.
     // Handles both single (submission_id) and batch (submission_ids) submissions.
     if (wasAutoSubmitted && session_id) {
-      const submissionIds = rui.submission_ids || (rui.submission_id ? [rui.submission_id] : []);
+      const submissionIds = (Array.isArray(rui.submission_ids) && rui.submission_ids.length > 0)
+        ? rui.submission_ids
+        : (rui.submission_id ? [rui.submission_id] : []);
       for (const subId of submissionIds) {
         registerWorkflowWatch({
           submission_id: subId,
@@ -1191,28 +1209,47 @@ async function executeOrchestratorLoop(opts) {
   }
 
   // ------------------------------------------------------------------
+  // Plan-step workflow submissions: register watches and track on session.
+  //
+  // When a plan step submits workflows (via plan_workflow_submitted event),
+  // the submission IDs are stored on state.planWorkflowSubmissions.
+  // Register workflow watches and add IDs to the session so the
+  // "View Session Jobs" panel can find them.
+  // ------------------------------------------------------------------
+  if (state.planWorkflowSubmissions && state.planWorkflowSubmissions.length > 0 && session_id) {
+    for (const sub of state.planWorkflowSubmissions) {
+      registerWorkflowWatch({
+        submission_id: sub.submission_id,
+        workflow_id: sub.workflow_id,
+        session_id,
+        user_id: user_id || '',
+        auth_token: auth_token || null,
+      }).catch(err => {
+        sessionLogger.warn('Failed to register plan workflow watch', {
+          submission_id: sub.submission_id,
+          error: err.message
+        });
+      });
+      addWorkflowIdToSession(session_id, sub.submission_id).catch(() => {});
+    }
+    // Also attach submission_ids to the assistant message for frontend display
+    assistantMessage.submission_ids = state.planWorkflowSubmissions.map(s => s.submission_id);
+    sessionLogger.info('Registered plan-step workflow watches', {
+      count: state.planWorkflowSubmissions.length,
+      submission_ids: assistantMessage.submission_ids
+    });
+  }
+
+  // ------------------------------------------------------------------
   // Attach card object for frontend card rendering.
   //
   // The card may have been set during SSE streaming (synthesis_chunk,
   // plan_created, ask_questions), or we build it here for workflows
   // and non-streamed responses.
   // ------------------------------------------------------------------
-  if (workflowId) {
-    // Build workflow card from the workflow metadata we just attached
-    const wfCard = {
-      card_type: assistantMessage.workflow?.persisted === false ? 'workflow_error' : 'workflow',
-      card_payload: {
-        workflow_id: workflowId,
-        workflow_name: workflowName || 'Workflow',
-        status: workflowStatus,
-        persisted: !!workflowPersisted,
-        auto_submitted: wasAutoSubmitted,
-        submission_ids: submissionIds,
-        step_count: steps.length,
-      }
-    };
-    assistantMessage.card = wfCard;
-  } else if (state.card) {
+  // Workflow cards removed — agents use inline text for submission confirmations.
+  // Only plan/clarification cards (set during streaming) are forwarded.
+  if (state.card) {
     // Card was set during streaming (plan_created, ask_questions)
     assistantMessage.card = state.card;
   }

@@ -160,10 +160,23 @@ async function checkAndHandleWorkflow(watch, collection) {
 
   const state = (submission.state || '').toUpperCase();
 
-  // Update last-known state
+  // Extract external_ids from task-level data (e.g., BV-BRC job IDs)
+  const externalIds = (submission.tasks || [])
+    .filter(t => t.external_id)
+    .map(t => ({
+      task_id: t.id || '',
+      step_id: t.step_id || '',
+      external_id: t.external_id
+    }));
+
+  // Update last-known state and external_ids on every poll
+  const updateFields = { gowe_state: state, last_checked: new Date() };
+  if (externalIds.length > 0) {
+    updateFields.external_ids = externalIds;
+  }
   await collection.updateOne(
     { _id: watch._id },
-    { $set: { gowe_state: state, last_checked: new Date() } }
+    { $set: updateFields }
   );
 
   // Not terminal yet — keep watching
@@ -197,7 +210,7 @@ async function checkAndHandleWorkflow(watch, collection) {
   const outputPaths = submission.output_paths || [];
 
   // Build the chat completion message (same logic as the /workflow-complete webhook)
-  const completionMessage = buildCompletionMessage(status, workflowName, steps, outputPaths);
+  const completionMessage = buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds);
 
   // Build message document
   const messageId = uuidv4();
@@ -216,6 +229,7 @@ async function checkAndHandleWorkflow(watch, collection) {
       workflow_name: workflowName,
       status: status,
       output_paths: outputPaths,
+      external_ids: externalIds,
       completed_at: submission.completed_at || new Date().toISOString(),
       steps: steps,
       step_count: steps.length,
@@ -257,6 +271,7 @@ async function checkAndHandleWorkflow(watch, collection) {
     workflow_name: workflowName,
     status: status,
     output_paths: outputPaths,
+    external_ids: externalIds,
     steps: steps,
     message_id: messageId,
     timestamp: new Date().toISOString(),
@@ -342,7 +357,12 @@ async function fetchGoWeSubmission(submissionId, authToken) {
 // Message builder (mirrors /workflow-complete webhook logic)
 // ---------------------------------------------------------------------------
 
-function buildCompletionMessage(status, workflowName, steps, outputPaths) {
+function buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds) {
+  // Build a job ID suffix for the message (shows BV-BRC job IDs if available)
+  const jobIdSuffix = (externalIds && externalIds.length > 0)
+    ? ` Job ID${externalIds.length > 1 ? 's' : ''}: ${externalIds.map(e => e.external_id).join(', ')}.`
+    : '';
+
   if (status === 'completed' || status === 'succeeded') {
     const stepSummaries = steps
       .filter(s => s.status === 'succeeded')
@@ -356,7 +376,7 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths) {
       ? outputPaths.join(', ')
       : 'your workspace';
 
-    return `Your workflow **${workflowName}** has completed successfully. ` +
+    return `Your **${workflowName}** job has completed successfully.${jobIdSuffix} ` +
       `Steps completed: ${stepSummaries || 'none'}. ` +
       `Results are available in your workspace at ${pathList}.`;
 
@@ -373,15 +393,15 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths) {
       })
       .join(', ');
 
-    return `Your workflow **${workflowName}** has failed. ` +
+    return `Your **${workflowName}** job has failed.${jobIdSuffix} ` +
       `${failedName} encountered an error: ${errorMsg}.` +
       (completedSteps ? ` Successfully completed steps: ${completedSteps}.` : '');
 
   } else if (status === 'cancelled') {
-    return `Your workflow **${workflowName}** was cancelled.`;
+    return `Your **${workflowName}** job was cancelled.${jobIdSuffix}`;
 
   } else {
-    return `Your workflow **${workflowName}** finished with status: ${status}.`;
+    return `Your **${workflowName}** job finished with status: ${status}.${jobIdSuffix}`;
   }
 }
 
