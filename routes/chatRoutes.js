@@ -2740,6 +2740,21 @@ router.post('/workflow-complete', async (req, res) => {
         // --- Write to MongoDB ---
         await addMessagesToSession(session_id, [message]);
 
+        // Mark the workflow watch as completed so the poller doesn't
+        // write a duplicate completion message.
+        try {
+            const { connectToDatabase } = require('../services/database');
+            const db = await connectToDatabase();
+            const watchCollection = db.collection('workflow_watches');
+            const terminalStatus = (status === 'failed') ? 'failed' : 'completed';
+            await watchCollection.updateMany(
+                { workflow_id: workflow_id, status: 'active' },
+                { $set: { status: terminalStatus, gowe_state: status.toUpperCase(), completed_at: new Date() } }
+            );
+        } catch (watchErr) {
+            webhookLogger.warn('Failed to mark workflow watch as completed', { workflow_id, error: watchErr.message });
+        }
+
         webhookLogger.info(`Completion message written to session ${session_id} for workflow ${workflow_id}`);
 
         // --- Push SSE event to active streams (if any) ---
