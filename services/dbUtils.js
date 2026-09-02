@@ -986,6 +986,49 @@ async function updatePlanInSession(sessionId, planId, updatedPlan) {
   }
 }
 
+/**
+ * Set the active_job_id on a chat session (turn started).
+ * @param {string} sessionId
+ * @param {string} jobId - UUID of the in-request turn
+ */
+async function setSessionActiveJob(sessionId, jobId) {
+  try {
+    if (!sessionId || !jobId) return null;
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    return await chatCollection.updateOne(
+      { session_id: sessionId },
+      { $set: { active_job_id: jobId, last_modified: new Date() } }
+    );
+  } catch (error) {
+    // Best-effort — don't crash the turn if Mongo is slow
+    console.warn('Failed to set active_job_id', { sessionId, jobId, error: error.message });
+    return null;
+  }
+}
+
+/**
+ * Clear the active_job_id on a chat session (turn ended).
+ * Only clears if the stored value matches — prevents a late-finishing
+ * turn from clearing a newer turn's job_id.
+ * @param {string} sessionId
+ * @param {string} jobId - The job_id to match
+ */
+async function clearSessionActiveJob(sessionId, jobId) {
+  try {
+    if (!sessionId || !jobId) return null;
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    return await chatCollection.updateOne(
+      { session_id: sessionId, active_job_id: jobId },
+      { $unset: { active_job_id: '' }, $set: { last_modified: new Date() } }
+    );
+  } catch (error) {
+    console.warn('Failed to clear active_job_id', { sessionId, jobId, error: error.message });
+    return null;
+  }
+}
+
 module.exports = {
   getModelData,
   getActiveModels,
@@ -1021,5 +1064,7 @@ module.exports = {
   deleteFileMetadata,
   getSessionStorageSize,
   getUserWorkflowIds,
-  updatePlanInSession
+  updatePlanInSession,
+  setSessionActiveJob,
+  clearSessionActiveJob
 };

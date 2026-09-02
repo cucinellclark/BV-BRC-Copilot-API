@@ -5,7 +5,7 @@ const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const { connectToDatabase } = require('../services/database');
 const ChatService = require('../services/chatService');
-const AgentOrchestrator = require('../services/agentOrchestrator');
+// agentOrchestrator.js deleted — chat runs in-request via chatRunner.js
 const {
   getModelData,
   getChatSession,
@@ -29,11 +29,12 @@ const {
 const { requireAuth, resolveUserId } = require('../middleware/auth');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
-const { addAgentJob, getJobStatus, getQueueStats, registerStreamCallback, abortJob } = require('../services/queueService');
-const { addRagJob, getRagJobStatus, getRagQueueStats, registerRagStreamCallback, abortRagJob } = require('../services/ragQueueService');
+// queueService.js — only import what's still needed (abort route uses setCancelFlag from chatRunner instead)
+// ragQueueService.js deleted — RAG routes removed
 const { writeSseEvent } = require('../services/sseUtils');
 const { executeMcpTool, isReplayableTool } = require('../services/mcp/mcpExecutor');
 const { register: registerSessionStream, unregister: unregisterSessionStream, pushToSession } = require('../services/sessionStreamRegistry');
+const { runChatTurn, setCancelFlag } = require('../services/chatRunner');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -48,26 +49,7 @@ function parseBooleanFlag(value, defaultValue = false) {
     return defaultValue;
 }
 
-function parseRagRequestPayload(body = {}) {
-    const query = typeof body.query === 'string' ? body.query.trim() : '';
-    const model = typeof body.model === 'string' ? body.model.trim() : '';
-    const user_id = typeof body.user_id === 'string' ? body.user_id.trim() : body.user_id;
-    const session_id = typeof body.session_id === 'string' ? body.session_id.trim() : body.session_id;
-    const rag_db = body.rag_db || body.database_name || body.db_name;
-    const parsedNumDocs = Number.parseInt(body.num_docs, 10);
-    const num_docs = Number.isInteger(parsedNumDocs) && parsedNumDocs > 0 ? parsedNumDocs : null;
-    const save_chat = parseBooleanFlag(body.save_chat, true);
-
-    return {
-        query,
-        model,
-        user_id,
-        session_id,
-        rag_db,
-        num_docs,
-        save_chat
-    };
-}
+// parseRagRequestPayload removed — RAG routes deleted
 
 function buildGridEnvelope(entityType, opts = {}) {
     return {
@@ -252,6 +234,7 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             images = null,
             image_attachments = null,
             files = null,
+            pdfs = null,
             auto_submit_preference = null,
             target_agent = null,
             workflow_context = null
@@ -265,15 +248,20 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
         // Use the token from the validated Authorization header, not from the request body
         const auth_token = req.authToken || null;
 
-        // Validate attached files
+        // Validate attached files (10 MB cap, null-byte rejection)
         let validatedFiles = null;
         if (Array.isArray(files) && files.length > 0) {
             const maxFiles = 3;
-            const maxFileSize = 100 * 1024; // 100 KB
+            const maxFileSize = 10 * 1024 * 1024; // 10 MB
             validatedFiles = files.slice(0, maxFiles).filter(f => {
                 if (!f || typeof f.content !== 'string') return false;
-                if (f.content.length > maxFileSize) {
-                    logger.warn(`File "${f.name}" exceeds 100KB limit, skipping`);
+                const byteLen = Buffer.byteLength(f.content, 'utf8');
+                if (byteLen > maxFileSize) {
+                    logger.warn(`File "${f.name}" exceeds 10 MB limit (${byteLen} bytes), skipping`);
+                    return false;
+                }
+                if (f.content.indexOf('\0') !== -1) {
+                    logger.warn(`File "${f.name}" contains null bytes (binary), skipping`);
                     return false;
                 }
                 return true;
@@ -281,9 +269,99 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 name: f.name || 'unnamed_file',
                 content: f.content,
                 mime_type: f.mime_type || 'text/plain',
-                size: f.size || f.content.length
+                size: f.size || Buffer.byteLength(f.content, 'utf8')
             }));
             if (validatedFiles.length === 0) validatedFiles = null;
+        }
+
+        // Validate attached PDFs
+        let validatedPdfs = null;
+        if (Array.isArray(pdfs) && pdfs.length > 0) {
+            const maxPdfDecodedSize = 10 * 1024 * 1024; // 10 MB decoded
+            validatedPdfs = pdfs.filter(p => {
+                if (!p || typeof p.content !== 'string') return false;
+                // Strip data URI prefix if present
+                let raw = p.content;
+                if (raw.startsWith('data:')) {
+                    const commaIdx = raw.indexOf(',');
+                    if (commaIdx !== -1) raw = raw.substring(commaIdx + 1);
+                }
+                // Estimate decoded size: base64 is ~4/3 of original
+                const estimatedBytes = Math.ceil(raw.length * 3 / 4);
+                if (estimatedBytes > maxPdfDecodedSize) {
+                    logger.warn(`PDF "${p.name}" exceeds 10 MB limit (${estimatedBytes} bytes), skipping`);
+                    return false;
+                }
+                // Verify %PDF- magic bytes in the first few decoded bytes
+                try {
+                    const head = Buffer.from(raw.substring(0, 20), 'base64');
+                    if (!head.toString('ascii', 0, 5).startsWith('%PDF-')) {
+                        logger.warn(`PDF "${p.name}" does not have PDF magic bytes, skipping`);
+                        return false;
+                    }
+                } catch (e) {
+                    logger.warn(`PDF "${p.name}" failed base64 decode check, skipping`);
+                    return false;
+                }
+                return true;
+            }).map(p => ({
+                name: p.name || 'document.pdf',
+                content: p.content,
+                mime_type: 'application/pdf',
+                size: p.size || 0
+            }));
+            if (validatedPdfs.length === 0) validatedPdfs = null;
+        }
+
+        // Enforce combined attachment cap: images + files + pdfs <= 3.
+        // Trim PDFs first, then files, then images — images are usually the
+        // page screenshot, which is the most useful context to keep. Each
+        // step recomputes its slots from the already-trimmed others, so the
+        // total always lands at or under the cap.
+        // The browser enforces 3 slots in CopilotInput.js; this is the
+        // server-side backstop for direct API calls.
+        const MAX_TOTAL_ATTACHMENTS = 3;
+        const countOf = (arr) => (Array.isArray(arr) ? arr.length : 0);
+        let validatedImages = images;
+
+        const totalAttachments = countOf(validatedImages)
+            + countOf(validatedFiles)
+            + countOf(validatedPdfs);
+        if (totalAttachments > MAX_TOTAL_ATTACHMENTS) {
+            logger.warn(`Total attachments (${totalAttachments}) exceed cap of ${MAX_TOTAL_ATTACHMENTS}, trimming`);
+
+            // 1. PDFs are dropped first.
+            const pdfSlots = Math.max(0, MAX_TOTAL_ATTACHMENTS - countOf(validatedImages) - countOf(validatedFiles));
+            if (countOf(validatedPdfs) > pdfSlots) {
+                validatedPdfs = pdfSlots > 0 ? validatedPdfs.slice(0, pdfSlots) : null;
+            }
+
+            // 2. Then text files.
+            const fileSlots = Math.max(0, MAX_TOTAL_ATTACHMENTS - countOf(validatedImages) - countOf(validatedPdfs));
+            if (countOf(validatedFiles) > fileSlots) {
+                validatedFiles = fileSlots > 0 ? validatedFiles.slice(0, fileSlots) : null;
+            }
+
+            // 3. Then images, which have the highest retention priority.
+            const imageSlots = Math.max(0, MAX_TOTAL_ATTACHMENTS - countOf(validatedFiles) - countOf(validatedPdfs));
+            if (countOf(validatedImages) > imageSlots) {
+                validatedImages = imageSlots > 0 ? validatedImages.slice(0, imageSlots) : null;
+            }
+
+            logger.warn('Attachments trimmed to cap', {
+                images: countOf(validatedImages),
+                files: countOf(validatedFiles),
+                pdfs: countOf(validatedPdfs),
+            });
+        }
+
+        // Keep image_attachments index-aligned with the (possibly trimmed)
+        // images — orchestratorClient reads metaArray[i] per image.
+        let validatedImageAttachments = image_attachments;
+        if (Array.isArray(validatedImageAttachments)
+            && validatedImageAttachments.length > countOf(validatedImages)) {
+            const keep = countOf(validatedImages);
+            validatedImageAttachments = keep > 0 ? validatedImageAttachments.slice(0, keep) : null;
         }
 
         // Validate required fields
@@ -318,10 +396,12 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             selected_jobs_count: Array.isArray(selected_jobs) ? selected_jobs.length : 0,
             has_selected_workflows: !!selected_workflows,
             selected_workflows_count: Array.isArray(selected_workflows) ? selected_workflows.length : 0,
-            has_images: Array.isArray(images) && images.length > 0,
-            images_count: Array.isArray(images) ? images.length : 0,
-            has_files: !!(validatedFiles && validatedFiles.length > 0),
-            files_count: validatedFiles ? validatedFiles.length : 0
+            has_images: countOf(validatedImages) > 0,
+            images_count: countOf(validatedImages),
+            has_files: countOf(validatedFiles) > 0,
+            files_count: countOf(validatedFiles),
+            has_pdfs: countOf(validatedPdfs) > 0,
+            pdfs_count: countOf(validatedPdfs)
         });
 
         // Log workspace items if present
@@ -336,96 +416,15 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             });
         }
 
-        console.log('[ROUTE DEBUG] Stream parameter value:', stream, 'type:', typeof stream);
-
         if (stream) {
-            // ========== STREAMING PATH ==========
-            console.log('[ROUTE DEBUG] Entering streaming path');
-            logger.debug('Using streaming response with queue');
+            // ========== STREAMING PATH (in-request, no Bull) ==========
+            logger.info('Running chat turn in-request', { session_id, user_id });
 
-            // Set SSE headers
-            res.set({
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache, no-transform',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no'
-            });
-
-            // Flush headers immediately
-            if (typeof res.flushHeaders === 'function') {
-                res.flushHeaders();
-            }
-
-            console.log('[ROUTE DEBUG] SSE headers set and flushed');
-
-            // Track if connection is still open
-            let contentChunkCount = 0;
-            let callbackInvocations = 0;
-            let heartbeatInterval = null;
-            console.log('[ROUTE DEBUG] Initial state - res.writableEnded:', res.writableEnded, 'res.destroyed:', res.destroyed);
-
-            // Register this SSE stream so out-of-band events (e.g.
-            // workflow completion webhooks) can push to this session.
-            registerSessionStream(session_id, res);
-
-            // Handle client disconnect (for cleanup only)
-            req.on('close', () => {
-                console.log('[ROUTE DEBUG] req.on(close) fired. Content chunks sent:', contentChunkCount, 'callback invocations:', callbackInvocations);
-                logger.info('Client disconnected from stream', { session_id });
-                unregisterSessionStream(session_id, res);
-                if (heartbeatInterval) {
-                    clearInterval(heartbeatInterval);
-                    heartbeatInterval = null;
-                }
-                // Job continues in background, result saved to DB
-            });
-
-            // Create streaming callback
-            const streamCallback = (eventType, data) => {
-                callbackInvocations++;
-
-                // Only check response object state, not req events (which can be unreliable for SSE)
-                if (res.writableEnded || res.destroyed) {
-                    // Only log non-content events to reduce noise
-                    if (eventType !== 'final_response' && eventType !== 'content') {
-                        console.log('[ROUTE DEBUG] Response ended or destroyed, skipping write for event:', eventType);
-                    }
-                    return; // Connection closed, stop trying to write
-                }
-
-                try {
-                    // Write SSE event
-                    if (eventType === 'final_response' || eventType === 'content') {
-                        contentChunkCount++;
-                    } else {
-                        console.log('[ROUTE DEBUG] Writing SSE event to response:', eventType);
-                    }
-                    writeSseEvent(res, eventType, data);
-
-                    // Close stream on terminal events
-                    if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
-                        console.log('[ROUTE DEBUG] Stream ending. Total content chunks sent:', contentChunkCount);
-                        res.end();
-                    }
-                } catch (error) {
-                    logger.error('Failed to write to stream', {
-                        error: error.message,
-                        eventType
-                    });
-                    // Stream will be closed naturally, no need to track state
-                }
-            };
-
-            // Send initial connection confirmation
-            res.write(': connected\n\n');
-            if (typeof res.flush === 'function') {
-                res.flush();
-            }
-            console.log('[ROUTE DEBUG] Initial connection confirmation sent');
-
-            // Add job to queue with streaming callback
-            console.log('[ROUTE DEBUG] About to add job to queue');
-            const job = await addAgentJob({
+            // runChatTurn sets up SSE headers, heartbeat, and calls
+            // executeOrchestratorLoop directly. Session switch closes
+            // the SSE stream but does NOT cancel the turn. Only
+            // POST /job/:id/abort sets the Redis cancel flag.
+            await runChatTurn(req, res, {
                 query,
                 model,
                 session_id,
@@ -438,82 +437,19 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 workspace_items,
                 selected_jobs,
                 selected_workflows,
-                images,
-                image_attachments,
+                images: validatedImages,
+                image_attachments: validatedImageAttachments,
                 files: validatedFiles,
+                pdfs: validatedPdfs,
                 auto_submit_preference,
                 target_agent,
-                workflow_context
-            }, {
-                streamCallback
+                workflow_context,
             });
-
-            console.log('[ROUTE DEBUG] Job added to queue, jobId:', job.id);
-            logger.info('Streaming job queued', {
-                jobId: job.id,
-                session_id,
-                user_id
-            });
-
-            // Set up heartbeat to keep connection alive
-            heartbeatInterval = setInterval(() => {
-                if (res.writableEnded || res.destroyed) {
-                    clearInterval(heartbeatInterval);
-                    return;
-                }
-
-                try {
-                    res.write(': heartbeat\n\n');
-                    if (typeof res.flush === 'function') {
-                        res.flush();
-                    }
-                } catch (error) {
-                    console.log('[ROUTE DEBUG] Heartbeat write failed:', error.message);
-                    clearInterval(heartbeatInterval);
-                }
-            }, 15000); // Every 15 seconds
-
-            // Note: Don't call res.end() here - stream stays open
-            // The streamCallback will call res.end() when job completes
 
         } else {
-            // ========== NON-STREAMING PATH (ORIGINAL) ==========
-            console.log('[ROUTE DEBUG] Entering NON-streaming path (stream is false or undefined)');
-            logger.debug('Using non-streaming response with queue');
-
-            const job = await addAgentJob({
-                query,
-                model,
-                session_id,
-                user_id,
-                system_prompt,
-                save_chat,
-                include_history,
-                max_iterations,
-                auth_token,
-                workspace_items,
-                selected_jobs,
-                selected_workflows,
-                images,
-                image_attachments,
-                files: validatedFiles,
-                auto_submit_preference,
-                target_agent,
-                workflow_context
-            });
-
-            logger.info('Agent job queued successfully', {
-                jobId: job.id,
-                session_id,
-                user_id
-            });
-
-            res.status(202).json({
-                message: 'Agent job queued successfully',
-                job_id: job.id,
-                session_id: session_id,
-                status_endpoint: `/copilot-api/chatbrc/job/${job.id}/status`,
-                poll_interval_ms: config.agent?.job_poll_interval || 1000
+            // Non-streaming path removed — all chat runs in-request via SSE.
+            res.status(400).json({
+                error: 'Non-streaming mode is no longer supported. Use stream=true.'
             });
         }
 
@@ -634,72 +570,8 @@ router.post('/mcp/replay-tool-call', requireAuth, async (req, res) => {
     }
 });
 
-// ========== JOB STATUS ROUTE ==========
-router.get('/job/:jobId/status', requireAuth, async (req, res) => {
-    const logger = createLogger('JobStatus');
-
-    try {
-        const { jobId } = req.params;
-
-        logger.info('Job status request', { jobId });
-
-        const jobStatus = await getJobStatus(jobId);
-
-        if (!jobStatus.found) {
-            logger.warn('Job not found', { jobId });
-            return res.status(404).json({
-                message: 'Job not found',
-                job_id: jobId
-            });
-        }
-
-        logger.info('Job status retrieved', {
-            jobId,
-            status: jobStatus.status,
-            progress: jobStatus.progress?.percentage || 0
-        });
-
-        res.status(200).json(jobStatus);
-
-    } catch (error) {
-        logger.error('Failed to get job status', {
-            error: error.message,
-            jobId: req.params.jobId
-        });
-
-        res.status(500).json({
-            message: 'Failed to retrieve job status',
-            error: error.message
-        });
-    }
-});
-
-// ========== QUEUE STATS ROUTE (for monitoring) ==========
-router.get('/queue/stats', requireAuth, async (req, res) => {
-    const logger = createLogger('QueueStats');
-
-    try {
-        logger.info('Queue stats request');
-
-        const stats = await getQueueStats();
-
-        res.status(200).json({
-            message: 'Queue statistics',
-            timestamp: new Date().toISOString(),
-            stats
-        });
-
-    } catch (error) {
-        logger.error('Failed to get queue stats', {
-            error: error.message
-        });
-
-        res.status(500).json({
-            message: 'Failed to retrieve queue statistics',
-            error: error.message
-        });
-    }
-});
+// GET /job/:jobId/status — removed (Bull queue status polling, dead code)
+// GET /queue/stats — removed (Bull queue monitoring, dead code)
 
 // ========== JOB ABORT ROUTE ==========
 router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
@@ -708,371 +580,33 @@ router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
     try {
         const { jobId } = req.params;
 
-        logger.info('Job abort request', { jobId });
+        logger.info('Job abort (Stop) request', { jobId });
 
-        const result = await abortJob(jobId);
+        // Set the Redis cancel flag. Any gateway instance can call this
+        // route — the flag is checked by the in-request runner's
+        // shouldCancel poll and by the orchestrator's abort logic.
+        await setCancelFlag(jobId);
 
-        if (!result.found) {
-            return res.status(404).json({
-                message: 'Job not found',
-                job_id: jobId
-            });
-        }
-
-        if (!result.success) {
-            return res.status(409).json({
-                message: result.message,
-                job_id: jobId,
-                previous_state: result.previousState,
-                note: result.note
-            });
-        }
-
-        if (result.accepted) {
-            return res.status(202).json({
-                message: result.message,
-                job_id: jobId,
-                previous_state: result.previousState,
-                note: result.note
-            });
-        }
-
-        return res.status(200).json({
-            message: result.message,
+        return res.status(202).json({
+            message: 'Stop requested',
             job_id: jobId,
-            previous_state: result.previousState
+            note: 'Cancel flag set; turn will stop at next checkpoint',
         });
     } catch (error) {
-        logger.error('Failed to abort job', {
+        logger.error('Failed to set cancel flag', {
             error: error.message,
             jobId: req.params.jobId
         });
 
         return res.status(500).json({
-            message: 'Failed to abort job',
+            message: 'Failed to request stop',
             error: error.message
         });
     }
 });
 
-// ========== STREAM RECONNECTION ENDPOINT ==========
-router.get('/job/:jobId/stream', requireAuth, async (req, res) => {
-    const logger = createLogger('JobStream');
-    const { jobId } = req.params;
-
-    try {
-        logger.info('Stream reconnection requested', { jobId });
-
-        // Set SSE headers
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-
-        res.flushHeaders();
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') {
-            res.flush();
-        }
-
-        // Get job status
-        const jobStatus = await getJobStatus(jobId);
-
-        if (!jobStatus.found) {
-            writeSseEvent(res, 'error', { message: 'Job not found' });
-            res.end();
-            return;
-        }
-
-        // Check job state
-        const state = jobStatus.status;
-
-        if (state === 'completed') {
-            // Job already done
-            logger.info('Job already completed', { jobId });
-
-            writeSseEvent(res, 'started', {
-                job_id: jobId,
-                message: 'Job already completed'
-            });
-
-            writeSseEvent(res, 'done', {
-                job_id: jobId,
-                session_id: jobStatus.data.session_id,
-                message: 'Fetch result from /get-session-messages',
-                iterations: 0,
-                tools_used: [],
-                duration_seconds: 0
-            });
-
-            res.end();
-            return;
-        }
-
-        if (state === 'failed') {
-            // Job failed
-            writeSseEvent(res, 'error', {
-                job_id: jobId,
-                error: jobStatus.error?.message || 'Job failed'
-            });
-            res.end();
-            return;
-        }
-
-        // Job is waiting or active, attach new stream callback
-        logger.info('Attaching new stream to active/waiting job', { jobId, state });
-
-        const streamCallback = (eventType, data) => {
-            // Only check response object state, not req events
-            if (res.writableEnded || res.destroyed) return;
-
-            try {
-                writeSseEvent(res, eventType, data);
-
-                if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
-                    res.end();
-                }
-            } catch (error) {
-                logger.error('Stream write failed', { error: error.message });
-            }
-        };
-
-        // Register the new callback
-        registerStreamCallback(jobId, streamCallback);
-
-        // Send current status
-        writeSseEvent(res, state === 'active' ? 'started' : 'queued', {
-            job_id: jobId,
-            status: state,
-            progress: jobStatus.progress,
-            message: state === 'active' ? 'Processing' : 'Waiting in queue',
-            session_id: jobStatus.data.session_id
-        });
-
-        // Heartbeat
-        let heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            try {
-                res.write(': heartbeat\n\n');
-                if (typeof res.flush === 'function') {
-                    res.flush();
-                }
-            } catch (error) {
-                clearInterval(heartbeatInterval);
-            }
-        }, 15000);
-
-        req.on('close', () => {
-            clearInterval(heartbeatInterval);
-            logger.info('Stream reconnection closed', { jobId });
-        });
-
-    } catch (error) {
-        logger.error('Stream reconnection failed', {
-            jobId,
-            error: error.message
-        });
-
-        try {
-            writeSseEvent(res, 'error', {
-                message: 'Stream reconnection failed',
-                error: error.message
-            });
-            res.end();
-        } catch (e) {
-            // Connection already closed
-        }
-    }
-});
-
-// ========== RAG QUEUE ROUTES ==========
-router.get('/rag/job/:jobId/status', requireAuth, async (req, res) => {
-    const logger = createLogger('RagJobStatus');
-    try {
-        const { jobId } = req.params;
-        const jobStatus = await getRagJobStatus(jobId);
-
-        if (!jobStatus.found) {
-            return res.status(404).json({
-                message: 'RAG job not found',
-                job_id: jobId
-            });
-        }
-
-        return res.status(200).json(jobStatus);
-    } catch (error) {
-        logger.error('Failed to get RAG job status', {
-            error: error.message,
-            jobId: req.params.jobId
-        });
-        return res.status(500).json({
-            message: 'Failed to retrieve RAG job status',
-            error: error.message
-        });
-    }
-});
-
-router.get('/rag/queue/stats', requireAuth, async (req, res) => {
-    const logger = createLogger('RagQueueStats');
-    try {
-        const stats = await getRagQueueStats();
-        return res.status(200).json({
-            message: 'RAG queue statistics',
-            timestamp: new Date().toISOString(),
-            stats
-        });
-    } catch (error) {
-        logger.error('Failed to get RAG queue stats', { error: error.message });
-        return res.status(500).json({
-            message: 'Failed to retrieve RAG queue statistics',
-            error: error.message
-        });
-    }
-});
-
-// DEPRECATED: Part of the RAG pipeline which is no longer used by the frontend.
-router.post('/rag/job/:jobId/abort', requireAuth, async (req, res) => {
-    const logger = createLogger('RagJobAbort');
-    try {
-        const { jobId } = req.params;
-        const result = await abortRagJob(jobId);
-
-        if (!result.found) {
-            return res.status(404).json({
-                message: 'RAG job not found',
-                job_id: jobId
-            });
-        }
-        if (!result.success) {
-            return res.status(409).json({
-                message: result.message,
-                job_id: jobId,
-                previous_state: result.previousState
-            });
-        }
-        return res.status(200).json({
-            message: result.message,
-            job_id: jobId,
-            previous_state: result.previousState
-        });
-    } catch (error) {
-        logger.error('Failed to abort RAG job', {
-            error: error.message,
-            jobId: req.params.jobId
-        });
-        return res.status(500).json({
-            message: 'Failed to abort RAG job',
-            error: error.message
-        });
-    }
-});
-
-router.get('/rag/job/:jobId/stream', requireAuth, async (req, res) => {
-    const logger = createLogger('RagJobStream');
-    const { jobId } = req.params;
-
-    try {
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-        res.flushHeaders();
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') {
-            res.flush();
-        }
-
-        const jobStatus = await getRagJobStatus(jobId);
-        if (!jobStatus.found) {
-            writeSseEvent(res, 'error', { message: 'RAG job not found' });
-            res.end();
-            return;
-        }
-
-        const state = jobStatus.status;
-        if (state === 'completed') {
-            writeSseEvent(res, 'final_response', {
-                job_id: jobId,
-                response: jobStatus.result?.response || null
-            });
-            writeSseEvent(res, 'done', {
-                job_id: jobId,
-                session_id: jobStatus.data?.session_id || null
-            });
-            res.end();
-            return;
-        }
-        if (state === 'failed' || state === 'cancelled') {
-            writeSseEvent(res, 'error', {
-                job_id: jobId,
-                error: jobStatus.error?.message || `RAG job ${state}`
-            });
-            res.end();
-            return;
-        }
-
-        const streamCallback = (eventType, data) => {
-            if (res.writableEnded || res.destroyed) return;
-            try {
-                writeSseEvent(res, eventType, data);
-                if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
-                    res.end();
-                }
-            } catch (streamError) {
-                logger.error('RAG stream write failed', { error: streamError.message });
-            }
-        };
-
-        registerRagStreamCallback(jobId, streamCallback);
-        writeSseEvent(res, state === 'active' ? 'started' : 'queued', {
-            job_id: jobId,
-            status: state,
-            progress: jobStatus.progress,
-            message: state === 'active' ? 'Processing' : 'Waiting in queue',
-            session_id: jobStatus.data?.session_id || null
-        });
-
-        let heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            try {
-                res.write(': heartbeat\n\n');
-                if (typeof res.flush === 'function') {
-                    res.flush();
-                }
-            } catch (_error) {
-                clearInterval(heartbeatInterval);
-            }
-        }, 15000);
-
-        req.on('close', () => {
-            clearInterval(heartbeatInterval);
-        });
-    } catch (error) {
-        logger.error('RAG stream reconnection failed', {
-            jobId,
-            error: error.message
-        });
-        try {
-            writeSseEvent(res, 'error', {
-                message: 'RAG stream reconnection failed',
-                error: error.message
-            });
-            res.end();
-        } catch (_e) {
-            // Connection already closed
-        }
-    }
-});
+// GET /job/:jobId/stream — removed (Bull stream reconnection, dead code)
+// All RAG queue routes removed (RAG pipeline no longer used)
 
 router.post('/chat', requireAuth, async (req, res) => {
     const logger = createLogger('ChatRoute', req.body.session_id);
@@ -1176,214 +710,7 @@ router.post('/copilot-stream', requireAuth, async (req, res) => {
     }
 });
 
-// ========== RAG (RETRIEVAL AUGMENTED GENERATION) ENDPOINTS ==========
-// DEPRECATED: Frontend no longer calls these endpoints. All submissions
-// now go through /copilot-agent. These routes are kept temporarily for
-// backward compatibility and can be removed in a follow-up cleanup.
-
-router.post('/rag', requireAuth, async (req, res) => {
-    const logger = createLogger('RagRoute', req.body.session_id);
-
-    try {
-        const {
-            query,
-            model,
-            session_id,
-            rag_db,
-            num_docs,
-            save_chat
-        } = parseRagRequestPayload(req.body);
-
-        const resolved = resolveUserId(req, req.body.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const user_id = resolved.userId;
-
-        if (!query || !model || !rag_db) {
-            return res.status(400).json({
-                message: 'Missing required fields',
-                required: ['query', 'model', 'rag_db'],
-                accepted_rag_db_fields: ['rag_db', 'database_name', 'db_name']
-            });
-        }
-
-        logger.info('RAG request received', {
-            user_id,
-            model,
-            session_id,
-            rag_db,
-            num_docs
-        });
-
-        const job = await addRagJob({
-            query,
-            rag_db,
-            num_docs,
-            user_id,
-            model,
-            session_id,
-            save_chat
-        });
-
-        logger.info('RAG job queued successfully', {
-            job_id: job.id,
-            session_id,
-            rag_db
-        });
-
-        return res.status(202).json({
-            message: 'RAG job queued successfully',
-            job_id: job.id,
-            session_id,
-            status_endpoint: `/copilot-api/chatbrc/rag/job/${job.id}/status`,
-            stream_endpoint: `/copilot-api/chatbrc/rag/job/${job.id}/stream`,
-            poll_interval_ms: config.agent?.job_poll_interval || 1000
-        });
-    } catch (error) {
-        logger.error('RAG request failed', {
-            error: error.message,
-            stack: error.stack
-        });
-        res.status(500).json({ message: 'Internal server error', error: error.message });
-    }
-});
-
-router.post('/rag/stream', requireAuth, async (req, res) => {
-    const logger = createLogger('RagStreamRoute', req.body.session_id);
-
-    try {
-        const {
-            query,
-            model,
-            session_id,
-            rag_db,
-            num_docs,
-            save_chat
-        } = parseRagRequestPayload(req.body);
-
-        const resolved = resolveUserId(req, req.body.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const user_id = resolved.userId;
-
-        if (!query || !model || !rag_db) {
-            return res.status(400).json({
-                message: 'Missing required fields',
-                required: ['query', 'model', 'rag_db'],
-                accepted_rag_db_fields: ['rag_db', 'database_name', 'db_name']
-            });
-        }
-
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
-        const streamCallback = (eventType, data) => {
-            if (res.writableEnded || res.destroyed) return;
-            try {
-                writeSseEvent(res, eventType, data);
-                if (eventType === 'done' || eventType === 'error' || eventType === 'cancelled') {
-                    res.end();
-                }
-            } catch (_error) {
-                // Connection already closed
-            }
-        };
-
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') {
-            res.flush();
-        }
-
-        const job = await addRagJob({
-            query,
-            rag_db,
-            num_docs,
-            user_id,
-            model,
-            session_id,
-            save_chat
-        }, {
-            streamCallback
-        });
-
-        logger.info('Streaming RAG job queued', {
-            jobId: job.id,
-            session_id,
-            user_id
-        });
-
-        let heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            try {
-                res.write(': heartbeat\n\n');
-                if (typeof res.flush === 'function') {
-                    res.flush();
-                }
-            } catch (_error) {
-                clearInterval(heartbeatInterval);
-            }
-        }, 15000);
-
-        req.on('close', () => {
-            clearInterval(heartbeatInterval);
-        });
-    } catch (error) {
-        logger.error('Failed to queue streaming RAG job', {
-            error: error.message,
-            stack: error.stack
-        });
-
-        if (res.headersSent) {
-            try {
-                writeSseEvent(res, 'error', {
-                    message: 'Failed to queue streaming RAG job',
-                    error: error.message
-                });
-                res.end();
-            } catch (_e) {
-                // Connection already closed
-            }
-        } else {
-            res.status(500).json({
-                message: 'Failed to queue streaming RAG job',
-                error: error.message
-            });
-        }
-    }
-});
-
-// DEPRECATED: Images are now sent through /copilot-agent via the images[] field.
-// This route is kept temporarily for backward compatibility.
-router.post('/chat-image', requireAuth, async (req, res) => {
-    try {
-        const { query, model, session_id, system_prompt, save_chat = true, image } = req.body;
-        const resolved = resolveUserId(req, req.body.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const user_id = resolved.userId;
-        const response = await ChatService.handleChatImageRequest({
-            query,
-            model,
-            session_id,
-            user_id,
-            image,
-            system_prompt,
-            save_chat
-        });
-        res.status(200).json(response);
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
+// POST /rag, POST /rag/stream, POST /chat-image — removed (deprecated, no longer called by frontend)
 
 // ========== SESSION MANAGEMENT ENDPOINTS ==========
 // Chat session creation, retrieval, and management
@@ -1555,15 +882,17 @@ router.get('/get-session-messages', requireAuth, async (req, res) => {
             items: workflowRows
         });
 
+        // Include active_job_id so the frontend knows if this session
+        // has an in-flight turn (for busy indicator / poll-on-return).
+        const activeJobId = session?.active_job_id || null;
+
         if (!includeFiles) {
             const payload = {
                 messages,
                 workflow_ids: workflowIds,
-                workflow_grid: workflowGrid
+                workflow_grid: workflowGrid,
+                active_job_id: activeJobId
             };
-            console.log('********** ENTIRE PAYLOAD TO CLIENT (without files) **********');
-            console.log(JSON.stringify(payload, null, 2));
-            console.log('********** END PAYLOAD **********');
             return res.status(200).json(payload);
         }
 
@@ -1576,6 +905,7 @@ router.get('/get-session-messages', requireAuth, async (req, res) => {
             messages,
             workflow_ids: workflowIds,
             workflow_grid: workflowGrid,
+            active_job_id: activeJobId,
             session_files: sessionFiles.files,
             session_files_pagination: {
                 total: sessionFiles.total,
@@ -1588,9 +918,6 @@ router.get('/get-session-messages', requireAuth, async (req, res) => {
                 total_size_bytes: totalSize
             }
         };
-        console.log('********** ENTIRE PAYLOAD TO CLIENT (with files) **********');
-        console.log(JSON.stringify(payload, null, 2));
-        console.log('********** END PAYLOAD **********');
         res.status(200).json(payload);
     } catch (error) {
         console.error('Error retrieving session messages:', error);
@@ -1940,41 +1267,7 @@ router.post('/answer-questions', requireAuth, async (req, res) => {
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
-        // Set SSE headers
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
-        let heartbeatInterval = null;
-        req.on('close', () => {
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
-            }
-        });
-
-        const streamCallback = (eventType, data) => {
-            if (res.writableEnded || res.destroyed) return;
-            try {
-                writeSseEvent(res, eventType, data);
-                if (eventType === 'done' || eventType === 'error') {
-                    res.end();
-                }
-            } catch (err) {
-                logger.error('Failed to write SSE event', { error: err.message });
-            }
-        };
-
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') res.flush();
-
-        const job = await addAgentJob({
+        await runChatTurn(req, res, {
             query: original_query,
             model,
             session_id,
@@ -1987,18 +1280,9 @@ router.post('/answer-questions', requireAuth, async (req, res) => {
                 plan_action: 'answer_questions',
                 clarification_answers: answers
             }
-        }, { streamCallback });
+        });
 
-        heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            res.write(': heartbeat\n\n');
-            if (typeof res.flush === 'function') res.flush();
-        }, 15000);
-
-        logger.info('Answer-questions job queued', { jobId: job.id, session_id });
+        logger.info('Answer-questions turn completed', { session_id });
 
     } catch (error) {
         logger.error('Error in answer-questions', { error: error.message });
@@ -2026,41 +1310,7 @@ router.post('/plan/:planId/approve', requireAuth, async (req, res) => {
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
-        // Set SSE headers
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
-        let heartbeatInterval = null;
-        req.on('close', () => {
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
-            }
-        });
-
-        const streamCallback = (eventType, data) => {
-            if (res.writableEnded || res.destroyed) return;
-            try {
-                writeSseEvent(res, eventType, data);
-                if (eventType === 'done' || eventType === 'error') {
-                    res.end();
-                }
-            } catch (err) {
-                logger.error('Failed to write SSE event', { error: err.message });
-            }
-        };
-
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') res.flush();
-
-        const job = await addAgentJob({
+        await runChatTurn(req, res, {
             query: `Execute step 1 of approved plan: ${plan.title}`,
             model,
             session_id,
@@ -2075,18 +1325,9 @@ router.post('/plan/:planId/approve', requireAuth, async (req, res) => {
                 current_step_index: 0,
                 completed_step_results: {}
             }
-        }, { streamCallback });
+        });
 
-        heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            res.write(': heartbeat\n\n');
-            if (typeof res.flush === 'function') res.flush();
-        }, 15000);
-
-        logger.info('Plan approval job queued', { jobId: job.id, planId, session_id });
+        logger.info('Plan approval turn completed', { planId, session_id });
 
     } catch (error) {
         logger.error('Error in plan approve', { error: error.message });
@@ -2120,41 +1361,7 @@ router.post('/plan/:planId/execute-next', requireAuth, async (req, res) => {
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
-        // Set SSE headers
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
-        let heartbeatInterval = null;
-        req.on('close', () => {
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
-            }
-        });
-
-        const streamCallback = (eventType, data) => {
-            if (res.writableEnded || res.destroyed) return;
-            try {
-                writeSseEvent(res, eventType, data);
-                if (eventType === 'done' || eventType === 'error') {
-                    res.end();
-                }
-            } catch (err) {
-                logger.error('Failed to write SSE event', { error: err.message });
-            }
-        };
-
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') res.flush();
-
-        const job = await addAgentJob({
+        await runChatTurn(req, res, {
             query: `Execute step ${current_step_index + 1} of plan: ${plan.title}`,
             model,
             session_id,
@@ -2169,18 +1376,9 @@ router.post('/plan/:planId/execute-next', requireAuth, async (req, res) => {
                 current_step_index: current_step_index,
                 completed_step_results: completed_step_results
             }
-        }, { streamCallback });
+        });
 
-        heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            res.write(': heartbeat\n\n');
-            if (typeof res.flush === 'function') res.flush();
-        }, 15000);
-
-        logger.info('Execute-next job queued', { jobId: job.id, planId, session_id, step: current_step_index });
+        logger.info('Execute-next turn completed', { planId, session_id, step: current_step_index });
 
     } catch (error) {
         logger.error('Error in execute-next', { error: error.message });
@@ -2234,41 +1432,7 @@ router.post('/plan/:planId/skip-step/:stepId', requireAuth, async (req, res) => 
             return res.json({ status: 'plan_completed', plan: updatedPlan });
         }
 
-        // Set SSE headers
-        res.set({
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        });
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
-        let heartbeatInterval = null;
-        req.on('close', () => {
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
-            }
-        });
-
-        const streamCallback = (eventType, data) => {
-            if (res.writableEnded || res.destroyed) return;
-            try {
-                writeSseEvent(res, eventType, data);
-                if (eventType === 'done' || eventType === 'error') {
-                    res.end();
-                }
-            } catch (err) {
-                logger.error('Failed to write SSE event', { error: err.message });
-            }
-        };
-
-        res.write(': connected\n\n');
-        if (typeof res.flush === 'function') res.flush();
-
-        const job = await addAgentJob({
+        await runChatTurn(req, res, {
             query: `Execute next step of plan: ${updatedPlan.title}`,
             model,
             session_id,
@@ -2283,18 +1447,9 @@ router.post('/plan/:planId/skip-step/:stepId', requireAuth, async (req, res) => 
                 current_step_index: nextIndex,
                 completed_step_results: completed_step_results
             }
-        }, { streamCallback });
+        });
 
-        heartbeatInterval = setInterval(() => {
-            if (res.writableEnded || res.destroyed) {
-                clearInterval(heartbeatInterval);
-                return;
-            }
-            res.write(': heartbeat\n\n');
-            if (typeof res.flush === 'function') res.flush();
-        }, 15000);
-
-        logger.info('Skip-step job queued', { jobId: job.id, planId, stepId, session_id });
+        logger.info('Skip-step turn completed', { planId, stepId, session_id });
 
     } catch (error) {
         logger.error('Error in skip-step', { error: error.message });

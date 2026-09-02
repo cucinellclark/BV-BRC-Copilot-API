@@ -110,6 +110,34 @@ Every endpoint **requires** a BV-BRC JWT supplied via the `Authorization: Bearer
 
 ---
 
+## Chat Admission Control
+
+The gateway limits concurrent chat turns via a Redis-backed chat-slot queue. This prevents unbounded agent loops from exhausting memory on holly (orchestrator) and holding open SSE connections on ash (gateway).
+
+Configuration in `config.json`:
+
+```json
+{
+  "admission": {
+    "max_chats": 8,
+    "wait_ms": 30000,
+    "slot_ttl_seconds": 600
+  }
+}
+```
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `max_chats` | `8` | Max concurrent chat turns allowed |
+| `wait_ms` | `30000` | How long to wait for a slot before rejecting (ms) |
+| `slot_ttl_seconds` | `600` | TTL for slot entries in Redis (self-healing if gateway crashes) |
+
+When at capacity, incoming requests wait up to `wait_ms` for a slot. If no slot opens, the gateway returns HTTP 429 with `{"error": "The system is busy. Please try again in a moment."}`.
+
+Slots are tracked in a Redis sorted set (`copilot:chat_slots`) with TTL-based expiry. If the gateway crashes without releasing a slot, the entry expires after `slot_ttl_seconds` (default 10 minutes). This applies to all five in-request SSE routes: `/copilot-agent`, `/answer-questions`, `/plan/:planId/approve`, `/plan/:planId/execute-next`, and skip-and-continue.
+
+---
+
 ## 🛠 Development
 
 ```bash
