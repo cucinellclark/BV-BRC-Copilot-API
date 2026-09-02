@@ -520,16 +520,21 @@ async function streamFromOrchestrator(orchestratorRequest, responseStream, shoul
     // Use axios to POST with responseType stream, then parse SSE manually
     const controller = new AbortController();
 
-    // Cancellation polling
+    // Cancellation polling — 200ms for fast response to Stop button.
+    // Two stacked intervals (chatRunner Redis poll + this one) at 1s each
+    // caused a 2s worst-case delay where fast queries completed before
+    // cancel fired.  200ms reduces worst-case to ~0.4s.
     const cancelInterval = setInterval(() => {
       if (shouldCancel && shouldCancel()) {
         controller.abort();
         clearInterval(cancelInterval);
         const cancelErr = new Error('Job cancelled by user');
         cancelErr.isCancelled = true;
+        // Attach accumulated state so partial text can be persisted
+        cancelErr.partialState = state;
         finish(cancelErr);
       }
-    }, 1000);
+    }, 200);
 
     axios.post(url, orchestratorRequest, {
       responseType: 'stream',
@@ -675,6 +680,7 @@ async function executeOrchestratorLoop(opts) {
     images = null,
     image_attachments = null,
     files = null,
+    pdfs = null,
     auto_submit_preference = null,
     target_agent = null,
     workflow_context = null,
@@ -817,6 +823,15 @@ async function executeOrchestratorLoop(opts) {
       });
     });
   }
+  if (pdfs && pdfs.length > 0) {
+    pdfs.forEach(p => {
+      userAttachments.push({
+        type: 'pdf',
+        name: p.name || 'document.pdf',
+        size: p.size || 0
+      });
+    });
+  }
   if (userAttachments.length > 0) {
     userMessage.attachments = userAttachments;
   }
@@ -870,17 +885,12 @@ async function executeOrchestratorLoop(opts) {
   // 4. Build OrchestratorRequest
   // ------------------------------------------------------------------
 
-  // Prepend attached file content to the query for LLM visibility
-  let augmentedQuery = query;
-  if (Array.isArray(files) && files.length > 0) {
-    const fileParts = files.map(f => {
-      return `[Attached file: ${f.name}]\n${f.content}\n[End of file: ${f.name}]`;
-    });
-    augmentedQuery = fileParts.join('\n\n') + '\n\n' + query;
-  }
+  // NOTE: file content is no longer inlined into the query.
+  // The orchestrator preprocess persists files to the workspace and
+  // injects a 25 KB excerpt into the agent prompt.
 
   const orchestratorRequest = {
-    query: augmentedQuery,
+    query: query,
     model: model || null,
     session_id: session_id || null,
     user_id: user_id || null,
@@ -919,7 +929,9 @@ async function executeOrchestratorLoop(opts) {
       size: f.size || 0
     })) } : {}),
     // Forward images as base64 data URIs for multimodal LLM processing
-    ...(images && images.length > 0 ? { images: images.slice(0, 10) } : {})
+    ...(images && images.length > 0 ? { images: images.slice(0, 10) } : {}),
+    // Forward PDFs as base64 for orchestrator-side extraction
+    ...(pdfs && pdfs.length > 0 ? { pdfs } : {})
   };
 
   // ------------------------------------------------------------------
@@ -932,7 +944,35 @@ async function executeOrchestratorLoop(opts) {
     try {
       state = await streamFromOrchestrator(orchestratorRequest, responseStream, shouldCancel);
     } catch (err) {
-      if (err.isCancelled) throw err;
+      if (err.isCancelled) {
+        // Recover partial text from the streaming state so it can be
+        // persisted to Mongo (Section 6 below).  Without this, the
+        // throw would skip persistence and the assistant bubble would
+        // vanish on reload.
+        const ps = err.partialState || {};
+        state = {
+          responseText: ps.responseText || ps.streamedResponse || '',
+          streamedResponse: ps.streamedResponse || '',
+          agentsUsed: ps.agentsUsed || [],
+          toolCalls: ps.toolCalls || [],
+          resultForUi: ps.resultForUi || {},
+          decision: 'cancelled',
+          elapsedMs: ps.elapsedMs || 0,
+          lastAgentResult: ps.lastAgentResult || null,
+          lastToolName: ps.lastToolName || null,
+          lastResultForUi: ps.lastResultForUi || null,
+          mcpServerName: ps.mcpServerName || null,
+          sentResultForUi: ps.sentResultForUi || false,
+          autoSubmitted: ps.autoSubmitted || false,
+          error: null,
+          plan: ps.plan || null,
+          _cancelled: true,  // marker for Section 6
+        };
+        sessionLogger.info('Stop: recovered partial text for persist', {
+          chars: (state.responseText || '').length,
+        });
+        // Fall through to Section 6 to persist partial assistant text
+      } else {
 
       sessionLogger.error('Orchestrator streaming failed', { error: err.message });
 
@@ -963,6 +1003,7 @@ async function executeOrchestratorLoop(opts) {
         streamedResponse: '',
         error: null
       };
+      }  // end else (non-cancel error)
     }
   } else {
     // -- Non-streaming (batch) path --
@@ -1324,7 +1365,8 @@ async function executeOrchestratorLoop(opts) {
     return {
       iterations: state.toolCalls?.length || 0,
       toolsUsed: state.agentsUsed || [],
-      message_id: assistantMessage.message_id
+      message_id: assistantMessage.message_id,
+      cancelled: !!state._cancelled,
     };
   }
 

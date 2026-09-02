@@ -39,23 +39,7 @@ jest.mock('../services/dbUtils', () => {
     };
 });
 
-// Mock queueService to prevent Redis connection at import time
-jest.mock('../services/queueService', () => ({
-    addAgentJob: jest.fn(),
-    getJobStatus: jest.fn(),
-    getQueueStats: jest.fn(),
-    registerStreamCallback: jest.fn(),
-    abortJob: jest.fn(),
-}));
-
-// Mock ragQueueService similarly
-jest.mock('../services/ragQueueService', () => ({
-    addRagJob: jest.fn(),
-    getRagJobStatus: jest.fn(),
-    getRagQueueStats: jest.fn(),
-    registerRagStreamCallback: jest.fn(),
-    abortRagJob: jest.fn(),
-}));
+// queueService and ragQueueService deleted — no longer need mocking
 
 // Mock MCP executor
 jest.mock('../services/mcp/mcpExecutor', () => ({
@@ -81,8 +65,7 @@ jest.mock('../services/database', () => ({
 // Mock chatService
 jest.mock('../services/chatService', () => ({}));
 
-// Mock agentOrchestrator
-jest.mock('../services/agentOrchestrator', () => ({}));
+// agentOrchestrator deleted — no longer need mocking
 
 // Mock auth middleware to be a no-op
 jest.mock('../middleware/auth', () => ({
