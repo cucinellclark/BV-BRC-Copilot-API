@@ -6,9 +6,10 @@
 //
 // Redis is used for:
 //   - copilot:cancel:{jobId}  — Stop flag; any gateway instance can set it
+//   - copilot:chat_slots      — sorted-set admission gate (max_chats seats)
 //   - copilot:session:{sessionId} — pub/sub for workflow_complete (Phase 4)
 //
-// Bull is KEPT for workflow monitor, summarization, and facts queues.
+// Bull is KEPT for the workflow monitor queue.
 
 const { v4: uuidv4 } = require('uuid');
 const Redis = require('ioredis');
@@ -59,8 +60,9 @@ const CANCEL_TTL_SECONDS = 600; // 10 minutes — long enough for any turn
 const config = require('../config.json');
 const ADMISSION_CONFIG = config.admission || {};
 const MAX_CHATS = ADMISSION_CONFIG.max_chats || 8;
-const ADMISSION_WAIT_MS = ADMISSION_CONFIG.wait_ms || 30000;
+const ADMISSION_WAIT_MS = ADMISSION_CONFIG.wait_ms || 300000; // 5 min default
 const SLOT_TTL_SECONDS = ADMISSION_CONFIG.slot_ttl_seconds || 600;
+const MAX_WAITING_CHATS = ADMISSION_CONFIG.max_waiting_chats || 32;
 const CHAT_SLOTS_KEY = 'copilot:chat_slots';
 const SLOT_POLL_INTERVAL_MS = 1000;
 
@@ -83,14 +85,37 @@ const ACQUIRE_SLOT_LUA = `
 `;
 
 /**
- * Try to acquire a chat slot.  Polls up to wait_ms, then rejects.
- * @param {string} jobId
- * @returns {Promise<boolean>} true if acquired
+ * Count the number of currently held chat slots (after pruning expired).
+ * Used to check whether the waiter cap has been reached BEFORE opening SSE.
+ * @returns {Promise<number>}
  */
-async function acquireChatSlot(jobId) {
+async function countChatSlots() {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    await redis.zremrangebyscore(CHAT_SLOTS_KEY, '-inf', now);
+    return await redis.zcard(CHAT_SLOTS_KEY);
+  } catch (err) {
+    // Redis down — fail open (report 0 so we don't 429)
+    logger.warn('Redis ZCARD failed, reporting 0 slots', { error: err.message });
+    return 0;
+  }
+}
+
+/**
+ * Try to acquire a chat slot.  Polls up to wait_ms, then rejects.
+ * Supports an AbortController signal for early exit (Stop or disconnect).
+ * @param {string} jobId
+ * @param {object} [opts]
+ * @param {AbortSignal} [opts.signal] — abort to exit without acquiring
+ * @returns {Promise<'acquired'|'timeout'|'aborted'>}
+ */
+async function acquireChatSlot(jobId, { signal } = {}) {
   const deadline = Date.now() + ADMISSION_WAIT_MS;
 
   while (true) {
+    // Check abort before each attempt
+    if (signal && signal.aborted) return 'aborted';
+
     const now = Math.floor(Date.now() / 1000);
     const expiry = now + SLOT_TTL_SECONDS;
     try {
@@ -103,18 +128,25 @@ async function acquireChatSlot(jobId) {
         expiry,          // ARGV[3]
         jobId,           // ARGV[4]
       );
-      if (result === 1) return true;
+      if (result === 1) return 'acquired';
     } catch (err) {
       // Redis down — fail open (allow the turn) rather than blocking everyone
       logger.warn('Redis chat-slot check failed, allowing turn', { jobId, error: err.message });
-      return true;
+      return 'acquired';
     }
 
     if (Date.now() >= deadline) {
-      return false; // timed out waiting
+      return 'timeout';
     }
 
-    await new Promise(resolve => setTimeout(resolve, SLOT_POLL_INTERVAL_MS));
+    // Sleep, but wake early on abort
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, SLOT_POLL_INTERVAL_MS);
+      if (signal) {
+        const onAbort = () => { clearTimeout(timer); resolve(); };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
   }
 }
 
@@ -209,20 +241,31 @@ async function runChatTurn(req, res, jobData) {
   const sessionId = jobData.session_id;
   const turnLogger = createLogger('ChatTurn', sessionId);
 
-  // --- Chat-slot admission gate ---
-  // Must happen before SSE headers so we can return a plain 429 JSON
-  // response if the system is at capacity.
-  const slotAcquired = await acquireChatSlot(jobId);
-  if (!slotAcquired) {
-    turnLogger.warn('Chat-slot admission rejected (system busy)', { jobId, max_chats: MAX_CHATS });
-    res.status(429).json({
-      error: 'The system is busy. Please try again in a moment.',
-    });
-    return;
+  // --- Waiter-cap check (BEFORE opening SSE) ---
+  // If too many connections are already waiting, reject immediately with
+  // a plain 429 JSON response.  This is the last-resort path; under
+  // normal load, callers wait on SSE and complete when a seat frees.
+  const currentSlots = await countChatSlots();
+  if (currentSlots >= MAX_CHATS) {
+    // All seats are taken — check how many extra waiters are acceptable
+    // This is a rough count: slots held + in-flight waiters on this
+    // process.  Since we cannot count waiters across gateway instances
+    // we use the local in-flight map size as a proxy.
+    const waiters = inFlightTurns.size - currentSlots; // waiters ≈ turns without a slot
+    if (waiters >= MAX_WAITING_CHATS) {
+      turnLogger.warn('Waiter cap exceeded, returning 429', {
+        jobId, currentSlots, waiters, MAX_WAITING_CHATS,
+      });
+      res.status(429).json({
+        error: 'The system is busy. Please try again in a moment.',
+      });
+      return;
+    }
   }
-  turnLogger.info('Chat slot acquired', { jobId });
 
-  // --- SSE headers ---
+  // --- Open SSE immediately (before waiting for a slot) ---
+  // This keeps the browser connection alive so we can send `queued`
+  // status, heartbeats, and eventually stream the agent response.
   res.set({
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -232,18 +275,26 @@ async function runChatTurn(req, res, jobData) {
   if (typeof res.flushHeaders === 'function') {
     res.flushHeaders();
   }
+  // Padding comment + flush to coax nginx into sending the first frame
   res.write(': connected\n\n');
   if (typeof res.flush === 'function') {
     res.flush();
   }
 
-  // --- Register session stream for out-of-band events ---
-  registerSessionStream(sessionId, res);
-
   // Track whether the SSE writer is still open (session switch closes it)
   let sseOpen = true;
 
-  // --- Heartbeat ---
+  // --- SSE writer (safe for dead connections) ---
+  const sseWriter = (eventType, data) => {
+    if (!sseOpen || res.writableEnded || res.destroyed) return;
+    try {
+      writeSseEvent(res, eventType, data);
+    } catch (_) {
+      sseOpen = false;
+    }
+  };
+
+  // --- Heartbeat (starts NOW, before slot wait) ---
   const heartbeatInterval = setInterval(() => {
     if (!sseOpen || res.writableEnded || res.destroyed) {
       clearInterval(heartbeatInterval);
@@ -257,32 +308,135 @@ async function runChatTurn(req, res, jobData) {
     }
   }, 15000);
 
-  // --- SSE writer (safe for dead connections) ---
-  const sseWriter = (eventType, data) => {
-    if (!sseOpen || res.writableEnded || res.destroyed) return;
-    try {
-      writeSseEvent(res, eventType, data);
-    } catch (_) {
-      sseOpen = false;
-    }
-  };
+  // --- AbortController: unifies Stop + disconnect during wait ---
+  const waitAbort = new AbortController();
 
-  // --- Client disconnect: close SSE writer only, do NOT cancel ---
-  // Use res.on('close') — fires when the response socket closes (real client
-  // abandonment). req.on('close') fires when the request Readable ends, which
-  // for a JSON POST happens as soon as body-parser finishes reading the body
-  // (milliseconds after the request arrives), not when the client disconnects.
+  // Client disconnect: abort the wait (do NOT take a seat), close writer.
+  // Use res.on('close') — fires on real socket close.
   res.on('close', () => {
-    turnLogger.info('Client disconnected (SSE closed), turn continues in background', { jobId });
+    turnLogger.info('Client disconnected (SSE closed)', { jobId });
     sseOpen = false;
+    waitAbort.abort();
     unregisterSessionStream(sessionId, res);
     clearInterval(heartbeatInterval);
-    // NOTE: we do NOT set the cancel flag here. The turn keeps running
-    // and persists its result to Mongo. The user can see it when they
-    // return to the session.
+    // NOTE: if the turn already started (slot acquired), the
+    // orchestrator call continues and persists to Mongo.  If still
+    // waiting for a slot, the abort signal causes acquireChatSlot to
+    // return 'aborted' — the slot is never taken.
   });
 
-  // --- Persist active_job_id to Mongo so other tabs / sidebar know ---
+  // --- Register in-flight turn (counts toward local waiter estimate) ---
+  let turnResolve;
+  const turnPromise = new Promise(resolve => { turnResolve = resolve; });
+  inFlightTurns.set(jobId, { promise: turnPromise });
+
+  // --- Chat-slot admission gate (wait in SSE) ---
+  // Try a fast first attempt.  If the system is at capacity, emit
+  // `queued` and wait with heartbeats + abort support.
+  let slotOutcome;
+  {
+    // Fast path: try once without waiting
+    const now = Math.floor(Date.now() / 1000);
+    const expiry = now + SLOT_TTL_SECONDS;
+    let fastResult = 0;
+    try {
+      fastResult = await redis.eval(
+        ACQUIRE_SLOT_LUA, 1, CHAT_SLOTS_KEY, now, MAX_CHATS, expiry, jobId,
+      );
+    } catch (err) {
+      logger.warn('Redis chat-slot fast check failed, allowing turn', { jobId, error: err.message });
+      fastResult = 1; // fail-open
+    }
+
+    if (fastResult === 1) {
+      slotOutcome = 'acquired';
+    } else {
+      // System is busy — tell the user and wait
+      turnLogger.info('All chat slots busy, entering wait queue', {
+        jobId, currentSlots: MAX_CHATS,
+      });
+      sseWriter('queued', {
+        job_id: jobId,
+        session_id: sessionId,
+        message: 'High usage \u2014 responses will be slower.',
+        timestamp: new Date().toISOString(),
+      });
+
+      // Wire Redis cancel flag into the abort controller so Stop
+      // during wait also aborts without taking a seat.
+      const cancelCheckDuringWait = setInterval(async () => {
+        if (await isCancelled(jobId)) {
+          waitAbort.abort();
+          clearInterval(cancelCheckDuringWait);
+        }
+      }, 1000);
+
+      slotOutcome = await acquireChatSlot(jobId, { signal: waitAbort.signal });
+
+      clearInterval(cancelCheckDuringWait);
+    }
+  }
+
+  // Handle non-acquired outcomes
+  if (slotOutcome === 'aborted') {
+    turnLogger.info('Wait aborted (Stop or disconnect) — slot NOT taken', { jobId });
+    sseWriter('cancelled', {
+      job_id: jobId,
+      message: 'Stopped by user',
+      timestamp: new Date().toISOString(),
+    });
+    sseWriter('done', {
+      job_id: jobId,
+      session_id: sessionId,
+      cancelled: true,
+      message: 'Stopped by user',
+      timestamp: new Date().toISOString(),
+    });
+    // Cleanup — no slot to release
+    clearInterval(heartbeatInterval);
+    inFlightTurns.delete(jobId);
+    unregisterSessionStream(sessionId, res);
+    await clearCancelFlag(jobId);
+    turnResolve();
+    if (sseOpen && !res.writableEnded && !res.destroyed) {
+      try { res.end(); } catch (_) {}
+    }
+    return;
+  }
+
+  if (slotOutcome === 'timeout') {
+    // After 5 minutes waiting — very rare.  Return an error on the
+    // already-open SSE so the frontend can show it gracefully.
+    turnLogger.warn('Chat-slot wait timed out after wait_ms', { jobId, ADMISSION_WAIT_MS });
+    sseWriter('error', {
+      job_id: jobId,
+      error: 'The system is busy. Please try again in a moment.',
+      timestamp: new Date().toISOString(),
+    });
+    sseWriter('done', {
+      job_id: jobId,
+      session_id: sessionId,
+      cancelled: false,
+      message: 'Timed out waiting for a chat slot',
+      timestamp: new Date().toISOString(),
+    });
+    clearInterval(heartbeatInterval);
+    inFlightTurns.delete(jobId);
+    unregisterSessionStream(sessionId, res);
+    turnResolve();
+    if (sseOpen && !res.writableEnded && !res.destroyed) {
+      try { res.end(); } catch (_) {}
+    }
+    return;
+  }
+
+  // --- Slot acquired — proceed with the chat turn ---
+  turnLogger.info('Chat slot acquired', { jobId });
+
+  // Register session stream for out-of-band events (workflow completion)
+  registerSessionStream(sessionId, res);
+
+  // Persist active_job_id to Mongo so other tabs / sidebar know
   await setSessionActiveJob(sessionId, jobId).catch((err) => {
     turnLogger.warn('Failed to set active_job_id', { sessionId, jobId, error: err.message });
   });
@@ -296,10 +450,6 @@ async function runChatTurn(req, res, jobData) {
   });
 
   // --- shouldCancel polls Redis ---
-  const shouldCancel = async () => {
-    return await isCancelled(jobId);
-  };
-  // Synchronous wrapper for executeOrchestratorLoop (it expects sync)
   let cancelledFlag = false;
   const cancelPollInterval = setInterval(async () => {
     if (await isCancelled(jobId)) {
@@ -332,11 +482,6 @@ async function runChatTurn(req, res, jobData) {
       }
     },
   };
-
-  // --- Register in-flight turn ---
-  let turnResolve;
-  const turnPromise = new Promise(resolve => { turnResolve = resolve; });
-  inFlightTurns.set(jobId, { promise: turnPromise });
 
   // --- Run the orchestrator loop ---
   try {

@@ -28,8 +28,6 @@ const {
 const { buildConversationContext, buildWorkflowAwareHistory } = require('./memory/conversationContextService');
 const { registerWorkflowWatch } = require('./workflowMonitorService');
 const { getSessionMemory } = require('./memory/sessionMemoryService');
-const { maybeQueueSummary } = require('./summaryQueueService');
-
 const logger = createLogger('OrchestratorClient');
 
 const ORCHESTRATOR_URL = config.orchestrator?.url || 'http://140.221.78.15:9000';
@@ -1317,11 +1315,6 @@ async function executeOrchestratorLoop(opts) {
         session_id
       });
 
-      // Trigger summary if needed
-      const messageCount = (chatSession?.messages?.length || 0) + messagesToSave.length;
-      maybeQueueSummary({ session_id, user_id, messageCount }).catch(err => {
-        sessionLogger.warn('Failed to queue summary', { error: err.message });
-      });
     } catch (err) {
       sessionLogger.error('Failed to save chat', { error: err.message });
     }

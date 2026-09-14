@@ -37,7 +37,6 @@ const { sendSseError, startKeepAlive, stopKeepAlive } = require('./sseUtils');
 const { setupCopilotStream } = require('./streamingHandlers');
 const promptManager = require('../prompts');
 const { buildConversationContext } = require('./memory/conversationContextService');
-const { maybeQueueSummary } = require('./summaryQueueService');
 
 const MAX_TOKEN_HEADROOM = 500;
 
@@ -188,10 +187,6 @@ async function handleCopilotRequest(opts) {
       const toInsert = systemMessage ? [userMessage, systemMessage, assistantMessage]
                                      : [userMessage, assistantMessage];
       await addMessagesToSession(session_id, toInsert);
-      const messageCount = (chatSession?.messages?.length || 0) + toInsert.length;
-      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
-        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
-      });
     }
 
     return {
@@ -270,10 +265,6 @@ async function handleChatRequest({ query, model, session_id, user_id, system_pro
 
     if (save_chat) {
       await addMessagesToSession(session_id, messagesToInsert);
-      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
-      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
-        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
-      });
     }
 
     return {
@@ -439,10 +430,6 @@ async function handleRagStreamRequest({
 
     if (save_chat) {
       await addMessagesToSession(session_id, messagesToInsert);
-      const messageCount = (chatSession?.messages?.length || 0) + messagesToInsert.length;
-      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
-        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
-      });
     }
 
     return {
@@ -796,10 +783,6 @@ async function handleCopilotStreamRequest(opts, res) {
     if (save_chat) {
       const assistantMessage = createMessage('assistant', assistantBuffer);
       await addMessagesToSession(session_id, [assistantMessage]);
-      const messageCount = (chatSession?.messages?.length || 0) + (systemMessage ? 2 : 1) + 1;
-      maybeQueueSummary({ session_id, user_id, messageCount }).catch((err) => {
-        console.warn('[SummaryQueue] Failed to queue summary:', err.message);
-      });
     }
   } catch (error) {
     console.error('Streaming copilot error:', error);
