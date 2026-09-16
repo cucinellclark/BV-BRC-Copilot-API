@@ -27,7 +27,6 @@ const {
 } = require('./dbUtils');
 const { buildConversationContext, buildWorkflowAwareHistory } = require('./memory/conversationContextService');
 const { registerWorkflowWatch } = require('./workflowMonitorService');
-const { getSessionMemory } = require('./memory/sessionMemoryService');
 const logger = createLogger('OrchestratorClient');
 
 const ORCHESTRATOR_URL = config.orchestrator?.url || 'http://140.221.78.15:9000';
@@ -706,11 +705,10 @@ async function executeOrchestratorLoop(opts) {
   let chatSession = null;
   let conversationSummary = '';
   let recentMessages = [];
-  let sessionMemory = null;
 
   if (session_id) {
     chatSession = await getChatSession(session_id);
-    if (!chatSession) {
+    if (!chatSession && save_chat) {
       try {
         await createChatSession(session_id, user_id);
         chatSession = await getChatSession(session_id);
@@ -760,13 +758,6 @@ async function executeOrchestratorLoop(opts) {
       } catch (err) {
         sessionLogger.warn('Failed to build conversation context', { error: err.message });
       }
-    }
-
-    // Load session memory
-    try {
-      sessionMemory = await getSessionMemory(session_id, user_id);
-    } catch (err) {
-      sessionLogger.warn('Failed to load session memory', { error: err.message });
     }
   }
 
