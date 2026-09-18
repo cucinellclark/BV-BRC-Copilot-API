@@ -23,7 +23,8 @@ const {
   createChatSession,
   addMessagesToSession,
   addWorkflowIdToSession,
-  getModelData
+  getModelData,
+  normalizeExecutionMode
 } = require('./dbUtils');
 const { buildConversationContext, buildWorkflowAwareHistory } = require('./memory/conversationContextService');
 const { registerWorkflowWatch } = require('./workflowMonitorService');
@@ -353,6 +354,30 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       });
       break;
 
+    // -- Execution mode --
+    // A gated tool (submit_gowe_job / create_group) was refused because the
+    // session is in plan mode.  The card persists on the assistant message
+    // (state.card) so the one-shot "Submit this job" button survives
+    // a reload, same as plan/clarification cards.
+    case 'execution_blocked': {
+      const executionBlockedCard = {
+        card_type: 'execution_blocked',
+        card_payload: {
+          agent: eventData.agent || null,
+          execution_mode: 'plan',
+          blocked_actions: Array.isArray(eventData.blocked_actions) ? eventData.blocked_actions : [],
+          original_query: eventData.original_query || ''
+        }
+      };
+      emitSSE(responseStream, 'execution_blocked', {
+        ...executionBlockedCard.card_payload,
+        card: executionBlockedCard,
+        timestamp: new Date().toISOString()
+      });
+      state.card = executionBlockedCard;
+      break;
+    }
+
     // -- Planning agent events --
     case 'ask_questions': {
       const clarificationCard = {
@@ -678,7 +703,8 @@ async function executeOrchestratorLoop(opts) {
     image_attachments = null,
     files = null,
     pdfs = null,
-    auto_submit_preference = null,
+    execution_mode: requested_execution_mode = null,
+    execute_once = false,
     target_agent = null,
     workflow_context = null,
     stream = false,
@@ -821,6 +847,15 @@ async function executeOrchestratorLoop(opts) {
       });
     });
   }
+  if (execute_once === true) {
+    // Persisted marker so the history shows why this one turn could submit
+    // while the session toggle says Plan.
+    userAttachments.push({
+      type: 'execution',
+      source: 'once',
+      name: 'Execute mode (this message only)'
+    });
+  }
   if (userAttachments.length > 0) {
     userMessage.attachments = userAttachments;
   }
@@ -878,10 +913,24 @@ async function executeOrchestratorLoop(opts) {
   // The orchestrator preprocess persists files to the workspace and
   // injects a 25 KB excerpt into the agent prompt.
 
+  // Execution mode is read from the session document on every turn — the
+  // client only ever writes through (see /copilot-agent).  Missing → plan.
+  // Ephemeral turns (save_chat:false — test harnesses, stress runs) have
+  // no persisted mode, so the request's value is used for those.
+  // execute_once ("allow once" from the execution_blocked card) overrides
+  // both for this single turn and never touches the stored mode.
+  const execution_mode = execute_once === true
+    ? 'execute'
+    : save_chat
+      ? normalizeExecutionMode(chatSession && chatSession.execution_mode)
+      : normalizeExecutionMode(requested_execution_mode);
+  sessionLogger.info('Execution mode for turn', { execution_mode, execute_once: execute_once === true, ephemeral: !save_chat });
+
   const orchestratorRequest = {
     query: query,
     model: model || null,
     session_id: session_id || null,
+    execution_mode,
     user_id: user_id || null,
     auth_token: auth_token || null,
     conversation_summary: conversationSummary || null,
@@ -909,7 +958,6 @@ async function executeOrchestratorLoop(opts) {
       : (config.agent?.max_iterations || 5),
     ...(workflow_context ? { workflow_context } : {}),
     ...(llmOverride ? { llm_override: llmOverride } : {}),
-    ...(auto_submit_preference ? { auto_submit_preference } : {}),
     // Structured file attachments for programmatic use by agents
     ...(files && files.length > 0 ? { attached_files: files.map(f => ({
       name: f.name,
@@ -1402,5 +1450,6 @@ module.exports = {
   executeOrchestratorLoop,
   checkOrchestratorHealth,
   streamFromOrchestrator,
+  mapOrchestratorEvent,
   ORCHESTRATOR_URL
 };

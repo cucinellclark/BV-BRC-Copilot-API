@@ -315,6 +315,52 @@ async function getUserSessions(userId, limit = 20, offset = 0) {
  * @param {string} title - The new title
  * @returns {Object} Update result
  */
+/**
+ * Execution mode of a chat session.
+ *
+ * 'plan' (default): agents may prepare jobs and groups but the Python tool
+ * layer refuses submit_gowe_job / create_group.  'execute': those tools are
+ * enabled.  Stored on chat_sessions.execution_mode; a missing field is
+ * plan.  The gateway reads this on every turn and forwards it to the
+ * orchestrator — the client's value is only ever a write-through.
+ */
+const EXECUTION_MODES = ['plan', 'execute'];
+const DEFAULT_EXECUTION_MODE = 'plan';
+
+function isValidExecutionMode(mode) {
+  return EXECUTION_MODES.includes(mode);
+}
+
+function normalizeExecutionMode(mode) {
+  return mode === 'execute' ? 'execute' : DEFAULT_EXECUTION_MODE;
+}
+
+/**
+ * Persist the execution mode on a chat session (scoped by owner).
+ * @param {string} sessionId
+ * @param {string} userId
+ * @param {'plan'|'execute'} mode
+ * @returns {Object} Mongo update result
+ */
+async function setSessionExecutionMode(sessionId, userId, mode) {
+  if (!isValidExecutionMode(mode)) {
+    throw new LLMServiceError(`Invalid execution mode: ${mode}`);
+  }
+  try {
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    return await chatCollection.updateOne(
+      { session_id: sessionId, user_id: userId },
+      { $set: { execution_mode: mode, last_modified: new Date() } }
+    );
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to update session execution mode', error);
+  }
+}
+
 async function updateSessionTitle(sessionId, userId, title) {
   try {
     const db = await connectToDatabase();
@@ -398,6 +444,7 @@ async function createChatSession(sessionId, userId, title = 'Untitled') {
       created_at: new Date(),
       messages: [],
       workflow_ids: [],
+      execution_mode: DEFAULT_EXECUTION_MODE,
       last_modified: new Date()
     });
 
@@ -435,7 +482,8 @@ async function registerChatSession(sessionId, userId, title = 'New Chat') {
           title: normalizedTitle,
           created_at: now,
           messages: [],
-          workflow_ids: []
+          workflow_ids: [],
+          execution_mode: DEFAULT_EXECUTION_MODE
         },
         $set: { last_modified: now }
       },
@@ -1040,6 +1088,11 @@ module.exports = {
   getSessionTitle,
   getUserSessions,
   updateSessionTitle,
+  setSessionExecutionMode,
+  isValidExecutionMode,
+  normalizeExecutionMode,
+  EXECUTION_MODES,
+  DEFAULT_EXECUTION_MODE,
   deleteSession,
   getUserPrompts,
   saveUserPrompt,

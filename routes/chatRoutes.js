@@ -13,6 +13,9 @@ const {
   getSessionTitle,
   getUserSessions,
   updateSessionTitle,
+  setSessionExecutionMode,
+  isValidExecutionMode,
+  normalizeExecutionMode,
   deleteSession,
   getUserPrompts,
   saveUserPrompt,
@@ -37,6 +40,29 @@ const { register: registerSessionStream, unregister: unregisterSessionStream, pu
 const { runChatTurn, setCancelFlag } = require('../services/chatRunner');
 const config = require('../config.json');
 const router = express.Router();
+
+/**
+ * Plan-mode guard for routes that run a plan step.
+ *
+ * Plan execution delegates to the service agent, which would submit jobs,
+ * so the session must be in execute mode.  The Python tool gate would
+ * refuse the submission anyway; this just fails fast with a clear code
+ * the frontend can render.  Returns true when the caller may proceed.
+ */
+async function requireExecuteMode(res, session_id, logger) {
+    const chatSession = session_id ? await getChatSession(session_id) : null;
+    const mode = normalizeExecutionMode(chatSession && chatSession.execution_mode);
+    if (mode !== 'execute') {
+        logger.info('Plan step refused: session is in plan mode', { session_id });
+        res.status(409).json({
+            code: 'PLAN_MODE',
+            execution_mode: mode,
+            message: 'Switch this chat to Execute mode to run the plan.'
+        });
+        return false;
+    }
+    return true;
+}
 
 function parseBooleanFlag(value, defaultValue = false) {
     if (value === undefined || value === null) return defaultValue;
@@ -235,7 +261,8 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
             image_attachments = null,
             files = null,
             pdfs = null,
-            auto_submit_preference = null,
+            execution_mode = null,
+            execute_once = false,
             target_agent = null,
             workflow_context = null
         } = req.body;
@@ -247,6 +274,31 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
 
         // Use the token from the validated Authorization header, not from the request body
         const auth_token = req.authToken || null;
+
+        // Execution-mode write-through: the toggle persists via
+        // /update-session-execution-mode, but a toggle-then-send can race
+        // that request, so the send carries the mode too.  Persist it before
+        // the turn; the orchestrator loop then reads it from the session.
+        if (execution_mode !== null && execution_mode !== undefined) {
+            if (!isValidExecutionMode(execution_mode)) {
+                return res.status(400).json({ message: `Invalid execution_mode: ${execution_mode}` });
+            }
+            if (session_id && save_chat) {
+                try {
+                    await registerChatSession(session_id, user_id);
+                    await setSessionExecutionMode(session_id, user_id, execution_mode);
+                } catch (err) {
+                    logger.warn('Failed to persist execution_mode before turn', { error: err.message });
+                }
+            }
+        }
+
+        // Plan step execution (PlanCard Approve / Continue / Skip) arrives on
+        // this route with plan_action 'execute_next'.  It delegates to the
+        // service agent, so it needs execute mode — same guard as /plan/*.
+        if (workflow_context && workflow_context.plan_action === 'execute_next') {
+            if (!(await requireExecuteMode(res, session_id, logger))) return;
+        }
 
         // Validate attached files (10 MB cap, null-byte rejection)
         let validatedFiles = null;
@@ -441,7 +493,12 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
                 image_attachments: validatedImageAttachments,
                 files: validatedFiles,
                 pdfs: validatedPdfs,
-                auto_submit_preference,
+                // Only consulted for ephemeral (save_chat:false) turns,
+                // which have no session document to read the mode from.
+                execution_mode,
+                // One-shot execute ("allow once"): this turn runs in execute
+                // mode; the stored session mode is not changed.
+                execute_once: execute_once === true,
                 target_agent,
                 workflow_context,
             });
@@ -885,13 +942,16 @@ router.get('/get-session-messages', requireAuth, async (req, res) => {
         // Include active_job_id so the frontend knows if this session
         // has an in-flight turn (for busy indicator / poll-on-return).
         const activeJobId = session?.active_job_id || null;
+        // Plan/Execute toggle state — the frontend restores it on session switch.
+        const executionMode = normalizeExecutionMode(session?.execution_mode);
 
         if (!includeFiles) {
             const payload = {
                 messages,
                 workflow_ids: workflowIds,
                 workflow_grid: workflowGrid,
-                active_job_id: activeJobId
+                active_job_id: activeJobId,
+                execution_mode: executionMode
             };
             return res.status(200).json(payload);
         }
@@ -906,6 +966,7 @@ router.get('/get-session-messages', requireAuth, async (req, res) => {
             workflow_ids: workflowIds,
             workflow_grid: workflowGrid,
             active_job_id: activeJobId,
+            execution_mode: executionMode,
             session_files: sessionFiles.files,
             session_files_pagination: {
                 total: sessionFiles.total,
@@ -1310,6 +1371,8 @@ router.post('/plan/:planId/approve', requireAuth, async (req, res) => {
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
+        if (!(await requireExecuteMode(res, session_id, logger))) return;
+
         await runChatTurn(req, res, {
             query: `Execute step 1 of approved plan: ${plan.title}`,
             model,
@@ -1361,6 +1424,8 @@ router.post('/plan/:planId/execute-next', requireAuth, async (req, res) => {
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
+        if (!(await requireExecuteMode(res, session_id, logger))) return;
+
         await runChatTurn(req, res, {
             query: `Execute step ${current_step_index + 1} of plan: ${plan.title}`,
             model,
@@ -1411,6 +1476,8 @@ router.post('/plan/:planId/skip-step/:stepId', requireAuth, async (req, res) => 
         const resolved = resolveUserId(req, req.body.user_id);
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
+
+        if (!(await requireExecuteMode(res, session_id, logger))) return;
 
         // Mark the step as skipped
         const updatedPlan = JSON.parse(JSON.stringify(plan));
@@ -1534,6 +1601,40 @@ router.post('/update-session-title', requireAuth, async (req, res) => {
     } catch (error) {
         console.error('Error updating session title:', error);
         res.status(500).json({ message: 'Failed to update session title', error: error.message });
+    }
+});
+
+/**
+ * Persist the Plan/Execute toggle for a chat session.
+ * Body: { session_id, execution_mode: 'plan' | 'execute' }
+ */
+router.post('/update-session-execution-mode', requireAuth, async (req, res) => {
+    try {
+        const { session_id, execution_mode } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        const user_id = resolved.userId;
+
+        if (!session_id) {
+            return res.status(400).json({ message: 'session_id is required' });
+        }
+        if (!isValidExecutionMode(execution_mode)) {
+            return res.status(400).json({ message: `execution_mode must be one of: plan, execute` });
+        }
+
+        // The session may not exist yet (toggle flipped before the first
+        // message) — register it so the mode is not lost.
+        await registerChatSession(session_id, user_id);
+        const updateResult = await setSessionExecutionMode(session_id, user_id, execution_mode);
+
+        if (updateResult.matchedCount === 0) {
+            return res.status(404).json({ message: 'Session not found or user not authorized' });
+        }
+
+        res.status(200).json({ session_id, execution_mode });
+    } catch (error) {
+        console.error('Error updating session execution mode:', error);
+        res.status(500).json({ message: 'Failed to update session execution mode', error: error.message });
     }
 });
 
