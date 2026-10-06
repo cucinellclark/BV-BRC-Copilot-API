@@ -248,7 +248,8 @@ async function checkAndHandleWorkflow(watch, collection) {
   }
 
   // Build the chat completion message (same logic as the /workflow-complete webhook)
-  const completionMessage = buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds);
+  const completionMessage = buildCompletionMessage(
+    status, workflowName, steps, outputPaths, externalIds, submission.error);
 
   // Build message document
   const messageId = uuidv4();
@@ -387,7 +388,37 @@ async function fetchGoWeSubmission(submissionId, authToken) {
 // Message builder (mirrors /workflow-complete webhook logic)
 // ---------------------------------------------------------------------------
 
-function buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds) {
+/**
+ * Pull a human-readable failure reason out of a GoWe submission error.
+ *
+ * Shape: { code, message, context: { stderr, exit_code, step_id, task_id } }.
+ * The stderr tail is far more useful than the generic message
+ * ("step 'run_tool' task failed"), so prefer it. Keeps the last few
+ * non-empty, non-stack-trace lines and caps the length so a chat message
+ * stays readable.
+ */
+function extractFailureReason(submissionError) {
+  if (!submissionError) return null;
+  const stderr = submissionError.context?.stderr;
+  if (stderr && stderr.trim()) {
+    const lines = stderr
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l
+        && !l.startsWith('at ')             // Perl/JS stack frames
+        && !l.startsWith('\tat ')
+        && !/^[A-Za-z:_]+::[A-Za-z_]+\(/.test(l)  // Perl::Sub(...) frames
+        && !l.startsWith('eval {')
+        && !l.startsWith('...(earlier output truncated)'));
+    const tail = lines.slice(-3).join(' ');
+    if (tail) {
+      return tail.length > 500 ? tail.slice(0, 500) + '…' : tail;
+    }
+  }
+  return submissionError.message || null;
+}
+
+function buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds, submissionError) {
   // Build a job ID suffix for the message (shows BV-BRC job IDs if available)
   const jobIdSuffix = (externalIds && externalIds.length > 0)
     ? ` Job ID${externalIds.length > 1 ? 's' : ''}: ${externalIds.map(e => e.external_id).join(', ')}.`
@@ -413,7 +444,18 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
   } else if (status === 'failed') {
     const failedStep = steps.find(s => s.status === 'failed');
     const failedName = failedStep ? failedStep.step_name : 'unknown step';
-    const errorMsg = failedStep?.error_message || 'unknown error';
+
+    // Prefer a step-level message, then the submission error's captured
+    // stderr, then its generic message. GoWe often reports no step_instances
+    // at all for a single-tool workflow, which left this as "unknown step
+    // encountered an error: unknown error" even though the real reason was
+    // sitting in submission.error.context.stderr. GoWe keeps the TAIL of that
+    // stderr, because BV-BRC job output opens with an environment dump and
+    // ends with the diagnosis.
+    const errorMsg =
+      failedStep?.error_message
+      || extractFailureReason(submissionError)
+      || 'unknown error';
 
     const completedSteps = steps
       .filter(s => s.status === 'succeeded' || s.status === 'completed')
@@ -423,8 +465,13 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
       })
       .join(', ');
 
+    // Only name the step when we actually know it. GoWe reports no
+    // step_instances for a single-tool workflow, and "unknown step
+    // encountered an error" reads worse than simply stating the reason.
+    const where = failedStep ? `${failedName} encountered an error: ` : '';
+
     return `Your **${workflowName}** job has failed.${jobIdSuffix} ` +
-      `${failedName} encountered an error: ${errorMsg}.` +
+      `${where}${errorMsg}` + (errorMsg.endsWith('.') ? '' : '.') +
       (completedSteps ? ` Successfully completed steps: ${completedSteps}.` : '');
 
   } else if (status === 'cancelled') {
