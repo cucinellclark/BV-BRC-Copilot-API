@@ -20,7 +20,7 @@ const { createLogger } = require('./logger');
 const { emitSSE } = require('./sseUtils');
 const {
   getChatSession,
-  createChatSession,
+  registerChatSession,
   addMessagesToSession,
   addWorkflowIdToSession,
   getModelData,
@@ -738,7 +738,10 @@ async function executeOrchestratorLoop(opts) {
     chatSession = await getChatSession(session_id);
     if (!chatSession && save_chat) {
       try {
-        await createChatSession(session_id, user_id);
+        // Idempotent upsert, not insertOne: a concurrent registration
+        // (the frontend's /register-session) must not make this throw and
+        // leave chatSession null, which is how a first message got lost.
+        await registerChatSession(session_id, user_id, 'Untitled');
         chatSession = await getChatSession(session_id);
       } catch (err) {
         sessionLogger.warn('Failed to create chat session', { error: err.message });
@@ -865,8 +868,14 @@ async function executeOrchestratorLoop(opts) {
   let userMessagePersisted = false;
   if (save_chat && session_id) {
     try {
-      await addMessagesToSession(session_id, [userMessage]);
-      userMessagePersisted = true;
+      // updateOne matches 0 documents (and does not throw) when the
+      // session row is missing; only count the message as saved if it
+      // actually landed, so the final save below includes it otherwise.
+      const pushed = await addMessagesToSession(session_id, [userMessage]);
+      userMessagePersisted = !!(pushed && pushed.matchedCount > 0);
+      if (!userMessagePersisted) {
+        sessionLogger.warn('Early user-message persist matched no session; will retry at end of turn');
+      }
     } catch (err) {
       sessionLogger.warn('Failed to persist user message early', { error: err.message });
     }
@@ -989,8 +998,14 @@ async function executeOrchestratorLoop(opts) {
         // throw would skip persistence and the assistant bubble would
         // vanish on reload.
         const ps = err.partialState || {};
+        // Mark the stop in the saved message so a reload shows what
+        // happened. With a thinking model a Stop usually lands before any
+        // text, which used to persist an empty assistant bubble.
+        const partialText = ps.responseText || ps.streamedResponse || '';
         state = {
-          responseText: ps.responseText || ps.streamedResponse || '',
+          responseText: partialText.trim()
+            ? `${partialText}\n\n_Stopped._`
+            : '_Stopped before a response was ready._',
           streamedResponse: ps.streamedResponse || '',
           agentsUsed: ps.agentsUsed || [],
           toolCalls: ps.toolCalls || [],
@@ -1027,7 +1042,8 @@ async function executeOrchestratorLoop(opts) {
         timestamp: new Date().toISOString()
       });
       state = {
-        responseText: 'I encountered an error connecting to the backend. Please try again.',
+        responseText: 'Sorry — the Copilot backend stopped responding before it finished ' +
+          '(it may have been restarting). Please send your message again.',
         agentsUsed: [],
         toolCalls: [],
         resultForUi: {},
@@ -1071,7 +1087,8 @@ async function executeOrchestratorLoop(opts) {
         throw fallbackErr;
       }
       state = {
-        responseText: 'I encountered an error processing your request. Please try again.',
+        responseText: 'Sorry — the Copilot backend could not process that request. ' +
+          'Please send your message again.',
         agentsUsed: [],
         toolCalls: [],
         resultForUi: {},
@@ -1339,7 +1356,7 @@ async function executeOrchestratorLoop(opts) {
   if (save_chat && session_id) {
     try {
       if (!chatSession) {
-        await createChatSession(session_id, user_id);
+        await registerChatSession(session_id, user_id, 'Untitled');
       }
 
       let messagesToSave = userMessagePersisted
@@ -1350,7 +1367,13 @@ async function executeOrchestratorLoop(opts) {
       messagesToSave = messagesToSave.filter(m => !(m && m._skip_persist === true));
 
       if (messagesToSave.length > 0) {
-        await addMessagesToSession(session_id, messagesToSave);
+        const pushed = await addMessagesToSession(session_id, messagesToSave);
+        if (!pushed || pushed.matchedCount === 0) {
+          sessionLogger.error('Saving messages matched no session document; turn not persisted', {
+            session_id,
+            count: messagesToSave.length,
+          });
+        }
       }
       sessionLogger.info('Saved messages to session', {
         count: messagesToSave.length,

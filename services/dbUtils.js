@@ -473,8 +473,12 @@ async function registerChatSession(sessionId, userId, title = 'New Chat') {
     const now = new Date();
     const normalizedTitle = (typeof title === 'string' && title.trim()) ? title.trim() : 'New Chat';
 
+    // Match on session_id alone. Callers sit behind requireSessionOwner,
+    // so any existing row belongs to this user, possibly under a legacy
+    // bare user_id ("alice" vs "alice@patricbrc.org"). Filtering on
+    // user_id as well would insert a duplicate row for those sessions.
     const result = await chatCollection.updateOne(
-      { session_id: sessionId, user_id: userId },
+      { session_id: sessionId },
       {
         $setOnInsert: {
           session_id: sessionId,
