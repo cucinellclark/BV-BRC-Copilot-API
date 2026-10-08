@@ -1077,6 +1077,42 @@ async function clearSessionActiveJob(sessionId, jobId) {
   }
 }
 
+/**
+ * Every user_id recorded on documents with this session_id.
+ * Plural on purpose: nothing enforces a unique session_id, so ownership
+ * checks must look at all copies, not whichever findOne returns.
+ * @param {string} sessionId
+ * @returns {Array<string>} distinct user_ids (empty when the session does not exist)
+ */
+async function getSessionOwnerIds(sessionId) {
+  try {
+    if (!sessionId) return [];
+    const db = await connectToDatabase();
+    return await db.collection('chat_sessions').distinct('user_id', { session_id: sessionId });
+  } catch (error) {
+    throw new LLMServiceError('Failed to look up session owner', error);
+  }
+}
+
+/**
+ * Session whose in-flight turn is this job (active_job_id), if any.
+ * @param {string} jobId
+ * @returns {string|null} session_id
+ */
+async function getSessionIdForActiveJob(jobId) {
+  try {
+    if (!jobId) return null;
+    const db = await connectToDatabase();
+    const doc = await db.collection('chat_sessions').findOne(
+      { active_job_id: jobId },
+      { projection: { session_id: 1 } }
+    );
+    return doc ? doc.session_id : null;
+  } catch (error) {
+    throw new LLMServiceError('Failed to look up session for job', error);
+  }
+}
+
 module.exports = {
   getModelData,
   getActiveModels,
@@ -1119,5 +1155,7 @@ module.exports = {
   getUserWorkflowIds,
   updatePlanInSession,
   setSessionActiveJob,
-  clearSessionActiveJob
+  clearSessionActiveJob,
+  getSessionOwnerIds,
+  getSessionIdForActiveJob
 };

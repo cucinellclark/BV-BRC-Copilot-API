@@ -18,6 +18,8 @@ jest.mock('../services/dbUtils', () => {
     return {
         ...actual,
         getChatSession: mockGetChatSession,
+        getSessionOwnerIds: jest.fn().mockResolvedValue([]),
+        getSessionIdForActiveJob: jest.fn().mockResolvedValue(null),
         addMessagesToSession: mockAddMessagesToSession,
         // Stubs for other imports that chatRoutes pulls in at load time
         getModelData: jest.fn(),
@@ -69,7 +71,7 @@ jest.mock('../services/chatService', () => ({}));
 
 // Mock auth middleware to be a no-op
 jest.mock('../middleware/auth', () => ({
-    requireAuth: (req, res, next) => next(),
+    requireAuth: (req, res, next) => { req.user = 'alice@patricbrc.org'; next(); },
     resolveUserId: (req, res, next) => next(),
 }));
 

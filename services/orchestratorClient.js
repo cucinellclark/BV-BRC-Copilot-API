@@ -28,6 +28,7 @@ const {
 } = require('./dbUtils');
 const { buildConversationContext, buildWorkflowAwareHistory } = require('./memory/conversationContextService');
 const { registerWorkflowWatch } = require('./workflowMonitorService');
+const { internalKeyHeaders } = require('./internalKey');
 const logger = createLogger('OrchestratorClient');
 
 const ORCHESTRATOR_URL = config.orchestrator?.url || 'http://140.221.78.15:9000';
@@ -565,6 +566,7 @@ async function streamFromOrchestrator(orchestratorRequest, responseStream, shoul
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
+        ...internalKeyHeaders(),
         ...(orchestratorRequest.auth_token
           ? { 'Authorization': `Bearer ${orchestratorRequest.auth_token}` }
           : {})
@@ -1050,6 +1052,7 @@ async function executeOrchestratorLoop(opts) {
         timeout: TIMEOUT_MS,
         headers: {
           'Content-Type': 'application/json',
+          ...internalKeyHeaders(),
           ...(auth_token ? { 'Authorization': `Bearer ${auth_token}` } : {})
         }
       });

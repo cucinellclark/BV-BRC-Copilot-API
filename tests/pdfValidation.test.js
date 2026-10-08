@@ -43,6 +43,8 @@ jest.mock('../services/chatRunner', () => ({
 // ---------------------------------------------------------------------------
 jest.mock('../services/dbUtils', () => ({
     getModelData: jest.fn(),
+    getSessionOwnerIds: jest.fn().mockResolvedValue([]),
+    getSessionIdForActiveJob: jest.fn().mockResolvedValue(null),
     getChatSession: jest.fn(),
     getSessionMessages: jest.fn(),
     getSessionTitle: jest.fn(),

@@ -27,9 +27,11 @@ const {
   getSessionFilesPaginated,
   getSessionStorageSize,
   getUserWorkflowIds,
-  searchRagChunkReferences
+  searchRagChunkReferences,
+  getSessionIdForActiveJob
 } = require('../services/dbUtils');
 const { requireAuth, resolveUserId } = require('../middleware/auth');
+const { requireSessionOwner, canAccessSession } = require('../middleware/sessionOwnership');
 const promptManager = require('../prompts');
 const { createLogger } = require('../services/logger');
 // queueService.js — only import what's still needed (abort route uses setCancelFlag from chatRunner instead)
@@ -178,7 +180,7 @@ async function getUserWorkflowsWithDetail(userId, authHeader) {
 }
 
 // ========== MAIN CHAT ROUTES ==========
-router.post('/copilot', requireAuth, async (req, res) => {
+router.post('/copilot', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('CopilotRoute', req.body.session_id);
 
     try {
@@ -242,7 +244,7 @@ router.post('/copilot', requireAuth, async (req, res) => {
 });
 
 // ========== AGENT COPILOT ROUTE (QUEUED WITH STREAMING) ==========
-router.post('/copilot-agent', requireAuth, async (req, res) => {
+router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('AgentRoute', req.body.session_id);
 
     try {
@@ -538,7 +540,7 @@ router.post('/copilot-agent', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/mcp/replay-tool-call', requireAuth, async (req, res) => {
+router.post('/mcp/replay-tool-call', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('McpReplayRoute', req.body && req.body.session_id);
     try {
         const authHeader = req.authToken || '';
@@ -639,6 +641,14 @@ router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
 
         logger.info('Job abort (Stop) request', { jobId });
 
+        // Only the owner of the turn may stop it. A job that is not (or no
+        // longer) a session's active turn has nothing to protect: setting a
+        // cancel flag for it is a no-op.
+        const sessionId = await getSessionIdForActiveJob(jobId);
+        if (sessionId && !(await canAccessSession(sessionId, req.user))) {
+            return res.status(403).json({ message: 'Not authorized to stop this job' });
+        }
+
         // Set the Redis cancel flag. Any gateway instance can call this
         // route — the flag is checked by the in-request runner's
         // shouldCancel poll and by the orchestrator's abort logic.
@@ -665,7 +675,7 @@ router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
 // GET /job/:jobId/stream — removed (Bull stream reconnection, dead code)
 // All RAG queue routes removed (RAG pipeline no longer used)
 
-router.post('/chat', requireAuth, async (req, res) => {
+router.post('/chat', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('ChatRoute', req.body.session_id);
 
     try {
@@ -777,7 +787,7 @@ router.get('/start-chat', requireAuth, (req, res) => {
     res.status(200).json({ message: 'created session id', session_id: sessionId, user_id: req.user });
 });
 
-router.post('/register-session', requireAuth, async (req, res) => {
+router.post('/register-session', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { session_id, title } = req.body || {};
         if (!session_id) {
@@ -799,7 +809,7 @@ router.post('/register-session', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/add-workflow-to-session', requireAuth, async (req, res) => {
+router.post('/add-workflow-to-session', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { session_id, workflow_id } = req.body || {};
         if (!session_id || !workflow_id) {
@@ -829,7 +839,7 @@ router.post('/add-workflow-to-session', requireAuth, async (req, res) => {
     }
 });
 
-router.get('/rag-chunk-search', requireAuth, async (req, res) => {
+router.get('/rag-chunk-search', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const chunk_id = typeof req.query.chunk_id === 'string' ? req.query.chunk_id.trim() : '';
         const rag_db = typeof req.query.rag_db === 'string'
@@ -894,7 +904,7 @@ router.get('/rag-chunk-search', requireAuth, async (req, res) => {
     }
 });
 
-router.get('/get-session-messages', requireAuth, async (req, res) => {
+router.get('/get-session-messages', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const session_id = req.query.session_id;
         if (!session_id) {
@@ -986,7 +996,7 @@ router.get('/get-session-messages', requireAuth, async (req, res) => {
     }
 });
 
-router.get('/get-session-files', requireAuth, async (req, res) => {
+router.get('/get-session-files', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const session_id = req.query.session_id;
         if (!session_id) {
@@ -1056,7 +1066,7 @@ router.get('/get-session-files', requireAuth, async (req, res) => {
     }
 });
 
-router.get('/get-session-title', requireAuth, async (req, res) => {
+router.get('/get-session-title', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const session_id = req.query.session_id;
         if (!session_id) {
@@ -1306,7 +1316,7 @@ router.post('/submit-workflow/:workflowId', requireAuth, async (req, res) => {
  * Answer clarification questions from the planning agent.
  * No planId required — the plan doesn't exist yet at this point.
  */
-router.post('/answer-questions', requireAuth, async (req, res) => {
+router.post('/answer-questions', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('AnswerQuestions', req.body.session_id);
     try {
         const {
@@ -1356,7 +1366,7 @@ router.post('/answer-questions', requireAuth, async (req, res) => {
 /**
  * Approve a plan and start executing the first step.
  */
-router.post('/plan/:planId/approve', requireAuth, async (req, res) => {
+router.post('/plan/:planId/approve', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('ApprovePlan', req.body.session_id);
     try {
         const { planId } = req.params;
@@ -1403,7 +1413,7 @@ router.post('/plan/:planId/approve', requireAuth, async (req, res) => {
 /**
  * Execute the next step in a plan.
  */
-router.post('/plan/:planId/execute-next', requireAuth, async (req, res) => {
+router.post('/plan/:planId/execute-next', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('ExecuteNextStep', req.body.session_id);
     try {
         const { planId } = req.params;
@@ -1456,7 +1466,7 @@ router.post('/plan/:planId/execute-next', requireAuth, async (req, res) => {
 /**
  * Skip a step during plan execution.
  */
-router.post('/plan/:planId/skip-step/:stepId', requireAuth, async (req, res) => {
+router.post('/plan/:planId/skip-step/:stepId', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('SkipStep', req.body.session_id);
     try {
         const { planId, stepId } = req.params;
@@ -1529,7 +1539,7 @@ router.post('/plan/:planId/skip-step/:stepId', requireAuth, async (req, res) => 
 /**
  * Edit remaining steps of a plan (non-streaming, just updates state).
  */
-router.post('/plan/:planId/edit', requireAuth, async (req, res) => {
+router.post('/plan/:planId/edit', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { planId } = req.params;
         const { plan, session_id } = req.body;
@@ -1585,7 +1595,7 @@ router.post('/generate-title-from-messages', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/update-session-title', requireAuth, async (req, res) => {
+router.post('/update-session-title', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { title, session_id } = req.body;
         const resolved = resolveUserId(req, req.body.user_id);
@@ -1608,7 +1618,7 @@ router.post('/update-session-title', requireAuth, async (req, res) => {
  * Persist the Plan/Execute toggle for a chat session.
  * Body: { session_id, execution_mode: 'plan' | 'execute' }
  */
-router.post('/update-session-execution-mode', requireAuth, async (req, res) => {
+router.post('/update-session-execution-mode', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { session_id, execution_mode } = req.body;
         const resolved = resolveUserId(req, req.body.user_id);
@@ -1638,7 +1648,7 @@ router.post('/update-session-execution-mode', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/delete-session', requireAuth, async (req, res) => {
+router.post('/delete-session', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { session_id } = req.body;
         if (!session_id) {
@@ -1694,7 +1704,7 @@ router.post('/save-prompt', requireAuth, async (req, res) => {
 // ========== RATING & FEEDBACK ENDPOINTS ==========
 // User feedback and rating system
 
-router.post('/rate-conversation', requireAuth, async (req, res) => {
+router.post('/rate-conversation', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { session_id, rating } = req.body;
         const resolved = resolveUserId(req, req.body.user_id);
@@ -1806,7 +1816,7 @@ router.get('/workflow-watch/:submissionId/status', requireAuth, async (req, res)
             submission_id: submissionId
         });
 
-        if (!watch) {
+        if (!watch || !watch.session_id || !(await canAccessSession(watch.session_id, req.user))) {
             return res.status(404).json({ error: 'No watch found for this submission' });
         }
 
@@ -1834,7 +1844,7 @@ router.get('/workflow-watch/:submissionId/status', requireAuth, async (req, res)
 // Session workflow watches -- returns all workflow watches for a given
 // chat session, including external_ids (BV-BRC job IDs).
 // ---------------------------------------------------------------------------
-router.get('/session/:sessionId/workflow-watches', requireAuth, async (req, res) => {
+router.get('/session/:sessionId/workflow-watches', requireAuth, requireSessionOwner, async (req, res) => {
     const logger = createLogger('SessionWorkflowWatches');
     try {
         const { sessionId } = req.params;

@@ -22,6 +22,8 @@ jest.mock('../services/dbUtils', () => {
     return {
         ...actual,
         getChatSession: mockGetChatSession,
+        getSessionOwnerIds: jest.fn().mockResolvedValue([]),
+        getSessionIdForActiveJob: jest.fn().mockResolvedValue(null),
         setSessionExecutionMode: mockSetSessionExecutionMode,
         registerChatSession: mockRegisterChatSession,
         getModelData: jest.fn(),
@@ -64,7 +66,7 @@ jest.mock('../services/database', () => ({
 jest.mock('../services/chatService', () => ({}));
 
 jest.mock('../middleware/auth', () => ({
-    requireAuth: (req, res, next) => next(),
+    requireAuth: (req, res, next) => { req.user = 'alice@patricbrc.org'; next(); },
     resolveUserId: (req, userId) => ({ userId: userId || 'alice@patricbrc.org' }),
 }));
 
