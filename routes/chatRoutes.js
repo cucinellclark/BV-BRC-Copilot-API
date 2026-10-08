@@ -21,13 +21,11 @@ const {
   saveUserPrompt,
   registerChatSession,
   addWorkflowIdToSession,
-  addMessagesToSession,
   rateConversation,
   rateMessage,
   getSessionFilesPaginated,
   getSessionStorageSize,
   getUserWorkflowIds,
-  searchRagChunkReferences,
   getSessionIdForActiveJob
 } = require('../services/dbUtils');
 const { requireAuth, resolveUserId } = require('../middleware/auth');
@@ -37,8 +35,6 @@ const { createLogger } = require('../services/logger');
 // queueService.js — only import what's still needed (abort route uses setCancelFlag from chatRunner instead)
 // ragQueueService.js deleted — RAG routes removed
 const { writeSseEvent } = require('../services/sseUtils');
-const { executeMcpTool, isReplayableTool } = require('../services/mcp/mcpExecutor');
-const { register: registerSessionStream, unregister: unregisterSessionStream, pushToSession } = require('../services/sessionStreamRegistry');
 const { runChatTurn, setCancelFlag } = require('../services/chatRunner');
 const config = require('../config.json');
 const router = express.Router();
@@ -178,70 +174,6 @@ async function getUserWorkflowsWithDetail(userId, authHeader) {
     workflows.sort((a, b) => workflowSortKey(b) - workflowSortKey(a));
     return workflows;
 }
-
-// ========== MAIN CHAT ROUTES ==========
-router.post('/copilot', requireAuth, requireSessionOwner, async (req, res) => {
-    const logger = createLogger('CopilotRoute', req.body.session_id);
-
-    try {
-        logger.info('Copilot request received', {
-            user_id: req.body.user_id,
-            model: req.body.model,
-            stream: req.body.stream,
-            has_rag: !!req.body.rag_db
-        });
-
-        if (req.body.stream === true) {
-            // -------- Streaming (SSE) path --------
-            // Validate user identity before streaming
-            const streamResolved = resolveUserId(req, req.body.user_id);
-            if (streamResolved.error) return res.status(streamResolved.status).json({ message: streamResolved.error });
-
-            logger.debug('Using streaming response');
-            res.set({
-                // Headers required for proper SSE behaviour and to disable proxy buffering
-                'Content-Type': 'text/event-stream; charset=utf-8',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'X-Accel-Buffering': 'no' // Prevent Nginx (and similar) from buffering the stream
-            });
-            // Immediately flush the headers so the client is aware it's an SSE stream
-            if (typeof res.flushHeaders === 'function') {
-                res.flushHeaders();
-            }
-
-            // Override user_id in body with the authenticated identity
-            const streamBody = { ...req.body, user_id: streamResolved.userId };
-            await ChatService.handleCopilotStreamRequest(streamBody, res);
-            // The stream handler is responsible for ending the response
-            return;
-        }
-
-        // -------- Standard JSON path --------
-        logger.debug('Using standard JSON response');
-        const { query, model, session_id, system_prompt, save_chat = true, include_history = true, rag_db = null, num_docs = null, image = null, enhanced_prompt = null } = req.body;
-        const resolved = resolveUserId(req, req.body.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const user_id = resolved.userId;
-        const response = await ChatService.handleCopilotRequest({ query, model, session_id, user_id, system_prompt, save_chat, include_history, rag_db, num_docs, image, enhanced_prompt });
-
-        logger.info('Copilot request completed successfully');
-        res.status(200).json(response);
-    } catch (error) {
-        logger.error('Copilot request failed', {
-            error: error.message,
-            stack: error.stack
-        });
-
-        // If this was a streaming request, send error over SSE, else JSON
-        if (req.body.stream === true) {
-            writeSseEvent(res, 'error', { message: 'Internal server error', error: error.message });
-            res.end();
-        } else {
-            res.status(500).json({ message: 'Internal server error', error });
-        }
-    }
-});
 
 // ========== AGENT COPILOT ROUTE (QUEUED WITH STREAMING) ==========
 router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res) => {
@@ -540,95 +472,6 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
     }
 });
 
-router.post('/mcp/replay-tool-call', requireAuth, requireSessionOwner, async (req, res) => {
-    const logger = createLogger('McpReplayRoute', req.body && req.body.session_id);
-    try {
-        const authHeader = req.authToken || '';
-
-        const toolCall = req.body && typeof req.body.tool_call === 'object' ? req.body.tool_call : {};
-        const toolId = req.body.tool_id || toolCall.tool || toolCall.tool_id;
-        const parameters = req.body.parameters || req.body.arguments_executed || toolCall.arguments_executed || toolCall.arguments || {};
-        const replayPageSize = req.body.page_size || config.global_settings?.replay_data_page_size_default;
-        const sessionId = req.body.session_id || null;
-        const resolved = resolveUserId(req, req.body.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const userId = resolved.userId;
-
-        if (!toolId || typeof toolId !== 'string') {
-            return res.status(400).json({
-                message: 'tool_id (or tool_call.tool) is required'
-            });
-        }
-        if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
-            return res.status(400).json({
-                message: 'parameters (or tool_call.arguments_executed) must be an object'
-            });
-        }
-        if (replayPageSize !== undefined) {
-            const parsedPageSize = Number.parseInt(replayPageSize, 10);
-            if (!Number.isFinite(parsedPageSize) || parsedPageSize <= 0) {
-                return res.status(400).json({
-                    message: 'page_size must be a positive integer'
-                });
-            }
-        }
-
-        if (!isReplayableTool(toolId)) {
-            return res.status(403).json({
-                message: `Tool is not replayable: ${toolId}`,
-                tool_id: toolId
-            });
-        }
-
-        const executionContext = {
-            session_id: sessionId,
-            user_id: userId,
-            auth_token: authHeader,
-            authToken: authHeader,
-            replay_page_size: replayPageSize
-        };
-
-        logger.info('Replaying MCP tool call', {
-            tool_id: toolId,
-            session_id: sessionId,
-            user_id: userId,
-            parameter_keys: Object.keys(parameters || {})
-        });
-
-        const result = await executeMcpTool(
-            toolId,
-            parameters,
-            authHeader,
-            executionContext,
-            logger
-        );
-
-        const normalizedCall = (result && result.call && typeof result.call === 'object')
-            ? result.call
-            : {
-                tool: toolId,
-                arguments_executed: parameters,
-                replayable: isReplayableTool(toolId)
-            };
-
-        return res.status(200).json({
-            message: 'Tool replay executed successfully',
-            tool_id: toolId,
-            call: normalizedCall,
-            result
-        });
-    } catch (error) {
-        logger.error('Tool replay failed', {
-            error: error.message,
-            stack: error.stack
-        });
-        return res.status(500).json({
-            message: 'Tool replay failed',
-            error: error.message
-        });
-    }
-});
-
 // GET /job/:jobId/status — removed (Bull queue status polling, dead code)
 // GET /queue/stats — removed (Bull queue monitoring, dead code)
 
@@ -675,109 +518,12 @@ router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
 // GET /job/:jobId/stream — removed (Bull stream reconnection, dead code)
 // All RAG queue routes removed (RAG pipeline no longer used)
 
-router.post('/chat', requireAuth, requireSessionOwner, async (req, res) => {
-    const logger = createLogger('ChatRoute', req.body.session_id);
-
-    try {
-        logger.info('Chat request received', {
-            user_id: req.body.user_id,
-            model: req.body.model
-        });
-
-        const { query, model, session_id, system_prompt, save_chat = true } = req.body;
-        const resolved = resolveUserId(req, req.body.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const user_id = resolved.userId;
-        const response = await ChatService.handleChatRequest({
-            query,
-            model,
-            session_id,
-            user_id,
-            system_prompt,
-            save_chat
-        });
-
-        logger.info('Chat request completed successfully');
-        res.status(200).json(response);
-    } catch (error) {
-        logger.error('Chat request failed', {
-            error: error.message,
-            stack: error.stack
-        });
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
-router.post('/chat-only', requireAuth, async (req, res) => {
-    try {
-        const { query, model, system_prompt } = req.body;
-        if (!query || !model) {
-            return res.status(400).json({ message: 'query and model are required' });
-        }
-
-        const response_json = await ChatService.handleChatQuery({ query, model, system_prompt });
-        res.status(200).json({ message: 'success', response:response_json });
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
-// ========== STREAMING CHAT ENDPOINTS ==========
-// Real-time streaming chat functionality
-
-router.post('/setup-copilot-stream', requireAuth, async (req, res) => {
-    try {
-        const setupData = await ChatService.setupCopilotStream(req.body);
-        res.status(200).json({ 
-            message: 'success', 
-            setup_data: setupData 
-        });
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ message: 'Internal server error', error });
-    }
-});
-
-router.post('/copilot-stream', requireAuth, async (req, res) => {
-    try {
-        // -------- Streaming (SSE) path --------
-        res.set({
-            // Headers required for proper SSE behaviour and to disable proxy buffering
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no' // Prevent Nginx (and similar) from buffering the stream
-        });
-        // Immediately flush the headers so the client is aware it's an SSE stream
-        if (typeof res.flushHeaders === 'function') {
-            res.flushHeaders();
-        }
-
-        const { stream_id } = req.body;
-        if (!stream_id) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'stream_id is required' })}\n\n`);
-            res.end();
-            return;
-        }
-
-        const setupData = await streamStore.get(stream_id);
-        if (!setupData) {
-            res.write(`event: error\ndata: ${JSON.stringify({ message: 'Invalid or expired stream_id' })}\n\n`);
-            res.end();
-            return;
-        }
-
-        await ChatService.handleCopilotStreamRequest(setupData, res);
-        // The stream handler is responsible for ending the response and removing from store
-    } catch (error) {
-        console.error('Error:', error);
-        res.write(`event: error\ndata: ${JSON.stringify({ message: 'Internal server error', error: error.message })}\n\n`);
-        res.end();
-    }
-});
-
 // POST /rag, POST /rag/stream, POST /chat-image — removed (deprecated, no longer called by frontend)
+// POST /copilot, /chat, /chat-only, /demo, /setup-copilot-stream, /copilot-stream,
+// /mcp/replay-tool-call, /submit-workflow/:id, /workflow-complete, GET /rag-chunk-search
+// — removed 2026-10-08 (no callers; /chat-only was an open LLM relay and
+// /workflow-complete an unauthenticated message writer — the Bull poller in
+// workflowMonitorService delivers completion messages)
 
 // ========== SESSION MANAGEMENT ENDPOINTS ==========
 // Chat session creation, retrieval, and management
@@ -836,71 +582,6 @@ router.post('/add-workflow-to-session', requireAuth, requireSessionOwner, async 
     } catch (error) {
         console.error('Error adding workflow to session:', error);
         return res.status(500).json({ message: 'Failed to add workflow to session', error: error.message });
-    }
-});
-
-router.get('/rag-chunk-search', requireAuth, requireSessionOwner, async (req, res) => {
-    try {
-        const chunk_id = typeof req.query.chunk_id === 'string' ? req.query.chunk_id.trim() : '';
-        const rag_db = typeof req.query.rag_db === 'string'
-            ? req.query.rag_db.trim()
-            : (typeof req.query.database_name === 'string' ? req.query.database_name.trim() : '');
-        const rag_api_name = typeof req.query.rag_api_name === 'string' ? req.query.rag_api_name.trim() : '';
-        const doc_id = typeof req.query.doc_id === 'string' ? req.query.doc_id.trim() : '';
-        const source_id = typeof req.query.source_id === 'string' ? req.query.source_id.trim() : '';
-        const session_id = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
-        // Validate user_id filter against authenticated identity if provided
-        const resolved = resolveUserId(req, req.query.user_id);
-        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
-        const user_id = req.query.user_id ? resolved.userId : '';
-        const message_id = typeof req.query.message_id === 'string' ? req.query.message_id.trim() : '';
-        const limitParam = parseInt(req.query.limit, 10);
-        const offsetParam = parseInt(req.query.offset, 10);
-        const limit = (!isNaN(limitParam) && limitParam > 0) ? Math.min(limitParam, 200) : 50;
-        const offset = (!isNaN(offsetParam) && offsetParam >= 0) ? offsetParam : 0;
-        const include_content = parseBooleanFlag(req.query.include_content, false);
-
-        if (!chunk_id && !rag_db && !rag_api_name && !doc_id && !source_id && !session_id && !user_id && !message_id) {
-            return res.status(400).json({
-                message: 'At least one filter is required',
-                accepted_filters: ['chunk_id', 'rag_db', 'rag_api_name', 'doc_id', 'source_id', 'session_id', 'user_id', 'message_id']
-            });
-        }
-
-        const result = await searchRagChunkReferences({
-            chunk_id: chunk_id || undefined,
-            rag_db: rag_db || undefined,
-            rag_api_name: rag_api_name || undefined,
-            doc_id: doc_id || undefined,
-            source_id: source_id || undefined,
-            session_id: session_id || undefined,
-            user_id: user_id || undefined,
-            message_id: message_id || undefined,
-            limit,
-            offset,
-            include_content
-        });
-
-        return res.status(200).json({
-            filters: {
-                chunk_id: chunk_id || null,
-                rag_db: rag_db || null,
-                rag_api_name: rag_api_name || null,
-                doc_id: doc_id || null,
-                source_id: source_id || null,
-                session_id: session_id || null,
-                user_id: user_id || null,
-                message_id: message_id || null
-            },
-            total: result.total,
-            limit: result.limit,
-            offset: result.offset,
-            has_more: result.has_more,
-            items: result.items
-        });
-    } catch (error) {
-        console.error('Error searching RAG chunk references:', error);
-        return res.status(500).json({ message: 'Failed to search RAG chunk references', error: error.message });
     }
 });
 
@@ -1252,59 +933,6 @@ router.get('/get-user-workflow-summary', requireAuth, async (req, res) => {
     } catch (error) {
         console.error('Error retrieving user workflow summary:', error);
         return res.status(500).json({ message: 'Failed to retrieve user workflow summary', error: error.message });
-    }
-});
-
-router.post('/submit-workflow/:workflowId', requireAuth, async (req, res) => {
-    try {
-        const { workflowId } = req.params;
-        if (!workflowId) {
-            return res.status(400).json({ message: 'workflowId is required' });
-        }
-
-        // Auth header is guaranteed by requireAuth middleware
-        const authHeader = req.authToken;
-
-        const workflowBaseUrl = process.env.WORKFLOW_URL || config.workflow_url || 'https://dev-7.bv-brc.org/api/v1';
-
-        // Proxy the submit request to the workflow engine
-        const submitUrl = `${workflowBaseUrl}/workflows/${encodeURIComponent(workflowId)}/submit`;
-        const response = await axios.post(
-            submitUrl,
-            {},
-            {
-                headers: {
-                    'Authorization': authHeader,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 30000
-            }
-        );
-
-        return res.status(200).json({
-            workflow_id: workflowId,
-            status: response.data?.status || 'pending',
-            message: response.data?.message || 'Workflow submitted for execution',
-            submitted_at: new Date().toISOString(),
-            ...response.data
-        });
-    } catch (error) {
-        console.error('Error submitting workflow:', error.message);
-
-        // Forward workflow engine error details if available
-        if (error.response) {
-            return res.status(error.response.status || 500).json({
-                message: 'Workflow submission failed',
-                error: error.response.data?.detail || error.response.data?.message || error.message,
-                workflow_id: req.params.workflowId
-            });
-        }
-
-        return res.status(500).json({
-            message: 'Failed to submit workflow',
-            error: error.message,
-            workflow_id: req.params.workflowId
-        });
     }
 });
 
@@ -1773,19 +1401,7 @@ router.post('/rate-message', requireAuth, async (req, res) => {
     }
 });
 
-// ========== DEMO & UTILITY ENDPOINTS ==========
-// Demo functionality and utility endpoints
-
-router.post('/demo', requireAuth, async (req, res) => {
-    try {
-        const { text, rag_flag } = req.body;
-        const lambdaResponse = await ChatService.handleLambdaDemo(text, rag_flag);
-        res.status(200).json({ content: lambdaResponse });
-    } catch (error) {
-        console.log(error);
-        res.status(500).json({ message: 'Internal server error in demo', error });
-    }
-});
+// ========== UTILITY ENDPOINTS ==========
 
 router.post('/get-path-state', requireAuth, async (req, res) => {
     try {
@@ -1873,177 +1489,6 @@ router.get('/session/:sessionId/workflow-watches', requireAuth, requireSessionOw
     } catch (error) {
         logger.error('Error fetching session workflow watches', { error: error.message });
         return res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// ---------------------------------------------------------------------------
-// Workflow completion webhook -- called by the workflow engine when a
-// workflow finishes (succeeded, failed, or cancelled).  Writes a
-// completion summary message into the chat session so the user sees it
-// on the next page load.
-// ---------------------------------------------------------------------------
-router.post('/workflow-complete', async (req, res) => {
-    const webhookLogger = createLogger('workflow-webhook');
-    try {
-        const payload = req.body;
-
-        // --- Validate required fields ---
-        if (!payload.workflow_id || !payload.session_id) {
-            webhookLogger.warn('Webhook rejected: missing workflow_id or session_id');
-            return res.status(400).json({
-                error: 'workflow_id and session_id are required'
-            });
-        }
-
-        const {
-            workflow_id,
-            workflow_name,
-            status,
-            session_id,
-            owner,
-            completed_at,
-            steps,
-            output_paths
-            // auth_token intentionally not destructured / not logged
-        } = payload;
-
-        webhookLogger.info(`Workflow completion webhook received: workflow_id=${workflow_id}, status=${status}, session_id=${session_id}`);
-
-        // --- Verify session exists ---
-        const session = await getChatSession(session_id);
-        if (!session) {
-            webhookLogger.warn(`Webhook rejected: session ${session_id} not found`);
-            return res.status(404).json({
-                error: `Session ${session_id} not found`
-            });
-        }
-
-        // --- Build completion message text ---
-        let completionMessage;
-
-        if (status === 'succeeded') {
-            const stepSummaries = (steps || [])
-                .filter(s => s.status === 'succeeded')
-                .map(s => {
-                    const elapsed = s.elapsed_time ? ` (${s.elapsed_time})` : '';
-                    return `${s.step_name} [${s.app}]${elapsed}`;
-                })
-                .join(', ');
-
-            const pathList = (output_paths || []).length > 0
-                ? output_paths.join(', ')
-                : 'your workspace';
-
-            completionMessage =
-                `Your workflow **${workflow_name || workflow_id}** has completed successfully. ` +
-                `Steps completed: ${stepSummaries || 'none'}. ` +
-                `Results are available in your workspace at ${pathList}.`;
-
-        } else if (status === 'failed') {
-            const failedStep = (steps || []).find(s => s.status === 'failed');
-            const failedName = failedStep ? failedStep.step_name : 'unknown step';
-            const errorMsg = failedStep && failedStep.error_message
-                ? failedStep.error_message
-                : 'unknown error';
-
-            const completedSteps = (steps || [])
-                .filter(s => s.status === 'succeeded')
-                .map(s => {
-                    const elapsed = s.elapsed_time ? ` (${s.elapsed_time})` : '';
-                    return `${s.step_name} [${s.app}]${elapsed}`;
-                })
-                .join(', ');
-
-            completionMessage =
-                `Your workflow **${workflow_name || workflow_id}** has failed. ` +
-                `${failedName} encountered an error: ${errorMsg}.` +
-                (completedSteps
-                    ? ` Successfully completed steps: ${completedSteps}.`
-                    : '');
-
-        } else if (status === 'cancelled') {
-            completionMessage =
-                `Your workflow **${workflow_name || workflow_id}** was cancelled.`;
-
-        } else {
-            completionMessage =
-                `Your workflow **${workflow_name || workflow_id}** finished with status: ${status}.`;
-        }
-
-        // --- Build message document ---
-        const message = {
-            message_id: uuidv4(),
-            role: 'assistant',
-            content: completionMessage,
-            timestamp: new Date(),
-            agent_metadata: {
-                system_initiated: true,
-                trigger: 'workflow_complete',
-                workflow_id: workflow_id
-            },
-            workflow: {
-                workflow_id: workflow_id,
-                workflow_name: workflow_name || null,
-                status: status,
-                output_paths: output_paths || [],
-                completed_at: completed_at || new Date().toISOString(),
-                steps: (steps || []).map(s => ({
-                    step_name: s.step_name,
-                    app_name: s.app || s.app_name || null,
-                    status: s.status,
-                    task_id: s.task_id || null,
-                    elapsed_time: s.elapsed_time || null,
-                    error_message: s.error_message || s.error || null
-                })),
-                step_count: (steps || []).length,
-                succeeded_steps: (steps || []).filter(s => s.status === 'succeeded').length,
-                failed_steps: (steps || []).filter(s => s.status === 'failed').length
-            }
-        };
-        // Alias as workflowData for frontend consistency
-        message.workflowData = message.workflow;
-
-        // --- Write to MongoDB ---
-        await addMessagesToSession(session_id, [message]);
-
-        // Mark the workflow watch as completed so the poller doesn't
-        // write a duplicate completion message.
-        try {
-            const { connectToDatabase } = require('../services/database');
-            const db = await connectToDatabase();
-            const watchCollection = db.collection('workflow_watches');
-            const terminalStatus = (status === 'failed') ? 'failed' : 'completed';
-            await watchCollection.updateMany(
-                { workflow_id: workflow_id, status: 'active' },
-                { $set: { status: terminalStatus, gowe_state: status.toUpperCase(), completed_at: new Date() } }
-            );
-        } catch (watchErr) {
-            webhookLogger.warn('Failed to mark workflow watch as completed', { workflow_id, error: watchErr.message });
-        }
-
-        webhookLogger.info(`Completion message written to session ${session_id} for workflow ${workflow_id}`);
-
-        // --- Push SSE event to active streams (if any) ---
-        const pushed = pushToSession(session_id, 'workflow_complete', {
-            workflow_id: workflow_id,
-            workflow_name: workflow_name || null,
-            status: status,
-            output_paths: output_paths || [],
-            steps: message.workflow.steps,
-            message_id: message.message_id,
-            timestamp: message.timestamp
-        });
-        if (pushed > 0) {
-            webhookLogger.info(`Pushed workflow_complete SSE event to ${pushed} active stream(s) for session ${session_id}`);
-        }
-
-        return res.status(200).json({ ok: true });
-
-    } catch (error) {
-        webhookLogger.error(`Workflow completion webhook error: ${error.message}`, error);
-        return res.status(500).json({
-            error: 'Internal server error processing workflow completion'
-        });
     }
 });
 
