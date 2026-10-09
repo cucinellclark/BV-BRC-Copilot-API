@@ -25,6 +25,10 @@ const corsOptions = {
         'https://alpha.bv-brc.org',
         'https://www.bv-brc.org',
         'https://bv-brc.org',
+        'https://dev-3.bv-brc.org',
+        'https://dev-4.bv-brc.org',
+        'https://dev-5.bv-brc.org',
+        'https://dev-6.bv-brc.org',   // public test site (DevEnvironment)
         'https://dev-8.bv-brc.org',
         'https://dev-7.bv-brc.org',
         'http://localhost:3000',
