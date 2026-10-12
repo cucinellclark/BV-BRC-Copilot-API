@@ -240,14 +240,8 @@ async function checkAndHandleWorkflow(watch, collection) {
     };
   });
 
-  // Use output_paths from GoWe response.  Fall back to the submission's
-  // configured output_path (from the original job submission inputs).
-  let outputPaths = submission.output_paths || [];
-  if (outputPaths.length === 0 && submission.output_path) {
-    outputPaths = [submission.output_path];
-  }
+  const outputPaths = resolveOutputPaths(submission);
 
-  // Build the chat completion message (same logic as the /workflow-complete webhook)
   const completionMessage = buildCompletionMessage(
     status, workflowName, steps, outputPaths, externalIds, submission.error);
 
@@ -385,37 +379,65 @@ async function fetchGoWeSubmission(submissionId, authToken) {
 }
 
 // ---------------------------------------------------------------------------
-// Message builder (mirrors /workflow-complete webhook logic)
+// Message builder
 // ---------------------------------------------------------------------------
+
+/**
+ * Where the job's results went.  GoWe never returns output_paths or a
+ * top-level output_path on a submission; the folder is the output_path input
+ * that submit_gowe_job set (already rewritten under the chat folder).  Before
+ * this, every completion message read "available in your workspace at your
+ * workspace".
+ */
+function resolveOutputPaths(submission) {
+  if (!submission) return [];
+  if (Array.isArray(submission.output_paths) && submission.output_paths.length > 0) {
+    return submission.output_paths;
+  }
+  const configured = submission.output_path
+    || (submission.inputs && submission.inputs.output_path);
+  return typeof configured === 'string' && configured ? [configured] : [];
+}
+
+function workspaceUrl(path) {
+  return `https://www.bv-brc.org/workspace${encodeURI(path.startsWith('/') ? path : `/${path}`)}`;
+}
+
+/**
+ * Keep the readable part of an app's stderr: drop stack frames and the
+ * " at /path/File.pm line 123." suffixes, keep the last few lines, cap the
+ * length.  Used for both the step error and the submission error, so a raw
+ * Perl trace never reaches the chat.
+ */
+function cleanStderr(text) {
+  if (!text || !text.trim()) return null;
+  const lines = text
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l
+      && !l.startsWith('at ')             // Perl/JS stack frames
+      && !l.startsWith('\tat ')
+      && !/^[A-Za-z:_]+::[A-Za-z_]+\(/.test(l)  // Perl::Sub(...) frames
+      && !/\bcalled at \S+ line \d+/.test(l)  // Perl "... called at X line N"
+      && !l.startsWith('eval {')
+      && !l.startsWith('...(earlier output truncated)'))
+    .map(l => l.replace(/ at \/\S+ line \d+\.?$/, '').trim())
+    .filter(Boolean);
+  const tail = lines.slice(-3).join(' ');
+  if (!tail) return null;
+  return tail.length > 500 ? tail.slice(0, 500) + '…' : tail;
+}
 
 /**
  * Pull a human-readable failure reason out of a GoWe submission error.
  *
  * Shape: { code, message, context: { stderr, exit_code, step_id, task_id } }.
  * The stderr tail is far more useful than the generic message
- * ("step 'run_tool' task failed"), so prefer it. Keeps the last few
- * non-empty, non-stack-trace lines and caps the length so a chat message
- * stays readable.
+ * ("step 'run_tool' task failed"), so prefer it.
  */
 function extractFailureReason(submissionError) {
   if (!submissionError) return null;
-  const stderr = submissionError.context?.stderr;
-  if (stderr && stderr.trim()) {
-    const lines = stderr
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l
-        && !l.startsWith('at ')             // Perl/JS stack frames
-        && !l.startsWith('\tat ')
-        && !/^[A-Za-z:_]+::[A-Za-z_]+\(/.test(l)  // Perl::Sub(...) frames
-        && !l.startsWith('eval {')
-        && !l.startsWith('...(earlier output truncated)'));
-    const tail = lines.slice(-3).join(' ');
-    if (tail) {
-      return tail.length > 500 ? tail.slice(0, 500) + '…' : tail;
-    }
-  }
-  return submissionError.message || null;
+  return cleanStderr(submissionError.context?.stderr) || submissionError.message || null;
 }
 
 function buildCompletionMessage(status, workflowName, steps, outputPaths, externalIds, submissionError) {
@@ -433,13 +455,13 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
       })
       .join(', ');
 
-    const pathList = outputPaths.length > 0
-      ? outputPaths.join(', ')
-      : 'your workspace';
+    const where = outputPaths.length > 0
+      ? ` Results are in ${outputPaths.map(p => `\`${p}\` ([open in workspace](<${workspaceUrl(p)}>))`).join(', ')}.`
+      : ' Results are in your workspace (see the Jobs list).';
 
     return `Your **${workflowName}** job has completed successfully.${jobIdSuffix}` +
       (stepSummaries ? ` Steps completed: ${stepSummaries}.` : '') +
-      ` Results are available in your workspace at ${pathList}.`;
+      where;
 
   } else if (status === 'failed') {
     const failedStep = steps.find(s => s.status === 'failed');
@@ -453,7 +475,7 @@ function buildCompletionMessage(status, workflowName, steps, outputPaths, extern
     // stderr, because BV-BRC job output opens with an environment dump and
     // ends with the diagnosis.
     const errorMsg =
-      failedStep?.error_message
+      cleanStderr(failedStep?.error_message)
       || extractFailureReason(submissionError)
       || 'unknown error';
 
@@ -565,5 +587,9 @@ workflowMonitorQueue.on('error', (error) => {
 
 module.exports = {
   registerWorkflowWatch,
-  workflowMonitorQueue
+  workflowMonitorQueue,
+  // Exported for tests
+  buildCompletionMessage,
+  resolveOutputPaths,
+  cleanStderr,
 };
