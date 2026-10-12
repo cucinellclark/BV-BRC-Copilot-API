@@ -131,6 +131,20 @@ function selectRecentMessages(messages, maxTokens) {
     
     const content = normalizeContent(msg.content);
     const msgTokens = estimateTokens(content) + 10;
+    if (usedTokens + msgTokens > maxTokens && selected.length === 0) {
+      // The newest message alone is over budget (a long table or report).
+      // Dropping it here used to send the agent NO prior context at all;
+      // keep its start and end instead, which is where follow-ups point.
+      const maxChars = Math.max(0, (maxTokens - 10) * 4);
+      const head = Math.floor(maxChars * 0.6);
+      const tail = maxChars - head;
+      selected.push({
+        role: msg.role,
+        content: `${content.slice(0, head)}\n…[middle omitted]…\n${content.slice(-tail)}`
+      });
+      logger.debug('Newest message over the recent-message budget; clipped', { maxTokens });
+      break;
+    }
     if (usedTokens + msgTokens > maxTokens) {
       logger.debug('Token limit reached when selecting recent messages', {
         usedTokens,
