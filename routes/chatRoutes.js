@@ -35,7 +35,7 @@ const { createLogger } = require('../services/logger');
 // queueService.js — only import what's still needed (abort route uses setCancelFlag from chatRunner instead)
 // ragQueueService.js deleted — RAG routes removed
 const { writeSseEvent } = require('../services/sseUtils');
-const { runChatTurn, setCancelFlag } = require('../services/chatRunner');
+const { runChatTurn, setCancelFlag, releaseSessionTurnForJob } = require('../services/chatRunner');
 const { validateReplayActions, matchesStoredCard } = require('../services/replayActions');
 const config = require('../config.json');
 const router = express.Router();
@@ -528,6 +528,9 @@ router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
         // route — the flag is checked by the in-request runner's
         // shouldCancel poll and by the orchestrator's abort logic.
         await setCancelFlag(jobId);
+        if (sessionId) {
+            await releaseSessionTurnForJob(sessionId, jobId);
+        }
 
         return res.status(202).json({
             message: 'Stop requested',

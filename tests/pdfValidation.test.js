@@ -36,6 +36,7 @@ const mockRunChatTurn = jest.fn().mockImplementation(async (req, res, data) => {
 jest.mock('../services/chatRunner', () => ({
     runChatTurn: mockRunChatTurn,
     setCancelFlag: jest.fn(),
+    releaseSessionTurnForJob: jest.fn(),
 }));
 
 // ---------------------------------------------------------------------------

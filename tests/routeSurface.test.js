@@ -42,7 +42,7 @@ jest.mock('../middleware/auth', () => ({
 jest.mock('../prompts', () => ({}));
 jest.mock('../services/sseUtils', () => ({ writeSseEvent: jest.fn(), emitSSE: jest.fn() }));
 jest.mock('../config.json', () => ({}), { virtual: true });
-jest.mock('../services/chatRunner', () => ({ runChatTurn: jest.fn(), setCancelFlag: jest.fn() }));
+jest.mock('../services/chatRunner', () => ({ runChatTurn: jest.fn(), setCancelFlag: jest.fn(), releaseSessionTurnForJob: jest.fn() }));
 jest.mock('../services/sessionStreamRegistry', () => ({
     register: jest.fn(), unregister: jest.fn(), pushToSession: jest.fn(),
 }));

@@ -7,6 +7,7 @@
 // Redis is used for:
 //   - copilot:cancel:{jobId}  — Stop flag; any gateway instance can set it
 //   - copilot:chat_slots      — sorted-set admission gate (max_chats seats)
+//   - copilot:session_turn:{sessionId} — one turn at a time per session
 //   - copilot:session:{sessionId} — pub/sub for workflow_complete (Phase 4)
 //
 // Bull is KEPT for the workflow monitor queue.
@@ -25,6 +26,7 @@ const {
   setSessionActiveJob,
   clearSessionActiveJob,
 } = require('./dbUtils');
+const { acquireSessionTurn, releaseSessionTurn } = require('./sessionTurnLock');
 
 const logger = createLogger('ChatRunner');
 
@@ -65,6 +67,13 @@ const SLOT_TTL_SECONDS = ADMISSION_CONFIG.slot_ttl_seconds || 600;
 const MAX_WAITING_CHATS = ADMISSION_CONFIG.max_waiting_chats || 32;
 const CHAT_SLOTS_KEY = 'copilot:chat_slots';
 const SLOT_POLL_INTERVAL_MS = 1000;
+
+// The session lock covers the slot wait plus the whole orchestrator call; the
+// TTL only matters if the gateway dies without releasing it.
+const ORCHESTRATOR_TIMEOUT_MS = (config.orchestrator && config.orchestrator.timeout_ms) || 600000;
+const SESSION_TURN_TTL_MS = ADMISSION_WAIT_MS + ORCHESTRATOR_TIMEOUT_MS + 60000;
+const TURN_IN_FLIGHT_MESSAGE =
+  'Still working on your previous message in this chat. Wait for it to finish, or press Stop.';
 
 // Lua script: atomically prune expired entries, check capacity, and claim
 // a slot if room is available.
@@ -241,6 +250,13 @@ async function runChatTurn(req, res, jobData) {
   const sessionId = jobData.session_id;
   const turnLogger = createLogger('ChatTurn', sessionId);
 
+  // --- One turn per session (BEFORE opening SSE, so this can be a 409) ---
+  if (!(await acquireSessionTurn(redis, sessionId, jobId, SESSION_TURN_TTL_MS, turnLogger))) {
+    turnLogger.warn('Turn refused: another turn is running in this session', { jobId });
+    res.status(409).json({ code: 'TURN_IN_FLIGHT', message: TURN_IN_FLIGHT_MESSAGE });
+    return;
+  }
+
   // --- Waiter-cap check (BEFORE opening SSE) ---
   // If too many connections are already waiting, reject immediately with
   // a plain 429 JSON response.  This is the last-resort path; under
@@ -256,6 +272,7 @@ async function runChatTurn(req, res, jobData) {
       turnLogger.warn('Waiter cap exceeded, returning 429', {
         jobId, currentSlots, waiters, MAX_WAITING_CHATS,
       });
+      await releaseSessionTurn(redis, sessionId, jobId);
       res.status(429).json({
         error: 'The system is busy. Please try again in a moment.',
       });
@@ -397,6 +414,7 @@ async function runChatTurn(req, res, jobData) {
     inFlightTurns.delete(jobId);
     unregisterSessionStream(sessionId, res);
     await clearCancelFlag(jobId);
+    await releaseSessionTurn(redis, sessionId, jobId);
     turnResolve();
     if (sseOpen && !res.writableEnded && !res.destroyed) {
       try { res.end(); } catch (_) {}
@@ -423,6 +441,7 @@ async function runChatTurn(req, res, jobData) {
     clearInterval(heartbeatInterval);
     inFlightTurns.delete(jobId);
     unregisterSessionStream(sessionId, res);
+    await releaseSessionTurn(redis, sessionId, jobId);
     turnResolve();
     if (sseOpen && !res.writableEnded && !res.destroyed) {
       try { res.end(); } catch (_) {}
@@ -578,6 +597,7 @@ async function runChatTurn(req, res, jobData) {
     await releaseChatSlot(jobId);
     // Clear active_job_id (only if it still matches this turn)
     await clearSessionActiveJob(sessionId, jobId).catch(() => {});
+    await releaseSessionTurn(redis, sessionId, jobId);
     inFlightTurns.delete(jobId);
     unregisterSessionStream(sessionId, res);
     turnResolve();
@@ -589,8 +609,18 @@ async function runChatTurn(req, res, jobData) {
   }
 }
 
+/**
+ * Stop frees the session at once: the input unlocks immediately, and the
+ * stopped turn only needs a moment to wind down.  Without this the user's next
+ * message would get TURN_IN_FLIGHT until the cancel checkpoint fires.
+ */
+async function releaseSessionTurnForJob(sessionId, jobId) {
+  await releaseSessionTurn(redis, sessionId, jobId);
+}
+
 module.exports = {
   runChatTurn,
+  releaseSessionTurnForJob,
   setCancelFlag,
   isCancelled,
   clearCancelFlag,

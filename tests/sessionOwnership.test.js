@@ -91,9 +91,11 @@ jest.mock('../config.json', () => ({}), { virtual: true });
 
 const mockRunChatTurn = jest.fn(async (req, res) => { res.status(200).json({ ran: true }); });
 const mockSetCancelFlag = jest.fn();
+const mockReleaseSessionTurn = jest.fn();
 jest.mock('../services/chatRunner', () => ({
     runChatTurn: mockRunChatTurn,
     setCancelFlag: mockSetCancelFlag,
+    releaseSessionTurnForJob: mockReleaseSessionTurn,
 }));
 
 jest.mock('../services/sessionStreamRegistry', () => ({
@@ -284,6 +286,8 @@ describe('POST /job/:jobId/abort', () => {
         const r = await request('POST', `${BASE}/job/j1/abort`, {});
         expect(r.status).toBe(202);
         expect(mockSetCancelFlag).toHaveBeenCalledWith('j1');
+        // Stop frees the session so the next message is not TURN_IN_FLIGHT
+        expect(mockReleaseSessionTurn).toHaveBeenCalledWith('s-alice', 'j1');
     });
 
     test('another user cannot stop it', async () => {
@@ -291,6 +295,7 @@ describe('POST /job/:jobId/abort', () => {
         const r = await request('POST', `${BASE}/job/j1/abort`, {}, BOB);
         expect(r.status).toBe(403);
         expect(mockSetCancelFlag).not.toHaveBeenCalled();
+        expect(mockReleaseSessionTurn).not.toHaveBeenCalled();
     });
 
     test('a job that is not an active turn still accepts Stop (no-op flag)', async () => {
