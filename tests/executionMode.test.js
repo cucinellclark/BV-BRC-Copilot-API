@@ -6,6 +6,7 @@
  *  - 409 PLAN_MODE guard on /plan/:id/approve, /execute-next, /skip-step
  *  - mapOrchestratorEvent('execution_blocked') -> SSE + persisted card
  *  - normalizeExecutionMode / isValidExecutionMode helpers
+ *  - POST /copilot-agent replay_actions (checked against the stored card)
  *
  * Mocks MongoDB access (dbUtils) so no database is needed.
  */
@@ -294,6 +295,84 @@ describe('POST /copilot-agent execute_once', () => {
             workflow_context: { plan: { title: 't', steps: [{ step_id: 's-1', status: 'pending' }] }, plan_action: 'execute_next', current_step_index: 0 },
         });
         expect(res.status).toBe(409);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// replay_actions ("Submit this job" replays the card's calls verbatim)
+// ---------------------------------------------------------------------------
+
+describe('POST /copilot-agent replay_actions', () => {
+    const ACTION = {
+        tool: 'submit_gowe_job',
+        summary: 'Taxonomic Classification → tc_run',
+        arguments: { workflow_id: 'wf_tc', inputs: { database: 'SILVA', host_genome: 'no_host', output_path: 'tc_run' } },
+    };
+    // Same action with keys in a different order, as Mongo might return it.
+    const STORED_ACTION = {
+        arguments: { inputs: { output_path: 'tc_run', host_genome: 'no_host', database: 'SILVA' }, workflow_id: 'wf_tc' },
+        tool: 'submit_gowe_job',
+        summary: 'Taxonomic Classification → tc_run',
+    };
+    const sessionWithCard = (actions) => ({
+        session_id: 's1',
+        messages: [
+            { role: 'user', content: 'run taxonomic classification' },
+            { role: 'assistant', content: 'Ready to submit', card: { card_type: 'execution_blocked', card_payload: { agent: 'data', blocked_actions: actions } } },
+        ],
+    });
+    const send = (extra) => request('POST', `${BASE}/copilot-agent`, {
+        query: 'Submit the job exactly as you prepared it above.', model: 'm', session_id: 's1', stream: true,
+        execute_once: true, target_agent: 'data', ...extra,
+    });
+
+    test('forwards matching actions and pins the service agent', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION]));
+        const res = await send({ replay_actions: [ACTION] });
+        expect(res.status).toBe(200);
+        const jobData = mockRunChatTurn.mock.calls[0][2];
+        expect(jobData.target_agent).toBe('service');
+        expect(jobData.replay_actions).toEqual([ACTION]);
+    });
+
+    test('rejects actions that do not match a stored card', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION]));
+        const tampered = { ...ACTION, arguments: { ...ACTION.arguments, inputs: { ...ACTION.arguments.inputs, database: 'Standard' } } };
+        const res = await send({ replay_actions: [tampered] });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_NOT_FOUND');
+        expect(mockRunChatTurn).not.toHaveBeenCalled();
+    });
+
+    test('requires execute_once', async () => {
+        const res = await send({ execute_once: false, replay_actions: [ACTION] });
+        expect(res.status).toBe(400);
+        expect(mockRunChatTurn).not.toHaveBeenCalled();
+    });
+
+    test('rejects tools that are not replayable', async () => {
+        const res = await send({ replay_actions: [{ tool: 'search_data', arguments: { collection: 'genome' } }] });
+        expect(res.status).toBe(400);
+    });
+
+    test('rejects more than 10 actions', async () => {
+        const res = await send({ replay_actions: Array(11).fill(ACTION) });
+        expect(res.status).toBe(400);
+    });
+
+    test('ephemeral turns skip the stored-card check', async () => {
+        const res = await send({ save_chat: false, replay_actions: [ACTION] });
+        expect(res.status).toBe(200);
+        expect(mockGetChatSession).not.toHaveBeenCalled();
+        expect(mockRunChatTurn.mock.calls[0][2].replay_actions).toEqual([ACTION]);
+    });
+
+    test('without replay_actions the target agent is left alone', async () => {
+        const res = await send({});
+        expect(res.status).toBe(200);
+        const jobData = mockRunChatTurn.mock.calls[0][2];
+        expect(jobData.target_agent).toBe('data');
+        expect(jobData.replay_actions).toBeNull();
     });
 });
 

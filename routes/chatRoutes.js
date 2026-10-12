@@ -36,6 +36,7 @@ const { createLogger } = require('../services/logger');
 // ragQueueService.js deleted — RAG routes removed
 const { writeSseEvent } = require('../services/sseUtils');
 const { runChatTurn, setCancelFlag } = require('../services/chatRunner');
+const { validateReplayActions, matchesStoredCard } = require('../services/replayActions');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -198,6 +199,7 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
             execution_mode = null,
             execute_once = false,
             target_agent = null,
+            replay_actions = null,
             workflow_context = null
         } = req.body;
 
@@ -232,6 +234,35 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
         // service agent, so it needs execute mode — same guard as /plan/*.
         if (workflow_context && workflow_context.plan_action === 'execute_next') {
             if (!(await requireExecuteMode(res, session_id, logger))) return;
+        }
+
+        // "Submit this job": the card sends back the refused calls so the
+        // service agent can run them verbatim.  Only with execute_once, and
+        // only actions that match a card stored in this session.
+        let validatedReplayActions = null;
+        let effectiveTargetAgent = target_agent;
+        if (replay_actions !== null && replay_actions !== undefined) {
+            if (execute_once !== true) {
+                return res.status(400).json({ message: 'replay_actions requires execute_once' });
+            }
+            const checked = validateReplayActions(replay_actions);
+            if (checked.error) {
+                return res.status(400).json({ message: checked.error });
+            }
+            if (session_id && save_chat) {
+                const session = await getChatSession(session_id);
+                if (!matchesStoredCard(checked.actions, session && session.messages)) {
+                    logger.warn('replay_actions do not match a stored execution_blocked card', { session_id });
+                    return res.status(409).json({
+                        code: 'REPLAY_NOT_FOUND',
+                        message: 'That prepared job is no longer in this chat. Ask the assistant to prepare it again.'
+                    });
+                }
+            }
+            validatedReplayActions = checked.actions;
+            // The card pins the agent that was blocked, which can be data or
+            // planning; only the service agent knows how to replay.
+            effectiveTargetAgent = 'service';
         }
 
         // Validate attached files (10 MB cap, null-byte rejection)
@@ -433,7 +464,8 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
                 // One-shot execute ("allow once"): this turn runs in execute
                 // mode; the stored session mode is not changed.
                 execute_once: execute_once === true,
-                target_agent,
+                target_agent: effectiveTargetAgent,
+                replay_actions: validatedReplayActions,
                 workflow_context,
             });
 

@@ -56,4 +56,15 @@ describe('runOrchestratorLoop execution_mode resolution', () => {
         const saved = mockAddMessages.mock.calls[0][1][0];
         expect(saved.attachments).toBeUndefined();
     });
+    test('replay_actions reach the orchestrator request', async () => {
+        mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan', messages: [] });
+        const actions = [{ tool: 'submit_gowe_job', arguments: { workflow_id: 'wf', inputs: {} }, summary: 'wf' }];
+        const req = await run({ execute_once: true, target_agent: 'service', replay_actions: actions });
+        expect(req.replay_actions).toEqual(actions);
+        expect(req.target_agent).toBe('service');
+    });
+    test('no replay_actions key without replay', async () => {
+        mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan', messages: [] });
+        expect((await run({})).replay_actions).toBeUndefined();
+    });
 });

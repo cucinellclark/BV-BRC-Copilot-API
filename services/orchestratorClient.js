@@ -708,6 +708,7 @@ async function executeOrchestratorLoop(opts) {
     execution_mode: requested_execution_mode = null,
     execute_once = false,
     target_agent = null,
+    replay_actions = null,
     workflow_context = null,
     stream = false,
     responseStream = null,
@@ -963,6 +964,7 @@ async function executeOrchestratorLoop(opts) {
       }))
     ],
     target_agent: target_agent || null,
+    ...(replay_actions ? { replay_actions } : {}),
     // Treat 0 (or negative) as unlimited.
     max_steps: (typeof config.agent?.max_iterations === 'number' && config.agent.max_iterations <= 0)
       ? null
