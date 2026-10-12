@@ -206,6 +206,11 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       break;
 
     case 'routing_decision':
+      // Code replaced the router's direct answer (router._direct_or_helpdesk);
+      // kept on the message so the override rate can be counted.
+      if (eventData.routing_override) {
+        state.routingOverride = eventData.routing_override;
+      }
       emitSSE(responseStream, 'tool_selected', {
         action: eventData.agent_key || eventData.decision || 'orchestrator',
         reasoning: eventData.reasoning || '',
@@ -515,6 +520,7 @@ async function streamFromOrchestrator(orchestratorRequest, responseStream, shoul
     toolCalls: [],
     resultForUi: {},
     decision: null,
+    routingOverride: null,
     elapsedMs: 0,
     lastAgentResult: null,
     lastToolName: null,
@@ -1124,7 +1130,8 @@ async function executeOrchestratorLoop(opts) {
       agents_used: state.agentsUsed,
       tool_calls: state.toolCalls,
       decision: state.decision,
-      elapsed_ms: state.elapsedMs
+      elapsed_ms: state.elapsedMs,
+      ...(state.routingOverride ? { routing_override: state.routingOverride } : {})
     }
   };
 
@@ -1440,7 +1447,8 @@ async function executeOrchestratorLoop(opts) {
       agents_used: state.agentsUsed,
       tool_calls: state.toolCalls,
       decision: state.decision,
-      elapsed_ms: state.elapsedMs
+      elapsed_ms: state.elapsedMs,
+      ...(state.routingOverride ? { routing_override: state.routingOverride } : {})
     }
   };
 }

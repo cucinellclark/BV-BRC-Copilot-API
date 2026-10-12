@@ -509,3 +509,24 @@ describe("mapOrchestratorEvent('execution_blocked')", () => {
         expect(state.card.card_payload.agent).toBeNull();
     });
 });
+
+// ---------------------------------------------------------------------------
+// routing_override (router replaced its own direct answer) is kept for tracking
+// ---------------------------------------------------------------------------
+
+describe("mapOrchestratorEvent('routing_decision') routing_override", () => {
+    test('keeps the override on state for agent_metadata', () => {
+        const { mapOrchestratorEvent } = require('../services/orchestratorClient');
+        const state = {};
+        mapOrchestratorEvent('routing_decision', {
+            decision: 'agent', agent_key: 'helpdesk', routing_override: 'bvbrc_reference',
+        }, {}, state);
+        expect(state.routingOverride).toBe('bvbrc_reference');
+    });
+    test('no override, nothing set', () => {
+        const { mapOrchestratorEvent } = require('../services/orchestratorClient');
+        const state = {};
+        mapOrchestratorEvent('routing_decision', { decision: 'agent', agent_key: 'data' }, {}, state);
+        expect(state.routingOverride).toBeUndefined();
+    });
+});
