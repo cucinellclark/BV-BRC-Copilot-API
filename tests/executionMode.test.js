@@ -530,3 +530,25 @@ describe("mapOrchestratorEvent('routing_decision') routing_override", () => {
         expect(state.routingOverride).toBeUndefined();
     });
 });
+
+// ---------------------------------------------------------------------------
+// handoff (one agent handed the turn to another, orchestrator F1) is kept
+// ---------------------------------------------------------------------------
+
+describe("mapOrchestratorEvent('agent_result') handoff", () => {
+    test('keeps the handoff on state for agent_metadata', () => {
+        const { mapOrchestratorEvent } = require('../services/orchestratorClient');
+        const state = {};
+        const handoff = { from: 'data', to: 'service', trigger: 'submit_gowe_job' };
+        mapOrchestratorEvent('agent_result', {
+            agent: 'service', result_for_ui: { agent: 'service', answer: 'Ready to submit', handoff },
+        }, {}, state);
+        expect(state.handoff).toEqual(handoff);
+    });
+    test('no handoff, nothing set', () => {
+        const { mapOrchestratorEvent } = require('../services/orchestratorClient');
+        const state = {};
+        mapOrchestratorEvent('agent_result', { agent: 'data', result_for_ui: { agent: 'data' } }, {}, state);
+        expect(state.handoff).toBeUndefined();
+    });
+});

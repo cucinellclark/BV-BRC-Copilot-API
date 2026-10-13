@@ -267,6 +267,11 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
 
     case 'agent_result': {
       state.lastAgentResult = eventData;
+      // Another agent handed this turn over (orchestrator F1); kept on the
+      // message so handoffs can be counted per source/target pair.
+      if (eventData.result_for_ui?.handoff) {
+        state.handoff = eventData.result_for_ui.handoff;
+      }
       // Store the full result_for_ui for later inclusion in final_response
       if (eventData.result_for_ui) {
         state.lastResultForUi = eventData.result_for_ui;
@@ -1131,7 +1136,8 @@ async function executeOrchestratorLoop(opts) {
       tool_calls: state.toolCalls,
       decision: state.decision,
       elapsed_ms: state.elapsedMs,
-      ...(state.routingOverride ? { routing_override: state.routingOverride } : {})
+      ...(state.routingOverride ? { routing_override: state.routingOverride } : {}),
+      ...(state.handoff ? { handoff: state.handoff } : {})
     }
   };
 
@@ -1448,7 +1454,8 @@ async function executeOrchestratorLoop(opts) {
       tool_calls: state.toolCalls,
       decision: state.decision,
       elapsed_ms: state.elapsedMs,
-      ...(state.routingOverride ? { routing_override: state.routingOverride } : {})
+      ...(state.routingOverride ? { routing_override: state.routingOverride } : {}),
+      ...(state.handoff ? { handoff: state.handoff } : {})
     }
   };
 }
