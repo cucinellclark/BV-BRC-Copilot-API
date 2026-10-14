@@ -3,7 +3,7 @@
  *
  *  - POST /update-session-execution-mode
  *  - POST /copilot-agent write-through of execution_mode
- *  - 409 PLAN_MODE guard on /plan/:id/approve, /execute-next, /skip-step
+ *  - plan steps run in Plan mode (the 409 PLAN_MODE guard was removed, D4 Phase 3)
  *  - mapOrchestratorEvent('execution_blocked') -> SSE + persisted card
  *  - normalizeExecutionMode / isValidExecutionMode helpers
  *  - POST /copilot-agent replay_actions (checked against the stored card)
@@ -290,15 +290,15 @@ describe('POST /copilot-agent execute_once', () => {
         expect(mockRunChatTurn.mock.calls[0][2].execute_once).toBe(false);
     });
 
-    test('execute_once does not bypass the plan-step guard', async () => {
-        // Plan steps span many turns; "once" is only for the blocked card.
+    test('a plan step in Plan mode runs (no PLAN_MODE guard since D4 Phase 3)', async () => {
         mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan' });
         const res = await request('POST', `${BASE}/copilot-agent`, {
             query: 'Execute approved plan', model: 'm', session_id: 's1', stream: true,
-            execute_once: true, target_agent: 'planning',
+            target_agent: 'planning',
             workflow_context: { plan: { title: 't', steps: [{ step_id: 's-1', status: 'pending' }] }, plan_action: 'execute_next', current_step_index: 0 },
         });
-        expect(res.status).toBe(409);
+        expect(res.status).toBe(200);
+        expect(mockRunChatTurn.mock.calls[0][2].execute_once).toBe(false);
     });
 });
 
@@ -526,10 +526,10 @@ describe('POST /execution-question/answer (No)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Plan routes require execute mode
+// Plan routes run in Plan mode (D4 Phase 3)
 // ---------------------------------------------------------------------------
 
-describe('plan routes require execute mode', () => {
+describe('plan routes run in any execution mode', () => {
     const plan = { title: 'Batch assembly', steps: [{ step_id: 's-1', status: 'pending' }, { step_id: 's-2', status: 'pending' }] };
 
     const cases = [
@@ -538,19 +538,12 @@ describe('plan routes require execute mode', () => {
         ['skip-step', `${BASE}/plan/p1/skip-step/s-1`, { plan, session_id: 's1', current_step_index: 0 }],
     ];
 
-    test.each(cases)('%s returns 409 PLAN_MODE in plan mode', async (_name, path, body) => {
+    test.each(cases)('%s runs the turn in plan mode', async (_name, path, body) => {
         mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan' });
         const res = await request('POST', path, body);
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe('PLAN_MODE');
-        expect(mockRunChatTurn).not.toHaveBeenCalled();
-    });
-
-    test.each(cases)('%s returns 409 when the session has no mode', async (_name, path, body) => {
-        mockGetChatSession.mockResolvedValue({ session_id: 's1' });
-        const res = await request('POST', path, body);
-        expect(res.status).toBe(409);
-        expect(mockRunChatTurn).not.toHaveBeenCalled();
+        expect(res.status).toBe(200);
+        expect(mockRunChatTurn).toHaveBeenCalledTimes(1);
+        expect(mockRunChatTurn.mock.calls[0][2].target_agent).toBe('planning');
     });
 
     test.each(cases)('%s runs the turn in execute mode', async (_name, path, body) => {
@@ -558,23 +551,10 @@ describe('plan routes require execute mode', () => {
         const res = await request('POST', path, body);
         expect(res.status).toBe(200);
         expect(mockRunChatTurn).toHaveBeenCalledTimes(1);
-        expect(mockRunChatTurn.mock.calls[0][2].target_agent).toBe('planning');
     });
 
-    test('/copilot-agent with plan_action execute_next is gated', async () => {
+    test('/copilot-agent with plan_action execute_next runs in plan mode', async () => {
         mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan' });
-        const res = await request('POST', `${BASE}/copilot-agent`, {
-            query: 'Execute approved plan', model: 'm', session_id: 's1', stream: true,
-            target_agent: 'planning',
-            workflow_context: { plan, plan_action: 'execute_next', current_step_index: 0 },
-        });
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe('PLAN_MODE');
-        expect(mockRunChatTurn).not.toHaveBeenCalled();
-    });
-
-    test('/copilot-agent with plan_action execute_next runs in execute mode', async () => {
-        mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'execute' });
         const res = await request('POST', `${BASE}/copilot-agent`, {
             query: 'Execute approved plan', model: 'm', session_id: 's1', stream: true,
             target_agent: 'planning',
@@ -584,38 +564,60 @@ describe('plan routes require execute mode', () => {
         expect(mockRunChatTurn).toHaveBeenCalledTimes(1);
     });
 
-    test('/copilot-agent write-through wins over the stored mode for the guard', async () => {
-        // Toggle flipped to execute and sent in the same request: the
-        // write-through persists first, so the guard must see execute.
-        mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan' });
-        mockSetSessionExecutionMode.mockImplementation(async (sid, uid, mode) => {
-            mockGetChatSession.mockResolvedValue({ session_id: sid, execution_mode: mode });
-            return { matchedCount: 1 };
-        });
-        const res = await request('POST', `${BASE}/copilot-agent`, {
-            query: 'Execute approved plan', model: 'm', session_id: 's1', stream: true,
-            execution_mode: 'execute', target_agent: 'planning',
-            workflow_context: { plan, plan_action: 'execute_next', current_step_index: 0 },
-        });
-        expect(res.status).toBe(200);
-    });
-
-    test('/copilot-agent with plan_action answer_questions is not gated', async () => {
-        mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan' });
-        const res = await request('POST', `${BASE}/copilot-agent`, {
-            query: 'answers', model: 'm', session_id: 's1', stream: true,
-            target_agent: 'planning',
-            workflow_context: { plan, plan_action: 'answer_questions' },
-        });
-        expect(res.status).toBe(200);
-    });
-
-    test('answer-questions is not gated', async () => {
+    test('answer-questions still runs', async () => {
         mockGetChatSession.mockResolvedValue({ session_id: 's1', execution_mode: 'plan' });
         const res = await request('POST', `${BASE}/answer-questions`, {
             session_id: 's1', answers: [{ question_id: 'q1', answer: 'x' }], original_query: 'q',
         });
         expect(res.status).not.toBe(409);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// plan_context comes from the stored card, never from the request (D4 Phase 3)
+// ---------------------------------------------------------------------------
+
+describe('plan_context on a plan step question', () => {
+    const ACTION = {
+        tool: 'create_group',
+        summary: "feature_group 'g' — 100 features",
+        arguments: { group_name: 'g', group_type: 'feature_group', collection: 'genome_feature', query: 'plfam_id:PLF_1' },
+    };
+    const CTX = { plan_id: 'plan_1', step_id: 'make_group', step_index: 1 };
+    const session = (payloadExtra) => ({
+        session_id: 's1',
+        messages: [{ message_id: 'm_card', role: 'assistant', content: 'Ready',
+            card: { card_type: 'execution_blocked', card_payload: { agent: 'data', blocked_actions: [ACTION], ...payloadExtra } } }],
+    });
+
+    test('Yes forwards the stored card\'s plan_context', async () => {
+        mockGetChatSession.mockResolvedValue(session({ plan_context: CTX }));
+        const res = await request('POST', `${BASE}/copilot-agent`, {
+            query: 'Yes', model: 'm', session_id: 's1', stream: true, execute_once: true,
+            replay_actions: [ACTION],
+            // A request cannot pick its own step.
+            plan_context: { plan_id: 'other', step_id: 'x', step_index: 9 },
+        });
+        expect(res.status).toBe(200);
+        expect(mockRunChatTurn.mock.calls[0][2].plan_context).toEqual(CTX);
+    });
+
+    test('Other on a plan step question keeps the step too', async () => {
+        mockGetChatSession.mockResolvedValue(session({ plan_context: CTX }));
+        const res = await request('POST', `${BASE}/copilot-agent`, {
+            query: 'only 50 members', model: 'm', session_id: 's1', stream: true, prepared_actions: [ACTION],
+        });
+        expect(res.status).toBe(200);
+        expect(mockRunChatTurn.mock.calls[0][2].plan_context).toEqual(CTX);
+    });
+
+    test('a card without plan_context forwards none', async () => {
+        mockGetChatSession.mockResolvedValue(session({}));
+        await request('POST', `${BASE}/copilot-agent`, {
+            query: 'Yes', model: 'm', session_id: 's1', stream: true, execute_once: true,
+            replay_actions: [ACTION], plan_context: CTX,
+        });
+        expect(mockRunChatTurn.mock.calls[0][2].plan_context).toBeNull();
     });
 });
 

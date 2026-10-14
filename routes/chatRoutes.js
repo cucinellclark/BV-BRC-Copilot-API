@@ -41,28 +41,10 @@ const { validateReplayActions, findStoredCard, cardAnswer } = require('../servic
 const config = require('../config.json');
 const router = express.Router();
 
-/**
- * Plan-mode guard for routes that run a plan step.
- *
- * Plan execution delegates to the service agent, which would submit jobs,
- * so the session must be in execute mode.  The Python tool gate would
- * refuse the submission anyway; this just fails fast with a clear code
- * the frontend can render.  Returns true when the caller may proceed.
- */
-async function requireExecuteMode(res, session_id, logger) {
-    const chatSession = session_id ? await getChatSession(session_id) : null;
-    const mode = normalizeExecutionMode(chatSession && chatSession.execution_mode);
-    if (mode !== 'execute') {
-        logger.info('Plan step refused: session is in plan mode', { session_id });
-        res.status(409).json({
-            code: 'PLAN_MODE',
-            execution_mode: mode,
-            message: 'Switch this chat to Execute mode to run the plan.'
-        });
-        return false;
-    }
-    return true;
-}
+// D4 Phase 3: plan steps run in Plan mode too.  The 409 PLAN_MODE guard
+// (requireExecuteMode) that used to sit on the four plan-step entry points
+// is gone: execution mode flows to the delegated agent as on any turn, so a
+// gated step stops at its Yes / No / Other question instead.
 
 function parseBooleanFlag(value, defaultValue = false) {
     if (value === undefined || value === null) return defaultValue;
@@ -231,13 +213,6 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
             }
         }
 
-        // Plan step execution (PlanCard Approve / Continue / Skip) arrives on
-        // this route with plan_action 'execute_next'.  It delegates to the
-        // service agent, so it needs execute mode — same guard as /plan/*.
-        if (workflow_context && workflow_context.plan_action === 'execute_next') {
-            if (!(await requireExecuteMode(res, session_id, logger))) return;
-        }
-
         // "Yes" on the confirmation question (execute_once + replay_actions):
         // the card sends back the refused calls so the service agent can run
         // them verbatim.  "Other" (prepared_actions, no execute_once): the
@@ -251,6 +226,9 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
         let validatedReplayActions = null;
         let validatedPreparedActions = null;
         let effectiveTargetAgent = target_agent;
+        // The plan step a question belongs to, read from the STORED card --
+        // never from the request -- so a reply cannot claim another step.
+        let storedPlanContext = null;
         const isReplay = replay_actions !== null && replay_actions !== undefined;
         const isRevision = prepared_actions !== null && prepared_actions !== undefined;
         if (isReplay || isRevision) {
@@ -283,6 +261,10 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
                             ? 'Those jobs were already submitted from this question. Check the Jobs list, or ask the assistant to prepare them again.'
                             : 'That question was already answered. Ask the assistant to prepare the jobs again.'
                     });
+                }
+                const payload = cardMessage.card && cardMessage.card.card_payload;
+                if (payload && payload.plan_context && payload.plan_context.plan_id) {
+                    storedPlanContext = payload.plan_context;
                 }
                 // Record the answer before the turn runs, so a second click
                 // during the turn is refused too.
@@ -502,6 +484,7 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
                 target_agent: effectiveTargetAgent,
                 replay_actions: validatedReplayActions,
                 prepared_actions: validatedPreparedActions,
+                plan_context: storedPlanContext,
                 workflow_context,
             });
 
@@ -1080,8 +1063,6 @@ router.post('/plan/:planId/approve', requireAuth, requireSessionOwner, async (re
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
-        if (!(await requireExecuteMode(res, session_id, logger))) return;
-
         await runChatTurn(req, res, {
             query: `Execute step 1 of approved plan: ${plan.title}`,
             model,
@@ -1133,8 +1114,6 @@ router.post('/plan/:planId/execute-next', requireAuth, requireSessionOwner, asyn
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
 
-        if (!(await requireExecuteMode(res, session_id, logger))) return;
-
         await runChatTurn(req, res, {
             query: `Execute step ${current_step_index + 1} of plan: ${plan.title}`,
             model,
@@ -1185,8 +1164,6 @@ router.post('/plan/:planId/skip-step/:stepId', requireAuth, requireSessionOwner,
         const resolved = resolveUserId(req, req.body.user_id);
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
         const user_id = resolved.userId;
-
-        if (!(await requireExecuteMode(res, session_id, logger))) return;
 
         // Mark the step as skipped
         const updatedPlan = JSON.parse(JSON.stringify(plan));
@@ -1250,12 +1227,19 @@ router.post('/plan/:planId/edit', requireAuth, requireSessionOwner, async (req, 
         const resolved = resolveUserId(req, req.body.user_id);
         if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
 
+        let saved = plan;
         if (session_id) {
             const { updatePlanInSession } = require('../services/dbUtils');
-            await updatePlanInSession(session_id, planId, plan);
+            // The PlanCard saves the whole plan but never holds step_outputs
+            // (stored from plan_step_* events, D4 Phase 3): keep them.
+            const { keepStoredOutputs, findPlanMessage } = require('../services/planSteps');
+            const session = await getChatSession(session_id);
+            const stored = findPlanMessage(session && session.messages, planId);
+            saved = keepStoredOutputs(plan, stored && stored.plan);
+            await updatePlanInSession(session_id, planId, saved);
         }
 
-        res.json({ status: 'updated', plan });
+        res.json({ status: 'updated', plan: saved });
     } catch (error) {
         return res.status(500).json({ message: 'Internal server error', error: error.message });
     }

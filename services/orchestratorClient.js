@@ -24,10 +24,12 @@ const {
   addMessagesToSession,
   addWorkflowIdToSession,
   getModelData,
-  normalizeExecutionMode
+  normalizeExecutionMode,
+  updatePlanInSession
 } = require('./dbUtils');
 const { buildConversationContext, buildWorkflowAwareHistory } = require('./memory/conversationContextService');
 const { registerWorkflowWatch } = require('./workflowMonitorService');
+const { stepUpdateFromEvent, applyStepUpdates, findPlanMessage, mergeCompletedResults } = require('./planSteps');
 const { internalKeyHeaders } = require('./internalKey');
 const logger = createLogger('OrchestratorClient');
 
@@ -169,6 +171,39 @@ function _buildCallEnvelope(toolName, resultForUi) {
 //
 
 /**
+ * workflow_context for an execute_next turn with the stored step results
+ * merged into completed_step_results (D4 Phase 3): a reload, or a browser
+ * that never held the outputs, loses nothing.
+ */
+function withStoredStepResults(workflowContext, chatSession, logger) {
+  if (!workflowContext || workflowContext.plan_action !== 'execute_next') return workflowContext;
+  const planId = workflowContext.plan && workflowContext.plan.plan_id;
+  const planMessage = chatSession && findPlanMessage(chatSession.messages, planId);
+  if (!planMessage) return workflowContext;
+  const merged = mergeCompletedResults(workflowContext.completed_step_results, planMessage.plan);
+  if (logger) logger.info('Merged stored plan step results', { plan_id: planId, steps: Object.keys(merged).length });
+  return { ...workflowContext, completed_step_results: merged };
+}
+
+/**
+ * Apply a turn's plan step updates to the stored plan messages.  Read,
+ * merge, write -- the same shape /plan/:id/edit writes.
+ */
+async function persistPlanStepUpdates(sessionId, updates, logger) {
+  try {
+    const session = await getChatSession(sessionId);
+    const planIds = [...new Set(updates.map(u => u.plan_id))];
+    for (const planId of planIds) {
+      const message = findPlanMessage(session && session.messages, planId);
+      if (!message) continue;
+      await updatePlanInSession(sessionId, planId, applyStepUpdates(message.plan, updates));
+    }
+  } catch (err) {
+    if (logger) logger.warn('Failed to store plan step results', { error: err.message });
+  }
+}
+
+/**
  * Map an orchestrator SSE event to zero or more gateway SSE events.
  *
  * @param {string} eventType - Orchestrator event type (e.g. "routing_decision")
@@ -177,6 +212,13 @@ function _buildCallEnvelope(toolName, resultForUi) {
  * @param {object} state - Mutable state accumulator for the request
  */
 function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
+  // D4 Phase 3: every plan step event also becomes an update on the stored
+  // plan (written after the stream, see persistPlanStepUpdates).
+  const stepUpdate = stepUpdateFromEvent(eventType, eventData);
+  if (stepUpdate) {
+    state.planStepUpdates = state.planStepUpdates || [];
+    state.planStepUpdates.push(stepUpdate);
+  }
   switch (eventType) {
     // -- Lifecycle --
     case 'orchestrator_start':
@@ -445,6 +487,22 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
         result_summary: eventData.result_summary,
         agent_result: eventData.agent_result,
         structured_data: eventData.structured_data || null,
+        step_outputs: eventData.step_outputs || null,
+        timestamp: new Date().toISOString()
+      });
+      break;
+
+    // D4 Phase 3: the step prepared jobs or groups under the plan gate; the
+    // plan pauses on the execution_blocked question emitted just before.
+    case 'plan_step_blocked':
+      emitSSE(responseStream, 'plan_step_blocked', {
+        plan_id: eventData.plan_id,
+        step_id: eventData.step_id,
+        step_index: eventData.step_index,
+        agent: eventData.agent,
+        summaries: Array.isArray(eventData.summaries) ? eventData.summaries : [],
+        result_summary: eventData.result_summary || '',
+        step_outputs: eventData.step_outputs || null,
         timestamp: new Date().toISOString()
       });
       break;
@@ -484,6 +542,7 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
         submission_id: eventData.submission_id,
         submission_ids: planSubIds,
         result_summary: eventData.result_summary || '',
+        step_outputs: eventData.step_outputs || null,
         timestamp: new Date().toISOString()
       });
       // Store on state so the post-stream workflow tracking block
@@ -493,6 +552,11 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
         state.planWorkflowSubmissions.push({
           submission_id: sid,
           workflow_id: eventData.workflow_id || '',
+          // The watch carries the step so the completion message and push
+          // can resume the plan (D4 Phase 3, §4.2 F).
+          plan_id: eventData.plan_id || '',
+          step_id: eventData.step_id || '',
+          step_index: Number.isInteger(eventData.step_index) ? eventData.step_index : null,
         });
       }
       break;
@@ -723,6 +787,7 @@ async function executeOrchestratorLoop(opts) {
     target_agent = null,
     replay_actions = null,
     prepared_actions = null,
+    plan_context = null,
     workflow_context = null,
     stream = false,
     responseStream = null,
@@ -991,7 +1056,8 @@ async function executeOrchestratorLoop(opts) {
     max_steps: (typeof config.agent?.max_iterations === 'number' && config.agent.max_iterations <= 0)
       ? null
       : (config.agent?.max_iterations || 5),
-    ...(workflow_context ? { workflow_context } : {}),
+    ...(plan_context ? { plan_context } : {}),
+    ...(workflow_context ? { workflow_context: withStoredStepResults(workflow_context, chatSession, sessionLogger) } : {}),
     ...(llmOverride ? { llm_override: llmOverride } : {}),
     // Structured file attachments for programmatic use by agents
     ...(files && files.length > 0 ? { attached_files: files.map(f => ({
@@ -1175,8 +1241,11 @@ async function executeOrchestratorLoop(opts) {
 
   // Plan step execution actions (execute_next) produce empty response_text
   // because the PlanCard handles step status updates directly.
+  // A step that paused on a question carries its card on this message, so
+  // it is kept whatever the text (D4 Phase 3).
   const isPlanStepAction =
     assistantContentEmpty &&
+    !state.card &&
     workflow_context &&
     workflow_context.plan_action === 'execute_next';
 
@@ -1346,6 +1415,9 @@ async function executeOrchestratorLoop(opts) {
         submission_id: sub.submission_id,
         workflow_id: sub.workflow_id,
         session_id,
+        plan_id: sub.plan_id || '',
+        step_id: sub.step_id || '',
+        step_index: sub.step_index,
         user_id: user_id || '',
         auth_token: auth_token || null,
       }).catch(err => {
@@ -1376,6 +1448,11 @@ async function executeOrchestratorLoop(opts) {
   if (state.card) {
     // Card was set during streaming (plan_created, ask_questions)
     assistantMessage.card = state.card;
+  }
+
+  // D4 Phase 3: step status, summary and outputs onto the stored plan.
+  if (save_chat && session_id && state.planStepUpdates && state.planStepUpdates.length > 0) {
+    await persistPlanStepUpdates(session_id, state.planStepUpdates, sessionLogger);
   }
 
   // Save to database

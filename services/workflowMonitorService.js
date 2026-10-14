@@ -300,6 +300,9 @@ async function checkAndHandleWorkflow(watch, collection) {
 
   // Push SSE event to active streams
   const pushed = pushToSession(session_id, 'workflow_complete', {
+    // PlanCard matches a waiting step on submission_id (D4 Phase 3, §4.2 F);
+    // without it a plan resumed only through its 30 s poll.
+    submission_id: submission_id,
     workflow_id: watch.workflow_id || submission_id,
     workflow_name: workflowName,
     status: status,
