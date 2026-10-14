@@ -60,18 +60,40 @@ function actionKey(action) {
 }
 
 /**
+ * The stored message whose execution_blocked card lists every one of these
+ * actions (a subset of one card is fine), or null.  Newest match wins, so a
+ * set prepared again after "Other" is checked against its own question.
+ */
+function findStoredCard(actions, messages) {
+  if (!Array.isArray(messages)) return null;
+  const wanted = actions.map(actionKey);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    const card = m && m.card;
+    if (!card || card.card_type !== 'execution_blocked') continue;
+    const stored = new Set(((card.card_payload && card.card_payload.blocked_actions) || []).map(actionKey));
+    if (wanted.every(k => stored.has(k))) return m;
+  }
+  return null;
+}
+
+/**
  * True when every action appears in the blocked_actions of one stored
  * execution_blocked card in the session's messages.
  */
 function matchesStoredCard(actions, messages) {
-  if (!Array.isArray(messages)) return false;
-  const wanted = actions.map(actionKey);
-  return messages.some(m => {
-    const card = m && m.card;
-    if (!card || card.card_type !== 'execution_blocked') return false;
-    const stored = new Set(((card.card_payload && card.card_payload.blocked_actions) || []).map(actionKey));
-    return wanted.every(k => stored.has(k));
-  });
+  return findStoredCard(actions, messages) !== null;
+}
+
+/**
+ * The answer recorded on a card's question ({answer, at, ...}), or null.
+ * One answer per question: a "yes" is final (the jobs ran); a "no" or
+ * "other" may still be followed by a revision, never by a replay.
+ */
+function cardAnswer(message) {
+  const payload = message && message.card && message.card.card_payload;
+  const answered = payload && payload.answered;
+  return answered && typeof answered.answer === 'string' ? answered : null;
 }
 
 module.exports = {
@@ -79,5 +101,7 @@ module.exports = {
   MAX_REPLAY_ACTIONS,
   validateReplayActions,
   matchesStoredCard,
+  findStoredCard,
+  cardAnswer,
   canonicalJson,
 };

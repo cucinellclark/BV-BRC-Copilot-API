@@ -377,7 +377,9 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
           agent: eventData.agent || null,
           execution_mode: 'plan',
           blocked_actions: Array.isArray(eventData.blocked_actions) ? eventData.blocked_actions : [],
-          original_query: eventData.original_query || ''
+          original_query: eventData.original_query || '',
+          // Set when a delegated plan step prepared the jobs (D4 §4.2 C).
+          ...(eventData.plan_context ? { plan_context: eventData.plan_context } : {})
         }
       };
       emitSSE(responseStream, 'execution_blocked', {
@@ -720,6 +722,7 @@ async function executeOrchestratorLoop(opts) {
     execute_once = false,
     target_agent = null,
     replay_actions = null,
+    prepared_actions = null,
     workflow_context = null,
     stream = false,
     responseStream = null,
@@ -872,6 +875,13 @@ async function executeOrchestratorLoop(opts) {
       source: 'once',
       name: 'Execute mode (this message only)'
     });
+  } else if (Array.isArray(prepared_actions) && prepared_actions.length > 0) {
+    // "Other" on the confirmation question: this text revises a prepared set.
+    userAttachments.push({
+      type: 'execution',
+      source: 'revise',
+      name: 'Changing the prepared jobs'
+    });
   }
   if (userAttachments.length > 0) {
     userMessage.attachments = userAttachments;
@@ -976,6 +986,7 @@ async function executeOrchestratorLoop(opts) {
     ],
     target_agent: target_agent || null,
     ...(replay_actions ? { replay_actions } : {}),
+    ...(prepared_actions ? { prepared_actions } : {}),
     // Treat 0 (or negative) as unlimited.
     max_steps: (typeof config.agent?.max_iterations === 'number' && config.agent.max_iterations <= 0)
       ? null

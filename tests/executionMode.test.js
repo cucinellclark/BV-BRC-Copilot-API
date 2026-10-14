@@ -17,6 +17,7 @@ const http = require('http');
 const mockGetChatSession = jest.fn();
 const mockSetSessionExecutionMode = jest.fn();
 const mockRegisterChatSession = jest.fn();
+const mockMarkExecutionCardAnswered = jest.fn();
 
 jest.mock('../services/dbUtils', () => {
     const actual = jest.requireActual('../services/dbUtils');
@@ -27,6 +28,7 @@ jest.mock('../services/dbUtils', () => {
         getSessionIdForActiveJob: jest.fn().mockResolvedValue(null),
         setSessionExecutionMode: mockSetSessionExecutionMode,
         registerChatSession: mockRegisterChatSession,
+        markExecutionCardAnswered: mockMarkExecutionCardAnswered,
         getModelData: jest.fn(),
         getSessionMessages: jest.fn(),
         getSessionTitle: jest.fn(),
@@ -145,6 +147,7 @@ beforeEach(() => {
     jest.clearAllMocks();
     mockRegisterChatSession.mockResolvedValue({ created: false });
     mockSetSessionExecutionMode.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
+    mockMarkExecutionCardAnswered.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
 });
 
 const BASE = '/copilot-api/chatbrc';
@@ -315,11 +318,17 @@ describe('POST /copilot-agent replay_actions', () => {
         tool: 'submit_gowe_job',
         summary: 'Taxonomic Classification → tc_run',
     };
-    const sessionWithCard = (actions) => ({
+    const BIN_ACTION = {
+        tool: 'submit_gowe_job',
+        summary: 'Metagenomic Binning → bin_run',
+        arguments: { workflow_id: 'wf_bin', inputs: { srr_ids: ['ERR1'], output_path: 'bin_run' } },
+    };
+    const sessionWithCard = (actions, answered) => ({
         session_id: 's1',
         messages: [
             { role: 'user', content: 'run taxonomic classification' },
-            { role: 'assistant', content: 'Ready to submit', card: { card_type: 'execution_blocked', card_payload: { agent: 'data', blocked_actions: actions } } },
+            { message_id: 'm_card', role: 'assistant', content: 'Ready to submit',
+              card: { card_type: 'execution_blocked', card_payload: { agent: 'data', blocked_actions: actions, ...(answered ? { answered } : {}) } } },
         ],
     });
     const send = (extra) => request('POST', `${BASE}/copilot-agent`, {
@@ -334,6 +343,52 @@ describe('POST /copilot-agent replay_actions', () => {
         const jobData = mockRunChatTurn.mock.calls[0][2];
         expect(jobData.target_agent).toBe('service');
         expect(jobData.replay_actions).toEqual([ACTION]);
+        expect(jobData.prepared_actions).toBeNull();
+    });
+
+    test('the first accepted replay records the answer on the stored card', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION, BIN_ACTION]));
+        const res = await send({ replay_actions: [ACTION, BIN_ACTION] });
+        expect(res.status).toBe(200);
+        expect(mockMarkExecutionCardAnswered).toHaveBeenCalledWith('s1', 'm_card', { answer: 'yes', count: 2 });
+        // Recorded before the turn ran.
+        expect(mockMarkExecutionCardAnswered.mock.invocationCallOrder[0])
+            .toBeLessThan(mockRunChatTurn.mock.invocationCallOrder[0]);
+    });
+
+    test('a subset of one card is accepted', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION, BIN_ACTION]));
+        const res = await send({ replay_actions: [BIN_ACTION] });
+        expect(res.status).toBe(200);
+        expect(mockRunChatTurn.mock.calls[0][2].replay_actions).toEqual([BIN_ACTION]);
+    });
+
+    test('a second Yes on an answered card is refused', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION], { answer: 'yes', at: '2026-10-14T00:00:00Z' }));
+        const res = await send({ replay_actions: [ACTION] });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_ALREADY_RUN');
+        expect(mockRunChatTurn).not.toHaveBeenCalled();
+        expect(mockMarkExecutionCardAnswered).not.toHaveBeenCalled();
+    });
+
+    test('Yes after No is refused too (one answer per question)', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION], { answer: 'no' }));
+        const res = await send({ replay_actions: [ACTION] });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_ALREADY_RUN');
+    });
+
+    test('the newest matching card is the one checked', async () => {
+        // The same set was prepared twice; the older question was answered.
+        const older = { message_id: 'm_old', role: 'assistant', content: 'Ready',
+            card: { card_type: 'execution_blocked', card_payload: { blocked_actions: [STORED_ACTION], answered: { answer: 'no' } } } };
+        const newer = { message_id: 'm_new', role: 'assistant', content: 'Ready again',
+            card: { card_type: 'execution_blocked', card_payload: { blocked_actions: [STORED_ACTION] } } };
+        mockGetChatSession.mockResolvedValue({ session_id: 's1', messages: [older, newer] });
+        const res = await send({ replay_actions: [ACTION] });
+        expect(res.status).toBe(200);
+        expect(mockMarkExecutionCardAnswered).toHaveBeenCalledWith('s1', 'm_new', { answer: 'yes', count: 1 });
     });
 
     test('rejects actions that do not match a stored card', async () => {
@@ -374,6 +429,99 @@ describe('POST /copilot-agent replay_actions', () => {
         const jobData = mockRunChatTurn.mock.calls[0][2];
         expect(jobData.target_agent).toBe('data');
         expect(jobData.replay_actions).toBeNull();
+    });
+
+    // --- "Other": the set goes back to the service agent to be revised ---
+
+    const revise = (extra) => request('POST', `${BASE}/copilot-agent`, {
+        query: 'drop the binning job', model: 'm', session_id: 's1', stream: true, ...extra,
+    });
+
+    test('prepared_actions are forwarded, pinned to service, without execute_once', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION, BIN_ACTION]));
+        const res = await revise({ prepared_actions: [ACTION, BIN_ACTION] });
+        expect(res.status).toBe(200);
+        const jobData = mockRunChatTurn.mock.calls[0][2];
+        expect(jobData.target_agent).toBe('service');
+        expect(jobData.execute_once).toBe(false);
+        expect(jobData.replay_actions).toBeNull();
+        expect(jobData.prepared_actions).toEqual([ACTION, BIN_ACTION]);
+        expect(mockMarkExecutionCardAnswered).toHaveBeenCalledWith('s1', 'm_card', { answer: 'other', text: 'drop the binning job' });
+    });
+
+    test('revising after No is allowed', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION], { answer: 'no' }));
+        const res = await revise({ prepared_actions: [ACTION] });
+        expect(res.status).toBe(200);
+        expect(mockMarkExecutionCardAnswered).toHaveBeenCalledWith('s1', 'm_card', { answer: 'other', text: 'drop the binning job' });
+    });
+
+    test('revising after Yes is refused', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION], { answer: 'yes' }));
+        const res = await revise({ prepared_actions: [ACTION] });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_ALREADY_RUN');
+        expect(mockRunChatTurn).not.toHaveBeenCalled();
+    });
+
+    test('prepared_actions must match a stored card', async () => {
+        mockGetChatSession.mockResolvedValue(sessionWithCard([STORED_ACTION]));
+        const res = await revise({ prepared_actions: [BIN_ACTION] });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_NOT_FOUND');
+    });
+
+    test('prepared_actions with execute_once is rejected', async () => {
+        const res = await revise({ prepared_actions: [ACTION], execute_once: true });
+        expect(res.status).toBe(400);
+    });
+
+    test('replay_actions and prepared_actions together are rejected', async () => {
+        const res = await send({ replay_actions: [ACTION], prepared_actions: [ACTION] });
+        expect(res.status).toBe(400);
+    });
+});
+
+describe('POST /execution-question/answer (No)', () => {
+    const ACTION = {
+        tool: 'submit_gowe_job', summary: 'TC → tc_run',
+        arguments: { workflow_id: 'wf_tc', inputs: { output_path: 'tc_run' } },
+    };
+    const session = (answered) => ({
+        session_id: 's1',
+        messages: [{ message_id: 'm_card', role: 'assistant', content: 'Ready',
+            card: { card_type: 'execution_blocked', card_payload: { blocked_actions: [ACTION], ...(answered ? { answered } : {}) } } }],
+    });
+    const answerNo = (body) => request('POST', `${BASE}/execution-question/answer`,
+        { session_id: 's1', actions: [ACTION], answer: 'no', ...body });
+
+    test('records no on the stored card without running a turn', async () => {
+        mockGetChatSession.mockResolvedValue(session());
+        const res = await answerNo();
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ session_id: 's1', message_id: 'm_card', answer: 'no' });
+        expect(mockMarkExecutionCardAnswered).toHaveBeenCalledWith('s1', 'm_card', { answer: 'no' });
+        expect(mockRunChatTurn).not.toHaveBeenCalled();
+    });
+
+    test('a second answer is refused', async () => {
+        mockGetChatSession.mockResolvedValue(session({ answer: 'no' }));
+        const res = await answerNo();
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_ALREADY_RUN');
+        expect(mockMarkExecutionCardAnswered).not.toHaveBeenCalled();
+    });
+
+    test('only no is accepted here', async () => {
+        const res = await answerNo({ answer: 'yes' });
+        expect(res.status).toBe(400);
+    });
+
+    test('unknown actions are refused', async () => {
+        mockGetChatSession.mockResolvedValue(session());
+        const res = await answerNo({ actions: [{ ...ACTION, arguments: { workflow_id: 'other', inputs: {} } }] });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('REPLAY_NOT_FOUND');
     });
 });
 
@@ -499,6 +647,16 @@ describe("mapOrchestratorEvent('execution_blocked')", () => {
         });
         expect(payload.blocked_actions).toEqual(blocked);
         expect(state.card).toBe(payload.card);
+    });
+
+    test('keeps plan_context from a delegated plan step on the card', () => {
+        const { mapOrchestratorEvent } = require('../services/orchestratorClient');
+        const state = {};
+        const planContext = { plan_id: 'p1', step_id: 's2', step_index: 1 };
+        mapOrchestratorEvent('execution_blocked', { agent: 'service', blocked_actions: [], plan_context: planContext }, {}, state);
+        expect(state.card.card_payload.plan_context).toEqual(planContext);
+        const sse = mockEmitSSE.mock.calls.find(c => c[1] === 'execution_blocked');
+        expect(sse[2].plan_context).toEqual(planContext);
     });
 
     test('tolerates a missing blocked_actions list', () => {

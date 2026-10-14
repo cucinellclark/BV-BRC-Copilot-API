@@ -1039,6 +1039,39 @@ async function updatePlanInSession(sessionId, planId, updatedPlan) {
 }
 
 /**
+ * Record the answer to an execution_blocked card's question (D4: one answer
+ * per question).  Written on the assistant message that carries the card,
+ * so a reload renders it as answered and a second "Yes" is refused.
+ * @param {string} sessionId
+ * @param {string} messageId - message_id of the assistant message with the card
+ * @param {{answer: 'yes'|'no'|'other', at?: string, text?: string, count?: number}} answered
+ */
+async function markExecutionCardAnswered(sessionId, messageId, answered) {
+  try {
+    if (!sessionId || !messageId || !answered || !answered.answer) {
+      throw new LLMServiceError('sessionId, messageId and answered.answer are required');
+    }
+    const db = await connectToDatabase();
+    const chatCollection = db.collection('chat_sessions');
+    return await chatCollection.updateOne(
+      { session_id: sessionId, 'messages.message_id': messageId },
+      {
+        $set: {
+          'messages.$[elem].card.card_payload.answered': { at: new Date().toISOString(), ...answered },
+          last_modified: new Date()
+        }
+      },
+      { arrayFilters: [{ 'elem.message_id': messageId, 'elem.card.card_type': 'execution_blocked' }] }
+    );
+  } catch (error) {
+    if (error instanceof LLMServiceError) {
+      throw error;
+    }
+    throw new LLMServiceError('Failed to record the card answer', error);
+  }
+}
+
+/**
  * Set the active_job_id on a chat session (turn started).
  * @param {string} sessionId
  * @param {string} jobId - UUID of the in-request turn
@@ -1158,6 +1191,7 @@ module.exports = {
   getSessionStorageSize,
   getUserWorkflowIds,
   updatePlanInSession,
+  markExecutionCardAnswered,
   setSessionActiveJob,
   clearSessionActiveJob,
   getSessionOwnerIds,

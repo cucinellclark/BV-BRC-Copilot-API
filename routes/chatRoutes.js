@@ -26,7 +26,8 @@ const {
   getSessionFilesPaginated,
   getSessionStorageSize,
   getUserWorkflowIds,
-  getSessionIdForActiveJob
+  getSessionIdForActiveJob,
+  markExecutionCardAnswered
 } = require('../services/dbUtils');
 const { requireAuth, resolveUserId } = require('../middleware/auth');
 const { requireSessionOwner, canAccessSession } = require('../middleware/sessionOwnership');
@@ -36,7 +37,7 @@ const { createLogger } = require('../services/logger');
 // ragQueueService.js deleted — RAG routes removed
 const { writeSseEvent } = require('../services/sseUtils');
 const { runChatTurn, setCancelFlag, releaseSessionTurnForJob } = require('../services/chatRunner');
-const { validateReplayActions, matchesStoredCard } = require('../services/replayActions');
+const { validateReplayActions, findStoredCard, cardAnswer } = require('../services/replayActions');
 const config = require('../config.json');
 const router = express.Router();
 
@@ -200,6 +201,7 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
             execute_once = false,
             target_agent = null,
             replay_actions = null,
+            prepared_actions = null,
             workflow_context = null
         } = req.body;
 
@@ -236,32 +238,65 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
             if (!(await requireExecuteMode(res, session_id, logger))) return;
         }
 
-        // "Submit this job": the card sends back the refused calls so the
-        // service agent can run them verbatim.  Only with execute_once, and
-        // only actions that match a card stored in this session.
+        // "Yes" on the confirmation question (execute_once + replay_actions):
+        // the card sends back the refused calls so the service agent can run
+        // them verbatim.  "Other" (prepared_actions, no execute_once): the
+        // same set goes back to the service agent to be revised under the
+        // plan gate; nothing is submitted.  Either way only actions that
+        // match a card stored in this session are forwarded, and a question
+        // takes one answer: a card already answered "yes" is refused.
+        if (replay_actions != null && prepared_actions != null) {
+            return res.status(400).json({ message: 'replay_actions and prepared_actions are exclusive' });
+        }
         let validatedReplayActions = null;
+        let validatedPreparedActions = null;
         let effectiveTargetAgent = target_agent;
-        if (replay_actions !== null && replay_actions !== undefined) {
-            if (execute_once !== true) {
+        const isReplay = replay_actions !== null && replay_actions !== undefined;
+        const isRevision = prepared_actions !== null && prepared_actions !== undefined;
+        if (isReplay || isRevision) {
+            if (isReplay && execute_once !== true) {
                 return res.status(400).json({ message: 'replay_actions requires execute_once' });
             }
-            const checked = validateReplayActions(replay_actions);
+            if (isRevision && execute_once === true) {
+                return res.status(400).json({ message: 'prepared_actions cannot be combined with execute_once' });
+            }
+            const checked = validateReplayActions(isReplay ? replay_actions : prepared_actions);
             if (checked.error) {
                 return res.status(400).json({ message: checked.error });
             }
             if (session_id && save_chat) {
                 const session = await getChatSession(session_id);
-                if (!matchesStoredCard(checked.actions, session && session.messages)) {
-                    logger.warn('replay_actions do not match a stored execution_blocked card', { session_id });
+                const cardMessage = findStoredCard(checked.actions, session && session.messages);
+                if (!cardMessage) {
+                    logger.warn('actions do not match a stored execution_blocked card', { session_id, revision: isRevision });
                     return res.status(409).json({
                         code: 'REPLAY_NOT_FOUND',
                         message: 'That prepared job is no longer in this chat. Ask the assistant to prepare it again.'
                     });
                 }
+                const answered = cardAnswer(cardMessage);
+                if (answered && (answered.answer === 'yes' || isReplay)) {
+                    logger.warn('execution question already answered', { session_id, answer: answered.answer, revision: isRevision });
+                    return res.status(409).json({
+                        code: 'REPLAY_ALREADY_RUN',
+                        message: answered.answer === 'yes'
+                            ? 'Those jobs were already submitted from this question. Check the Jobs list, or ask the assistant to prepare them again.'
+                            : 'That question was already answered. Ask the assistant to prepare the jobs again.'
+                    });
+                }
+                // Record the answer before the turn runs, so a second click
+                // during the turn is refused too.
+                await markExecutionCardAnswered(session_id, cardMessage.message_id, isReplay
+                    ? { answer: 'yes', count: checked.actions.length }
+                    : { answer: 'other', text: String(query || '').slice(0, 500) });
             }
-            validatedReplayActions = checked.actions;
+            if (isReplay) {
+                validatedReplayActions = checked.actions;
+            } else {
+                validatedPreparedActions = checked.actions;
+            }
             // The card pins the agent that was blocked, which can be data or
-            // planning; only the service agent knows how to replay.
+            // planning; only the service agent knows how to replay or revise.
             effectiveTargetAgent = 'service';
         }
 
@@ -466,6 +501,7 @@ router.post('/copilot-agent', requireAuth, requireSessionOwner, async (req, res)
                 execute_once: execute_once === true,
                 target_agent: effectiveTargetAgent,
                 replay_actions: validatedReplayActions,
+                prepared_actions: validatedPreparedActions,
                 workflow_context,
             });
 
@@ -1281,6 +1317,44 @@ router.post('/update-session-title', requireAuth, requireSessionOwner, async (re
  * Persist the Plan/Execute toggle for a chat session.
  * Body: { session_id, execution_mode: 'plan' | 'execute' }
  */
+// "No" on an execution_blocked card's question (D4).  Nothing runs and no
+// LLM turn is spent; the answer is recorded on the stored card so a reload
+// shows it as answered and a later "Yes" is refused.  The actions identify
+// the card the same way a replay does.
+router.post('/execution-question/answer', requireAuth, requireSessionOwner, async (req, res) => {
+    const logger = createLogger('ExecutionQuestion', req.body.session_id);
+    try {
+        const { session_id, actions, answer } = req.body;
+        const resolved = resolveUserId(req, req.body.user_id);
+        if (resolved.error) return res.status(resolved.status).json({ message: resolved.error });
+        if (!session_id) {
+            return res.status(400).json({ message: 'session_id is required' });
+        }
+        if (answer !== 'no') {
+            return res.status(400).json({ message: "answer must be 'no' (Yes and Other go through /copilot-agent)" });
+        }
+        const checked = validateReplayActions(actions);
+        if (checked.error) {
+            return res.status(400).json({ message: checked.error });
+        }
+        const session = await getChatSession(session_id);
+        const cardMessage = findStoredCard(checked.actions, session && session.messages);
+        if (!cardMessage) {
+            return res.status(409).json({ code: 'REPLAY_NOT_FOUND', message: 'That prepared job is no longer in this chat.' });
+        }
+        const answered = cardAnswer(cardMessage);
+        if (answered) {
+            return res.status(409).json({ code: 'REPLAY_ALREADY_RUN', message: 'That question was already answered.' });
+        }
+        await markExecutionCardAnswered(session_id, cardMessage.message_id, { answer: 'no' });
+        logger.info('Execution question answered no', { message_id: cardMessage.message_id, count: checked.actions.length });
+        res.status(200).json({ session_id, message_id: cardMessage.message_id, answer: 'no' });
+    } catch (error) {
+        logger.error('Failed to record execution question answer', { error: error.message });
+        res.status(500).json({ message: 'Failed to record the answer', error: error.message });
+    }
+});
+
 router.post('/update-session-execution-mode', requireAuth, requireSessionOwner, async (req, res) => {
     try {
         const { session_id, execution_mode } = req.body;
