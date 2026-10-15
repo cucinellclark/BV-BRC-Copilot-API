@@ -232,6 +232,8 @@ function mapOrchestratorEvent(eventType, eventData, responseStream, state) {
       state.resultForUi = eventData.result_for_ui || {};
       state.decision = eventData.decision || 'agent';
       state.elapsedMs = eventData.elapsed_ms || 0;
+      // LLM calls / tokens this turn made (orchestrator shared.usage)
+      state.usage = eventData.usage || null;
       // Don't emit 'done' here — we do that after persisting messages
       break;
 
@@ -1207,6 +1209,7 @@ async function executeOrchestratorLoop(opts) {
     model: model || null,
     source_tool: state.agentsUsed?.[0] || null,
     ui_source_tool: state.agentsUsed?.[0] || null,
+    ...(state.usage ? { usage: state.usage } : {}),
     agent_metadata: {
       orchestrator: true,
       agents_used: state.agentsUsed,

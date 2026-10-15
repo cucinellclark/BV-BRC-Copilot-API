@@ -143,3 +143,14 @@ describe('mapOrchestratorEvent plan steps', () => {
         expect(mockEmitSSE.mock.calls[0][2].step_outputs).toEqual({ groups: [GROUP] });
     });
 });
+
+describe('LLM usage on orchestrator_done', () => {
+    test('the turn usage is kept on state for the assistant message', () => {
+        const state = {};
+        const usage = { llm_calls: 3, prompt_tokens: 1200, completion_tokens: 90, by_site: { router: { calls: 1 } } };
+        mapOrchestratorEvent('orchestrator_done', { response_text: 'x', usage }, {}, state);
+        expect(state.usage).toEqual(usage);
+        mapOrchestratorEvent('orchestrator_done', { response_text: 'x' }, {}, state);
+        expect(state.usage).toBeNull();
+    });
+});
