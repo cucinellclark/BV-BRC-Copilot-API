@@ -43,6 +43,7 @@ jest.mock('../services/chatRunner', () => ({
 // Mock dbUtils BEFORE requiring chatRoutes (which imports at load time)
 // ---------------------------------------------------------------------------
 jest.mock('../services/dbUtils', () => ({
+    isSessionArchived: jest.fn().mockResolvedValue(false),
     getModelData: jest.fn(),
     getSessionOwnerIds: jest.fn().mockResolvedValue([]),
     getSessionIdForActiveJob: jest.fn().mockResolvedValue(null),

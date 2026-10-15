@@ -21,6 +21,7 @@ jest.mock('../services/dbUtils', () => {
     const actual = jest.requireActual('../services/dbUtils');
     return {
         ...actual,
+    isSessionArchived: jest.fn().mockResolvedValue(false),
         getActiveModels: mockGetActiveModels,
         getActiveRagDatabases: mockGetActiveRagDatabases,
         getSessionOwnerIds: jest.fn().mockResolvedValue([]),

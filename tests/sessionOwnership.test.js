@@ -28,6 +28,7 @@ jest.mock('../services/dbUtils', () => {
     const actual = jest.requireActual('../services/dbUtils');
     return {
         ...actual,
+    isSessionArchived: jest.fn().mockResolvedValue(false),
         getSessionOwnerIds: mockGetSessionOwnerIds,
         getSessionIdForActiveJob: mockGetSessionIdForActiveJob,
         updatePlanInSession: mockUpdatePlanInSession,
@@ -303,6 +304,19 @@ describe('POST /job/:jobId/abort', () => {
     test('a job that is not an active turn still accepts Stop (no-op flag)', async () => {
         const r = await request('POST', `${BASE}/job/j-unknown/abort`, {}, BOB);
         expect(r.status).toBe(202);
+    });
+});
+
+describe('a deleted (archived) chat no longer exists for its owner', () => {
+    test('session routes answer 404 SESSION_ARCHIVED', async () => {
+        const dbUtils = require('../services/dbUtils');
+        mockGetSessionOwnerIds.mockResolvedValueOnce([ALICE]);
+        dbUtils.isSessionArchived.mockResolvedValueOnce(true);
+        const r = await request('POST', `${BASE}/copilot-agent`,
+            { query: 'hi', model: 'm', session_id: 's-alice', save_chat: false, stream: true });
+        expect(r.status).toBe(404);
+        expect(r.body.code).toBe('SESSION_ARCHIVED');
+        expect(mockRunChatTurn).not.toHaveBeenCalled();
     });
 });
 

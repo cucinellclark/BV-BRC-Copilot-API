@@ -283,7 +283,7 @@ async function getUserSessions(userId, limit = 20, offset = 0) {
 
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    const query = { user_id: userId };
+    const query = { user_id: userId, archived: { $ne: true } };
 
     // Total number of sessions for the user (without pagination)
     const total = await chatCollection.countDocuments(query);
@@ -384,7 +384,14 @@ async function deleteSession(sessionId, userId) {
   try {
     const db = await connectToDatabase();
     const chatCollection = db.collection('chat_sessions');
-    return await chatCollection.deleteOne({ session_id: sessionId, user_id: userId });
+    // Delete archives (2026-10-15): the chat disappears for the user (list,
+    // direct access -> 404 via requireSessionOwner) but is kept for the team.
+    // Same return shape as deleteOne, so callers keep checking deletedCount.
+    const result = await chatCollection.updateMany(
+      { session_id: sessionId, user_id: userId, archived: { $ne: true } },
+      { $set: { archived: true, archived_at: new Date() }, $unset: { active_job_id: '', active_job_started_at: '' } }
+    );
+    return { deletedCount: result.modifiedCount || 0 };
   } catch (error) {
     throw new LLMServiceError('Failed to delete session', error);
   }
@@ -1134,6 +1141,21 @@ async function getSessionOwnerIds(sessionId) {
 }
 
 /**
+ * True when the user deleted (archived) this chat.
+ * @param {string} sessionId
+ * @returns {boolean}
+ */
+async function isSessionArchived(sessionId) {
+  try {
+    if (!sessionId) return false;
+    const db = await connectToDatabase();
+    return (await db.collection('chat_sessions').countDocuments({ session_id: sessionId, archived: true }, { limit: 1 })) > 0;
+  } catch (error) {
+    throw new LLMServiceError('Failed to check whether session is archived', error);
+  }
+}
+
+/**
  * Session whose in-flight turn is this job (active_job_id), if any.
  * @param {string} jobId
  * @returns {string|null} session_id
@@ -1162,6 +1184,7 @@ module.exports = {
   searchRagChunkReferences,
   getSessionTitle,
   getUserSessions,
+  isSessionArchived,
   updateSessionTitle,
   setSessionExecutionMode,
   isValidExecutionMode,

@@ -1228,10 +1228,14 @@ async function executeOrchestratorLoop(opts) {
   const assistantContentEmpty = !assistantMessage.content || String(assistantMessage.content).trim() === '';
   const assistantToolName = String(assistantMessage.ui_source_tool || assistantMessage.source_tool || '');
 
+  // A message carrying the questions' card is always kept: after a reload
+  // the chat renders the unanswered questions from it (2026-10-15; before,
+  // the chips existed only while the answer streamed).
   const isPlanningAskQuestions =
     workflow_context &&
     workflow_context.plan_action === 'ask_questions' &&
-    assistantContentEmpty;
+    assistantContentEmpty &&
+    !state.card;
 
   const isPlanningAnswerQuestions =
     workflow_context &&
@@ -1240,6 +1244,7 @@ async function executeOrchestratorLoop(opts) {
 
   const isAskClarificationTool =
     assistantContentEmpty &&
+    !state.card &&
     (assistantToolName.indexOf('ask_clarification') !== -1 || assistantToolName.indexOf('bvbrc_server.ask_clarification') !== -1);
 
   // Plan step execution actions (execute_next) produce empty response_text

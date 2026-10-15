@@ -50,9 +50,19 @@ function requireSessionOwner(req, res, next) {
     return res.status(400).json({ message: 'session_id must be a string' });
   }
   canAccessSession(sessionId, req.user).then(
-    (ok) => {
-      if (ok) return next();
-      return res.status(403).json({ message: 'Not authorized to access this session' });
+    async (ok) => {
+      if (!ok) return res.status(403).json({ message: 'Not authorized to access this session' });
+      // A deleted chat is archived, not removed: to its owner it no longer
+      // exists (404), so it can't be reopened, written to or listed.
+      try {
+        if (sessionId && await dbUtils.isSessionArchived(sessionId)) {
+          return res.status(404).json({ code: 'SESSION_ARCHIVED', message: 'This chat was deleted.' });
+        }
+      } catch (err) {
+        console.error('Session archive check failed:', err.message || err);
+        return res.status(500).json({ message: 'Failed to verify session ownership' });
+      }
+      return next();
     },
     (err) => {
       console.error('Session ownership check failed:', err.message || err);
