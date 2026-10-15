@@ -26,7 +26,7 @@ const {
   setSessionActiveJob,
   clearSessionActiveJob,
 } = require('./dbUtils');
-const { acquireSessionTurn, releaseSessionTurn } = require('./sessionTurnLock');
+const { acquireSessionTurn, releaseSessionTurn, getSessionTurnJob } = require('./sessionTurnLock');
 
 const logger = createLogger('ChatRunner');
 
@@ -469,7 +469,9 @@ async function runChatTurn(req, res, jobData) {
   });
 
   // --- shouldCancel polls Redis ---
-  let cancelledFlag = false;
+  // Checked once right away: Stop may have come in by session before the
+  // browser knew this turn's job id (POST /session/:id/stop).
+  let cancelledFlag = await isCancelled(jobId);
   const cancelPollInterval = setInterval(async () => {
     if (await isCancelled(jobId)) {
       cancelledFlag = true;
@@ -618,9 +620,23 @@ async function releaseSessionTurnForJob(sessionId, jobId) {
   await releaseSessionTurn(redis, sessionId, jobId);
 }
 
+/**
+ * Stop whatever turn holds this session (Stop pressed before the browser saw
+ * the turn's job id).  Sets that turn's cancel flag and frees the session.
+ * Returns the job id, or null when no turn holds the session.
+ */
+async function stopSessionTurn(sessionId) {
+  const jobId = await getSessionTurnJob(redis, sessionId);
+  if (!jobId) return null;
+  await setCancelFlag(jobId);
+  await releaseSessionTurn(redis, sessionId, jobId);
+  return jobId;
+}
+
 module.exports = {
   runChatTurn,
   releaseSessionTurnForJob,
+  stopSessionTurn,
   setCancelFlag,
   isCancelled,
   clearCancelFlag,

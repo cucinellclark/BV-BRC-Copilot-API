@@ -186,8 +186,9 @@ async function checkAndHandleWorkflow(watch, collection) {
 
   // ----- Terminal state reached -----
   // Atomically mark the watch as completed.  If another path (e.g. the
-  // /workflow-complete webhook) already marked it, the update matches
-  // zero documents and we skip writing a duplicate completion message.
+  // other gateway's poller) already marked it, the update matches zero
+  // documents and we skip writing a duplicate completion message.  The
+  // user's token was only needed to poll GoWe, so it goes now.
   const markResult = await collection.updateOne(
     { _id: watch._id, status: 'active' },
     {
@@ -195,7 +196,8 @@ async function checkAndHandleWorkflow(watch, collection) {
         status: state === 'FAILED' ? 'failed' : 'completed',
         gowe_state: state,
         completed_at: new Date()
-      }
+      },
+      $unset: { auth_token: '' }
     }
   );
   if (markResult.matchedCount === 0) {
@@ -592,6 +594,7 @@ module.exports = {
   registerWorkflowWatch,
   workflowMonitorQueue,
   // Exported for tests
+  checkAndHandleWorkflow,
   buildCompletionMessage,
   resolveOutputPaths,
   cleanStderr,

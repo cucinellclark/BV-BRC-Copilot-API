@@ -16,6 +16,8 @@ async function initializeServer() {
   try {
     await connectToDatabase();
     console.log('[Startup] MongoDB connection pool initialized successfully');
+    // Indexes, stale busy flags, finished watches' tokens; repeats every 5 min.
+    require('../services/startupMaintenance').startMaintenance();
   } catch (error) {
     console.error('[Startup] Failed to connect to MongoDB:', error.message);
     console.warn('[Startup] Continuing without MongoDB - database features will be unavailable');

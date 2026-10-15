@@ -92,10 +92,12 @@ jest.mock('../config.json', () => ({}), { virtual: true });
 const mockRunChatTurn = jest.fn(async (req, res) => { res.status(200).json({ ran: true }); });
 const mockSetCancelFlag = jest.fn();
 const mockReleaseSessionTurn = jest.fn();
+const mockStopSessionTurn = jest.fn();
 jest.mock('../services/chatRunner', () => ({
     runChatTurn: mockRunChatTurn,
     setCancelFlag: mockSetCancelFlag,
     releaseSessionTurnForJob: mockReleaseSessionTurn,
+    stopSessionTurn: mockStopSessionTurn,
 }));
 
 jest.mock('../services/sessionStreamRegistry', () => ({
@@ -301,6 +303,32 @@ describe('POST /job/:jobId/abort', () => {
     test('a job that is not an active turn still accepts Stop (no-op flag)', async () => {
         const r = await request('POST', `${BASE}/job/j-unknown/abort`, {}, BOB);
         expect(r.status).toBe(202);
+    });
+});
+
+describe('POST /session/:sessionId/stop (Stop before the started event)', () => {
+    test('owner stops the turn holding the chat', async () => {
+        mockGetSessionOwnerIds.mockResolvedValueOnce([ALICE]);
+        mockStopSessionTurn.mockResolvedValueOnce('j-early');
+        const r = await request('POST', `${BASE}/session/s-alice/stop`, {});
+        expect(r.status).toBe(202);
+        expect(r.body.job_id).toBe('j-early');
+        expect(mockStopSessionTurn).toHaveBeenCalledWith('s-alice');
+    });
+
+    test('another user cannot stop it', async () => {
+        mockGetSessionOwnerIds.mockResolvedValueOnce([ALICE]);
+        const r = await request('POST', `${BASE}/session/s-alice/stop`, {}, BOB);
+        expect(r.status).toBe(403);
+        expect(mockStopSessionTurn).not.toHaveBeenCalled();
+    });
+
+    test('no turn holds the chat yet -> 404 NO_TURN (the browser retries once)', async () => {
+        mockGetSessionOwnerIds.mockResolvedValueOnce([ALICE]);
+        mockStopSessionTurn.mockResolvedValueOnce(null);
+        const r = await request('POST', `${BASE}/session/s-alice/stop`, {});
+        expect(r.status).toBe(404);
+        expect(r.body.code).toBe('NO_TURN');
     });
 });
 

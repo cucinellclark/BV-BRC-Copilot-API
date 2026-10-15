@@ -5,7 +5,7 @@
  * click became five concurrent turns that submitted five identical jobs.
  */
 
-const { acquireSessionTurn, releaseSessionTurn, LOCK_KEY_PREFIX } = require('../services/sessionTurnLock');
+const { acquireSessionTurn, releaseSessionTurn, getSessionTurnJob, LOCK_KEY_PREFIX } = require('../services/sessionTurnLock');
 
 // Just enough Redis: SET key val PX ms NX, and the compare-and-delete script.
 function fakeRedis() {
@@ -19,6 +19,9 @@ function fakeRedis() {
             store.set(key, value);
             return 'OK';
         },
+        async get(key) {
+            return store.has(key) ? store.get(key) : null;
+        },
         async eval(script, numKeys, key, value) {
             if (store.get(key) === value) { store.delete(key); return 1; }
             return 0;
@@ -27,6 +30,16 @@ function fakeRedis() {
 }
 
 describe('session turn lock', () => {
+    test('the holder is known from the moment the turn claims the chat', async () => {
+        const redis = fakeRedis();
+        expect(await getSessionTurnJob(redis, 's1')).toBeNull();
+        await acquireSessionTurn(redis, 's1', 'job-a', 1000);
+        expect(await getSessionTurnJob(redis, 's1')).toBe('job-a');
+        await releaseSessionTurn(redis, 's1', 'job-a');
+        expect(await getSessionTurnJob(redis, 's1')).toBeNull();
+        expect(await getSessionTurnJob({ get: async () => { throw new Error('down'); } }, 's1')).toBeNull();
+    });
+
     test('second turn in the same session is refused until the first releases', async () => {
         const redis = fakeRedis();
         expect(await acquireSessionTurn(redis, 's1', 'job-a', 1000)).toBe(true);

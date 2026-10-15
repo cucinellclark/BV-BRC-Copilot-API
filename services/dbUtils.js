@@ -1083,7 +1083,9 @@ async function setSessionActiveJob(sessionId, jobId) {
     const chatCollection = db.collection('chat_sessions');
     return await chatCollection.updateOne(
       { session_id: sessionId },
-      { $set: { active_job_id: jobId, last_modified: new Date() } }
+      // active_job_started_at lets startupMaintenance clear a flag a crashed
+      // gateway left behind.
+      { $set: { active_job_id: jobId, active_job_started_at: new Date(), last_modified: new Date() } }
     );
   } catch (error) {
     // Best-effort — don't crash the turn if Mongo is slow
@@ -1106,7 +1108,7 @@ async function clearSessionActiveJob(sessionId, jobId) {
     const chatCollection = db.collection('chat_sessions');
     return await chatCollection.updateOne(
       { session_id: sessionId, active_job_id: jobId },
-      { $unset: { active_job_id: '' }, $set: { last_modified: new Date() } }
+      { $unset: { active_job_id: '', active_job_started_at: '' }, $set: { last_modified: new Date() } }
     );
   } catch (error) {
     console.warn('Failed to clear active_job_id', { sessionId, jobId, error: error.message });

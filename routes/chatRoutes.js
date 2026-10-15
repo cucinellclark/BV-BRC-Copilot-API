@@ -36,7 +36,7 @@ const { createLogger } = require('../services/logger');
 // queueService.js — only import what's still needed (abort route uses setCancelFlag from chatRunner instead)
 // ragQueueService.js deleted — RAG routes removed
 const { writeSseEvent } = require('../services/sseUtils');
-const { runChatTurn, setCancelFlag, releaseSessionTurnForJob } = require('../services/chatRunner');
+const { runChatTurn, setCancelFlag, releaseSessionTurnForJob, stopSessionTurn } = require('../services/chatRunner');
 const { validateReplayActions, findStoredCard, cardAnswer } = require('../services/replayActions');
 const config = require('../config.json');
 const router = express.Router();
@@ -566,6 +566,27 @@ router.post('/job/:jobId/abort', requireAuth, async (req, res) => {
             message: 'Failed to request stop',
             error: error.message
         });
+    }
+});
+
+// ========== STOP BY SESSION ==========
+// Stop pressed before the `started` event: the browser has no job id yet, so
+// /job/:id/abort cannot be called and the turn used to run to completion.
+// The session's turn lock is taken before the stream opens, so it names the
+// turn from the first moment.  404 NO_TURN when nothing holds the session
+// (the request may not have reached the gateway yet; the browser retries).
+router.post('/session/:sessionId/stop', requireAuth, requireSessionOwner, async (req, res) => {
+    const logger = createLogger('SessionStop');
+    try {
+        const jobId = await stopSessionTurn(req.params.sessionId);
+        if (!jobId) {
+            return res.status(404).json({ code: 'NO_TURN', message: 'No turn is running in this chat' });
+        }
+        logger.info('Session stop (Stop before started)', { sessionId: req.params.sessionId, jobId });
+        return res.status(202).json({ message: 'Stop requested', job_id: jobId });
+    } catch (error) {
+        logger.error('Session stop failed', { error: error.message, sessionId: req.params.sessionId });
+        return res.status(500).json({ message: 'Failed to request stop' });
     }
 });
 

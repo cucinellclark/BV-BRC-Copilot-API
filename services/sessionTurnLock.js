@@ -50,8 +50,23 @@ async function releaseSessionTurn(redis, sessionId, jobId) {
   }
 }
 
+/**
+ * The job id of the turn holding the session, or null.  The lock is taken
+ * before the SSE stream opens, so it names the turn even before the browser
+ * has seen its job id (Stop pressed before the `started` event).
+ */
+async function getSessionTurnJob(redis, sessionId) {
+  if (!sessionId) return null;
+  try {
+    return (await redis.get(lockKey(sessionId))) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 module.exports = {
   LOCK_KEY_PREFIX,
   acquireSessionTurn,
   releaseSessionTurn,
+  getSessionTurnJob,
 };
