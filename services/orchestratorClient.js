@@ -1345,9 +1345,15 @@ async function executeOrchestratorLoop(opts) {
     // Register workflow watches so the Bull queue poller monitors completion.
     // Handles both single (submission_id) and batch (submission_ids) submissions.
     if (wasAutoSubmitted && session_id) {
-      const submissionIds = (Array.isArray(rui.submission_ids) && rui.submission_ids.length > 0)
+      // A plan step's job is also announced by plan_workflow_submitted and
+      // registered below with its plan context.  Registering it here too
+      // made two watch records (concurrent upserts both inserted) and two
+      // completion messages (live, 2026-10-15).
+      const planSubIds = new Set((state.planWorkflowSubmissions || []).map(s => s.submission_id));
+      const submissionIds = ((Array.isArray(rui.submission_ids) && rui.submission_ids.length > 0)
         ? rui.submission_ids
-        : (rui.submission_id ? [rui.submission_id] : []);
+        : (rui.submission_id ? [rui.submission_id] : []))
+        .filter(subId => !planSubIds.has(subId));
       for (const subId of submissionIds) {
         registerWorkflowWatch({
           submission_id: subId,

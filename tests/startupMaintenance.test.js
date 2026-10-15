@@ -25,7 +25,9 @@ const axios = require('axios');
 const {
     clearStaleActiveJobs, purgeWatchTokens, ensureIndexes, maxTurnMs, INDEXES,
 } = require('../services/startupMaintenance');
-const { checkAndHandleWorkflow } = require('../services/workflowMonitorService');
+const { checkAndHandleWorkflow, registerWorkflowWatch } = require('../services/workflowMonitorService');
+const { connectToDatabase } = require('../services/database');
+const dbUtils = require('../services/dbUtils');
 
 // ---------------------------------------------------------------------------
 // A collection that applies the few Mongo operators these filters use.
@@ -60,9 +62,13 @@ function fakeCollection(docs) {
             hit.forEach((d) => apply(d, update));
             return { modifiedCount: hit.length };
         },
-        async updateOne(filter, update) {
+        async updateOne(filter, update, opts) {
             const hit = docs.find((d) => matches(d, filter));
-            if (hit) apply(hit, update);
+            if (hit) {
+                apply(hit, update);
+            } else if (opts && opts.upsert) {
+                docs.push({ _id: docs.length + 1, ...filter, ...(update.$setOnInsert || {}), ...(update.$set || {}) });
+            }
             return { matchedCount: hit ? 1 : 0 };
         },
         async createIndexes(specs) { this.indexes.push(...specs); },
@@ -150,5 +156,42 @@ describe('indexes', () => {
     test('an index failure is logged, not thrown', async () => {
         const bad = { createIndexes: async () => { throw new Error('no permission'); } };
         await expect(ensureIndexes(fakeDb({ chat_sessions: bad, workflow_watches: bad }))).resolves.toBeUndefined();
+    });
+});
+
+
+describe('one completion message per job (2026-10-15: a plan step\'s tree job got two)', () => {
+    const PLAN = { plan_id: 'p1', step_id: 'run_tree', step_index: 2 };
+
+    test('registering a job twice keeps one record and its plan context', async () => {
+        const watches = fakeCollection([]);
+        connectToDatabase.mockResolvedValue(fakeDb({ workflow_watches: watches }));
+        await registerWorkflowWatch({ submission_id: 'sub1', workflow_id: 'wf', session_id: 's1', auth_token: 'tok', ...PLAN });
+        await registerWorkflowWatch({ submission_id: 'sub1', workflow_id: 'wf', session_id: 's1', auth_token: 'tok' });
+        expect(watches.docs).toHaveLength(1);
+        expect(watches.docs[0]).toMatchObject({ status: 'active', ...PLAN });
+    });
+
+    test('a second registration never reopens a finished watch or puts its token back', async () => {
+        const watches = fakeCollection([{ _id: 1, submission_id: 'sub1', session_id: 's1', status: 'completed', ...PLAN }]);
+        connectToDatabase.mockResolvedValue(fakeDb({ workflow_watches: watches }));
+        await registerWorkflowWatch({ submission_id: 'sub1', session_id: 's1', auth_token: 'tok' });
+        expect(watches.docs[0].status).toBe('completed');
+        expect(watches.docs[0].auth_token).toBeUndefined();
+        expect(watches.docs[0].plan_id).toBe('p1');
+    });
+
+    test('an old duplicate watch is closed with the first and writes no second message', async () => {
+        dbUtils.addMessagesToSession.mockClear();
+        dbUtils.getChatSession.mockResolvedValue({ session_id: 's1' });
+        const watches = fakeCollection([
+            { _id: 1, submission_id: 'sub1', session_id: 's1', status: 'active', auth_token: 'tok', ...PLAN },
+            { _id: 2, submission_id: 'sub1', session_id: 's1', status: 'active', auth_token: 'tok' },
+        ]);
+        axios.get.mockResolvedValue({ data: { status: 'ok', data: { state: 'COMPLETED', inputs: {} } } });
+        for (const w of [...watches.docs]) await checkAndHandleWorkflow({ ...w }, watches);
+        expect(watches.docs.map((d) => d.status)).toEqual(['completed', 'completed']);
+        expect(watches.docs[1].duplicate_of).toBe(1);
+        expect(dbUtils.addMessagesToSession).toHaveBeenCalledTimes(1);
     });
 });

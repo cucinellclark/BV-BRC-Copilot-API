@@ -200,8 +200,24 @@ async function checkAndHandleWorkflow(watch, collection) {
       $unset: { auth_token: '' }
     }
   );
+  // Close any other watch on the same job (a duplicate registration), so it
+  // can never write a second completion message.
+  if (markResult.matchedCount > 0) {
+    await collection.updateMany(
+      { submission_id, status: 'active', _id: { $ne: watch._id } },
+      {
+        $set: {
+          status: state === 'FAILED' ? 'failed' : 'completed',
+          gowe_state: state,
+          completed_at: new Date(),
+          duplicate_of: watch._id
+        },
+        $unset: { auth_token: '' }
+      }
+    );
+  }
   if (markResult.matchedCount === 0) {
-    logger.info('Watch already handled (likely by webhook), skipping', {
+    logger.info('Watch already handled (other poller or duplicate), skipping', {
       submission_id,
       state
     });
@@ -530,26 +546,41 @@ async function registerWorkflowWatch(params) {
   const db = await connectToDatabase();
   const collection = db.collection('workflow_watches');
 
-  const doc = {
-    submission_id: params.submission_id,
+  // Safe to call twice for one job: creation fields are written only on
+  // insert (a second call must not reset a finished watch to active or put a
+  // token back), and plan fields are only ever filled in, never blanked.
+  const update = {
+    $setOnInsert: {
+      submission_id: params.submission_id,
+      session_id: params.session_id,
+      user_id: params.user_id || '',
+      auth_token: params.auth_token || null,
+      status: 'active',
+      gowe_state: 'PENDING',
+      created_at: new Date(),
+      last_checked: null,
+      completed_at: null
+    },
+    $set: {}
+  };
+  const optional = {
     workflow_id: params.workflow_id || '',
-    session_id: params.session_id,
     plan_id: params.plan_id || '',
     step_id: params.step_id || '',
-    step_index: params.step_index ?? null,
-    user_id: params.user_id || '',
-    auth_token: params.auth_token || null,
-    status: 'active',
-    gowe_state: 'PENDING',
-    created_at: new Date(),
-    last_checked: null,
-    completed_at: null
+    step_index: params.step_index ?? null
   };
+  for (const [key, value] of Object.entries(optional)) {
+    if (value !== '' && value !== null) {
+      update.$set[key] = value;
+    } else {
+      update.$setOnInsert[key] = value;
+    }
+  }
+  if (Object.keys(update.$set).length === 0) delete update.$set;
 
-  // Upsert by submission_id to avoid duplicates
   await collection.updateOne(
     { submission_id: params.submission_id },
-    { $set: doc },
+    update,
     { upsert: true }
   );
 
