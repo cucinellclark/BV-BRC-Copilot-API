@@ -2,8 +2,12 @@
 
 module.exports = {
   // Title generation prompt
-  titleGeneration: 'Provide a descriptive title based on the content ' +
-                   'of the messages. Only return the title, no other text.',
+  // The frontend sends only the user's first message (2026-10-15): titles
+  // made from the whole exchange described the answer, not the request.
+  titleGeneration: 'Write a short title (at most 8 words) for a chat that ' +
+                   'starts with the user request below. Name the task or ' +
+                   'question being asked, not an answer to it. Only return ' +
+                   'the title, with no quotes or other text.',
 
   // Message formatting templates
   formatSystem: 'System: {{content}}',
